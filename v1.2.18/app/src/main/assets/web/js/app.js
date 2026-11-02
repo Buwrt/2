@@ -86,6 +86,8 @@
         try { window.Session.forget(); } catch (e) {}
         try { if (window.Blocklist) window.Blocklist.forget(); } catch (e) {}
         window.Router.replace('/login');
+        /* 换号登录后仍要有运行期复核：重新起一轮 */
+        App.startPolicyWatch();
       };
     },
 
@@ -188,6 +190,40 @@
       A._avEvt = function () { gap = 800; schedule(); };
       window.addEventListener('online', A._avEvt);
       schedule();
+    },
+
+    /**
+     * 运行期名单复核（低频定时轮询，默认 30 秒）。
+     *
+     * 名单放远程，就是为了「加一个人、不用发版就生效」。但 load() 有
+     * 会话内缓存，一次运行只拉一次；不主动刷新的话，正在用的人得等
+     * 重启 / 换号才看到新加的 ID，谈不上「运行中生效」。
+     *
+     * 只有「明确命中名单」(v===2) 才动界面，沿用现有 lockView() 拦截页
+     * —— 会话和令牌都保留，不自动登出、不关 App。网络抖动 / 拿不到身份
+     * (v===0) 一律忽略，避免把正常用户误挡在「需要联网验证」页。
+     *
+     * 命中后停掉轮询：已经被挡住了，没必要继续打请求；用户点
+     * 「退出登录」会重新起一轮，换号登录后照样有复核。
+     */
+    startPolicyWatch: function (periodMs) {
+      var A = App;
+      if (A._policyTimer) { clearInterval(A._policyTimer); A._policyTimer = 0; }
+      periodMs = periodMs || 30000;
+      A._policyTimer = setInterval(function () {
+        if (!window.Blocklist || !window.Blocklist.recheck) return;
+        /* 未登录 / 已退出：本轮跳过，别在登录页瞎判 */
+        var u = (window.Session && window.Session.user) ? window.Session.user.id : 0;
+        if (!u) return;
+        window.Blocklist.recheck(u).then(function (v) {
+          if (v === 2) {
+            if (A._policyTimer) { clearInterval(A._policyTimer); A._policyTimer = 0; }
+            A._lockReason = '';
+            App.lockView();
+          }
+          /* v===1 未命中、v===0 无法确认：都不动界面 */
+        }).catch(function () {});
+      }, periodMs);
     },
     invalidate: function (prefix) {
       Object.keys(this.pageCache).forEach(function (k) {
@@ -1478,6 +1514,7 @@
         /* 放行了就把上次的原因清掉，别让下一轮拦截页沿用旧文案 */
         if (v < 2) App._lockReason = '';
         if (v >= 2) App.lockView();
+        else App.startPolicyWatch();     /* 放行后开始运行期名单复核 */
       }).catch(function () { boot(); });
     }
 

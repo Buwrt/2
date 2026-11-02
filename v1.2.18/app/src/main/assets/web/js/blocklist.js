@@ -265,6 +265,32 @@ window.Blocklist = (function () {
     state: function () { return verdict; },
 
     /**
+     * 运行期复核（给 app.js 的 startPolicyWatch 定时轮询用）。
+     *
+     * 为什么不直接复用 check()：check() 在连名单都拿不到时会把 verdict
+     * 写成 3（无法确认），而 render() 见到 state() >= 2 就拦 —— 运行中
+     * 一次网络抖动，正在刷页面的正常用户会突然被挡住。复核必须「只在
+     * 明确命中时才改结论」：拉不到就当这次没判，维持原状，绝不落 3。
+     *
+     * loaded 置 null 是关键：load() 开头有会话内缓存，不清掉的话轮询
+     * 拿到的永远是第一次那份旧名单，主人后加的 ID 永远看不见。
+     *
+     * @returns {Promise<number>} 2=明确命中 1=确认未命中 0=无法确认（忽略本次）
+     */
+    recheck: function (uid) {
+      var n = Number(uid) || lastUid();
+      if (!n) return Promise.resolve(0);
+      loaded = null;
+      return load().then(function (ids) {
+        if (!ids) return 0;                 /* 网络故障且无缓存：忽略本次 */
+        if (ids.indexOf(n) >= 0) {
+          hit = true; verdict = 2; return 2;
+        }
+        hit = false; verdict = 1; return 1;
+      }).catch(function () { return 0; });
+    },
+
+    /**
      * 换账号时清掉结论。
      * 只清内存里的判定，不清 UID_KEY —— 那个要在断网时当兜底用。
      */
