@@ -22,7 +22,7 @@
 按 GitHub **数字 ID** 判定，实现在 `app/src/main/assets/web/js/blocklist.js`：
 
 - 名单为远程 Gist 的 `policy.txt`，一行一个数字 ID，`#` 开头为注释
-- 判定方向 **fail-closed**：拿不到身份用本机记住的 ID，名单拉不到用本地缓存，连缓存都没有则拦
+- 判定按「没拿到」的原因分流：**404 / 空文件（`miss`）= 清缓存、放行所有人**；**网络故障 / 超时（`unknown`）= 退回本地缓存 → 内置基线**（fail-closed）；拿不到身份时用本机记住的 ID 判
 - 换账号 / 重新登录时按真实 ID 重判
 - 原历史版本**漏了 `index.html` 的 script 引入**，本次已补上 `<script src="js/blocklist.js">`，否则 `window.Blocklist` 永远不存在、功能完全不生效
 
