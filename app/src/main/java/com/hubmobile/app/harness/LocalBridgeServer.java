@@ -264,31 +264,64 @@ public final class LocalBridgeServer {
     private String overlay(String query) {
         String action = param(query, "action", "status");
         String on = param(query, "on", "");
+        boolean v = "1".equals(on) || "true".equals(on);
+        SharedPreferences sp = app.getSharedPreferences("dsh_prefs", Context.MODE_PRIVATE);
         if ("fluid".equals(action)) {
             OverlayService s = OverlayService.get();
-            boolean v = "1".equals(on) || "true".equals(on);
             if (s != null) s.setFluid(v);
-            app.getSharedPreferences("dsh_prefs", Context.MODE_PRIVATE)
-                    .edit().putBoolean("fluid", v).apply();
-        } else if ("vscreen".equals(action)) {
+            sp.edit().putBoolean("fluid", v).apply();
+            // 前端读的是 j.on（不是 j.fluid）——上一版没返回，开关点了会立刻弹回
+            return overlayState(true, true, true, v, sp.getBoolean("vscreen", false), v);
+        }
+        if ("vscreen".equals(action)) {
             OverlayService s = OverlayService.get();
-            boolean v = "1".equals(on) || "true".equals(on);
             if (s != null) s.setVscreen(v);
-            app.getSharedPreferences("dsh_prefs", Context.MODE_PRIVATE)
-                    .edit().putBoolean("vscreen", v).apply();
-        } else if ("show".equals(action)) {
+            sp.edit().putBoolean("vscreen", v).apply();
+            return overlayState(true, true, true, sp.getBoolean("fluid", false), v, v);
+        }
+        if ("show".equals(action)) {
             OverlayService.dispatch(app, "show", null);
-        } else if ("hide".equals(action)) {
+            sp.edit().putBoolean("pet_running", true).putBoolean("pet_visible", true).apply();
+            // 服务是异步拉起的：先乐观回 online，5 秒后前端 reload 会拉真实状态校准
+            return overlayState(true, true, true, sp.getBoolean("fluid", false),
+                    sp.getBoolean("vscreen", false), true);
+        }
+        if ("hide".equals(action)) {
             OverlayService.dispatch(app, "hide", null);
-        } else if ("panel".equals(action)) {
+            sp.edit().putBoolean("pet_running", false).putBoolean("pet_visible", false).apply();
+            return overlayState(false, false, true, sp.getBoolean("fluid", false),
+                    sp.getBoolean("vscreen", false), false);
+        }
+        if ("dock".equals(action)) {
+            OverlayService.dispatch(app, "dock", null);
+            return overlayState(true, false, true, sp.getBoolean("fluid", false),
+                    sp.getBoolean("vscreen", false), false);
+        }
+        if ("panel".equals(action)) {
             OverlayService.dispatch(app, "panel", null);
+            return "{\"ok\":true,\"running\":true,\"visible\":true}";
         }
-        String st = OverlayService.statusJson(app);
-        if ("show".equals(action) && !st.contains("\"running\":true")) {
-            st = st.replace("\"running\":false", "\"running\":true")
-                   .replace("\"visible\":false", "\"visible\":true");
+        // status
+        try {
+            return new JSONObject(OverlayService.statusJson(app)).put("on", true).toString();
+        } catch (Throwable t) {
+            return OverlayService.statusJson(app);
         }
-        return st;
+    }
+
+    /** running 控「显示桌宠」开关、visible 控「在线/已隐藏」、on 供 fluid/vscreen 开关回显。 */
+    private String overlayState(boolean running, boolean visible, boolean ok,
+                                boolean fluid, boolean vscreen, boolean on) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("ok", ok).put("running", running).put("visible", visible)
+                    .put("fluid", fluid).put("vscreen", vscreen).put("on", on)
+                    .put("permission", OverlayService.canDraw(app))
+                    .put("engine", "githup AI");
+            return o.toString();
+        } catch (Throwable t) {
+            return "{\"ok\":true}";
+        }
     }
 
     private String status() {
@@ -366,6 +399,12 @@ public final class LocalBridgeServer {
                     b.setContentTitle(title).setContentText(text)
                             .setSmallIcon(R.mipmap.ic_launcher)
                             .setContentIntent(pi).setAutoCancel(true).build());
+            if (app.getSharedPreferences("dsh_prefs", Context.MODE_PRIVATE)
+                    .getBoolean("fluid", false)) {
+                OverlayService sv = OverlayService.get();
+                if (sv != null) sv.pushFluid(title + "：" + text);
+                else OverlayService.dispatch(app, "card", title + "：" + text);
+            }
             return "{\"ok\":true}";
         } catch (Throwable t) {
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";

@@ -444,3 +444,59 @@ Manifest 已声明 `SYSTEM_ALERT_WINDOW`、`PACKAGE_USAGE_STATS`、`RECORD_AUDIO
 
 本轮共新增/移植 20 个 Java 类，`SRC_SHA256` 与 `assets.sha` 重算；
 包名、官方签名、`1.2.20 / 1002020`、底座 SPA、桌面双入口均不动。
+
+
+---
+
+## 十三、阶段 H：桌宠按随包规格书重做（真机截图反馈）
+
+用户真机截图反馈：桌宠页显示「在线」时，页面中间压着一个巨大的深蓝圆球 + 白「鲸」字，
+把「大肥鱼」标题和头像都盖住了；另一张截图里开关开着却显示「已隐藏」，左下角还有个
+黑色小圆（系统无障碍快捷按钮，不是 App 的桌宠，需去系统设置关「无障碍快捷方式」）。
+
+### 根因
+
+payload 里本来就有**桌宠唯一配置源** `pet/pet.json` + 立绘 `pet/pet-body.png`
+（334×331，鲸鱼娘；注释写明「本项目自己的形象，随包可分发」）。阶段 F 的精简实现
+完全没读它，自作主张画了 76dp 纯色圆 + 「鲸」字，还放在 `x=24dp, y=180dp`
+——正好落在设置页标题区。
+
+规格书要求：
+
+| 字段 | 规格 | 阶段 F 实际 |
+|---|---|---|
+| `appearance.ballDp` | 40 | 76dp |
+| `appearance.body` | `pet-body.png` 鲸鱼娘立绘 | 纯色圆 + 「鲸」字 |
+| `appearance.cropCenterX/Y` | 0.45 / 0.34 圆形裁切 | 无 |
+| `appearance.strokeRatio` | 0.045 描边 | 2dp 硬编码 |
+| `tap.onBall / onBubble` | line / panel | 轻点飘卡片 / 长按跳回主界面 |
+| `lines` | 10 条内置台词 | 5 条自编 |
+| `bubble` | `#E6101A2B` 圆角 12dp、6s 自动隐藏、0.72 屏宽 | 普通卡片 |
+| `card.atTop` | 状态栏下沿胶囊，点击展开 | 无 |
+
+还有两个确凿的协议 bug：
+
+1. 前端 `dsh-android-console/lib/client.js` 里 `fluid`/`vscreen` 开关读的是 **`j.on`**，
+   而阶段 F 的 `/overlay` 一律回 `statusJson`（只有 `fluid` 字段、没有 `on`）→
+   `!!j.on === false` → **开关点完立刻弹回关闭**。
+2. `OverlayService` 被系统 `START_STICKY` 重建时 `onCreate` 不恢复显示状态 →
+   `running=true, visible=false` → **开关开着却显示「已隐藏」**。
+
+### 修改（只动 2 个 Java 文件）
+
+- `OverlayService.java` 按 `pet.json` 重写：
+  - 读 `files/payload/pet/pet.json` 与 `pet-body.png`，预生成圆形裁切位图
+  - 悬浮球 40dp、靠**屏幕右边缘**（`screenW-40dp-10dp`、y≈32% 屏高），不再压页面中间
+  - 轻点 → 台词气泡（10 条随机、`#E6101A2B`、圆角、6 秒自动隐藏）
+  - 点气泡 → 桌宠面板（台词 + 打开 githup AI + 收起）
+  - 长按 → 接 `VoiceBridge` 真语音识别，识别结果飘流体云，不再跳回主界面
+  - 拖动、贴边半藏（`dock`）、`onCreate` 按 prefs 恢复 `pet_running/pet_visible`
+  - 流体云改成规格书的**状态栏下沿胶囊**，点一下展开成卡片
+- `LocalBridgeServer.java`：
+  - `/overlay` 新增 `on` 字段；`show`/`hide` 给乐观状态，`fluid`/`vscreen` 回显正确
+  - `/notify` 在流体云开启时同步推胶囊
+
+### 边界
+
+「悬浮屏预览」仍是降级卡片（虚拟屏需 Shizuku）；「AI 回复自动飘流体云」需要引擎侧
+hook，本版先覆盖通知与台词/语音结果。桌面双入口、包名、官方签名、版本、底座 SPA 均不动。
