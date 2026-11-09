@@ -4,14 +4,17 @@ import android.content.Context;
 import android.content.res.AssetManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.system.Os;
 import android.util.Log;
 
 import java.io.BufferedInputStream;
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -170,9 +173,114 @@ public final class HarnessBridge {
             File f = new File(dir, p);
             if (f.exists()) f.setExecutable(true, false);
         }
+        // payload.zip 打包时把软链拆成了 LINKS.txt 清单（zip 不存 symlink）。
+        // node 的 DT_NEEDED 是 libz.so.1 / libsqlite3.so / libicui18n.so.78 / libicuuc.so.78，
+        // 而 lib/ 下只有 libz.so.1.3.2 这类带完整版本号的真身。不还原软链，
+        // linker 直接报 CANNOT LINK EXECUTABLE: library "libz.so.1" not found。
+        // 上游 MainActivity 的 applyLinks() 干的就是这件事，精简桥初版漏了。
+        // 幂等：每次启动都跑，覆盖安装后旧数据目录也能自愈，无需清数据。
+        final int made = applyLinks(dir);
+        ensureProfileKernelLinks(dir);
+        if (made > 0) {
+            stage(ui, cb, "已还原 " + made + " 个运行库软链，准备启动…");
+            Log.i(TAG, "runtime/lib links restored: " + made);
+        }
+
         File node = new File(dir, "runtime/bin/node");
         File binjs = new File(dir, "dshroot/lib/node_modules/@deepseek-ai/dsh/lib/bin.js");
         if (!node.exists() || !binjs.exists()) throw new IOException("payload 结构不完整：缺 node 或 dsh/bin.js");
+    }
+
+    /**
+     * 还原 runtime/lib/LINKS.txt 里记录的软链。
+     * 格式（tab 分隔）：链接名 \t 真身文件名
+     *
+     * 优先硬链（同分区、最稳），不行退软链，再不行复制一份真身过来 ——
+     * 与上游 applyLinks() 完全一致，保证 FUSE / 某些厂商文件系统也能用。
+     */
+    private static int applyLinks(File payload) {
+        File lib = new File(payload, "runtime/lib");
+        File list = new File(lib, "LINKS.txt");
+        if (!list.exists()) return 0;
+        int made = 0;
+        BufferedReader r = null;
+        try {
+            r = new BufferedReader(new InputStreamReader(new FileInputStream(list), "UTF-8"));
+            String line;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) continue;
+                String[] parts = line.split("\\t+");
+                if (parts.length < 2) continue;
+                String linkName = parts[0].trim(), target = parts[1].trim();
+                File link = new File(lib, linkName);
+                File src = new File(lib, target);
+                if (!src.exists()) continue;
+                if (link.exists()) {
+                    // 硬链/复制出来的长度必须等于真身；软链则 readlink 能成功。
+                    // 其余情况视为坏的占位文件（比如只写了目标路径文本），删掉重建。
+                    boolean soft = false;
+                    try { Os.readlink(link.getAbsolutePath()); soft = true; } catch (Throwable ignored) {}
+                    if (soft || link.length() == src.length()) continue;
+                    if (!link.delete()) continue;
+                }
+                try {
+                    Os.link(src.getAbsolutePath(), link.getAbsolutePath());
+                    made++;
+                } catch (Throwable e1) {
+                    try {
+                        Os.symlink(target, link.getAbsolutePath());
+                        made++;
+                    } catch (Throwable e2) {
+                        try { copyFile(src, link); made++; }
+                        catch (Throwable e3) { Log.w(TAG, "link failed " + linkName, e3); }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "applyLinks failed", t);
+        } finally {
+            try { if (r != null) r.close(); } catch (Throwable ignored) {}
+        }
+        return made;
+    }
+
+    /** profile 树补上指向内核树的包软链，缺了会让部分插件静默失效。与上游同名方法一致。 */
+    private static void ensureProfileKernelLinks(File payload) {
+        File list = new File(payload, "dshhome/profiles/web/PROFILE-KERNEL-LINKS.txt");
+        File kernel = new File(payload,
+                "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai");
+        File prof = new File(payload, "dshhome/profiles/web/node_modules/@deepseek-ai");
+        if (!list.exists() || !kernel.isDirectory() || !prof.isDirectory()) return;
+        BufferedReader r = null;
+        int made = 0;
+        try {
+            r = new BufferedReader(new InputStreamReader(new FileInputStream(list), "UTF-8"));
+            String line;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) continue;
+                File src = new File(kernel, line), dst = new File(prof, line);
+                if (!src.isDirectory() || dst.exists()) continue;
+                try { Os.symlink(src.getAbsolutePath(), dst.getAbsolutePath()); made++; }
+                catch (Throwable t) { Log.w(TAG, "profile kernel link failed: " + line, t); }
+            }
+            if (made > 0) Log.i(TAG, "profile kernel links restored: " + made);
+        } catch (Throwable t) {
+            Log.w(TAG, "ensureProfileKernelLinks failed", t);
+        } finally {
+            try { if (r != null) r.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    private static void copyFile(File src, File dst) throws IOException {
+        FileInputStream in = new FileInputStream(src);
+        FileOutputStream out = new FileOutputStream(dst);
+        byte[] b = new byte[128 * 1024];
+        int n;
+        while ((n = in.read(b)) > 0) out.write(b, 0, n);
+        out.close();
+        in.close();
     }
 
     private static boolean needExec(String name) {
@@ -216,7 +324,14 @@ public final class HarnessBridge {
 
             ProcessBuilder pb = new ProcessBuilder(cmd);
             Map<String, String> env = pb.environment();
-            env.put("LD_LIBRARY_PATH", new File(dir, "runtime/lib").getAbsolutePath());
+            // libc / libm / libdl 由系统提供，把系统库目录一并带上，
+            // 避免部分 ROM 的 linker namespace 只认这几个路径。
+            String nld = "";
+            try { nld = c.getApplicationInfo().nativeLibraryDir; } catch (Throwable ignored) {}
+            if (nld == null) nld = "";
+            env.put("LD_LIBRARY_PATH", new File(dir, "runtime/lib").getAbsolutePath()
+                    + (nld.isEmpty() ? "" : ":" + nld)
+                    + ":/system/lib64:/vendor/lib64:/system/lib:/vendor/lib");
             env.put("HOME", c.getFilesDir().getAbsolutePath());
             env.put("DSH_HOME", new File(dir, "dshhome").getAbsolutePath());
             env.put("TMPDIR", tmp.getAbsolutePath());

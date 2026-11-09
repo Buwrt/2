@@ -260,3 +260,54 @@ GitHub Contents API 单文件上限 100MB，160MB 的包不能走 `apk/` 回写�
 - C：保留两个图标但把 `githup AI` 改成快捷方式/小组件语义，避免「两个软件」观感
 
 现阶段保持现状，等明确选择后再动。
+
+---
+
+## 十、阶段 E：真机第二轮 —— `libz.so.1` 缺失（软链没还原）
+
+阶段 D 把真实报错显示到开机页后，真机给出确切原因：
+
+```
+CANNOT LINK EXECUTABLE "/data/user/0/com.hubmobile.app/files/payload/runtime/bin/node":
+library "libz.so.1" not found: needed by main executable
+```
+
+### 根因
+
+payload.zip 是 **zip 不存 symlink** 的打包方式。`runtime/lib/` 里只有带完整版本号的
+真身（`libz.so.1.3.2`、`libsqlite3.so.3.53.4`、`libicuuc.so.78.3` …），
+所有 soname 软链被拆成一份 **`runtime/lib/LINKS.txt`** 清单（tab 分隔：`链接名 \t 真身`）。
+
+解析 `runtime/bin/node` 的 ELF `DT_NEEDED` 得到 12 个依赖：
+
+| 依赖 | payload 里的形态 | 是否需要软链 |
+|---|---|---|
+| `libz.so.1` | `libz.so.1.3.2` | ✅ 缺 |
+| `libsqlite3.so` | `libsqlite3.so.3.53.4` | ✅ 缺 |
+| `libicui18n.so.78` / `libicuuc.so.78` | `*.78.3` | ✅ 缺 |
+| `libcares.so` / `libffi.so` / `libc++_shared.so` / `libcrypto.so.3` / `libssl.so.3` | 真身同名 | ❌ |
+| `libc.so` / `libm.so` / `libdl.so` | 系统提供 | ❌ |
+
+linker 按 DT_NEEDED 顺序解析，第一个 `libz.so.1` 就断链，直接退出 —— 这就是
+「引擎进程提前退出」的完整链条，和端口无关（阶段 D 的端口修复仍然保留，是另一类问题）。
+
+上游 `MainActivity.applyLinks()`（第 6186 行）正是读 `LINKS.txt` 用
+`Os.link` → `Os.symlink` → `copyFile` 三级兜底还原软链，在 `extractPayload()`
+里紧跟解压、`setExecutables()` 之前调用。**精简桥初版漏了这一步**。
+
+### 修复（只改 HarnessBridge.java）
+
+1. `extract()` 末尾新增 `applyLinks(dir)`：照抄上游三级兜底；额外做**坏链自愈**——
+   链接已存在但既不是软链（`Os.readlink` 失败）又长度不等于真身时，判定为坏的占位文件，删掉重建。
+2. 新增 `ensureProfileKernelLinks(dir)`：读 `dshhome/profiles/web/PROFILE-KERNEL-LINKS.txt`，
+   给 profile 树补指向内核树的 `dsh-tools` 包软链。缺它不会立刻崩，但会让部分插件**静默失效**。
+3. `LD_LIBRARY_PATH` 追加 `nativeLibraryDir` 与 `/system/lib64` 等系统库目录，
+   兼容部分 ROM 的 linker namespace。
+
+### 关键：幂等，老用户不用清数据
+
+`applyLinks()` **每次启动都跑**，`link.exists()` 才跳过。覆盖安装不清 `files/payload`，
+41,426 个真身文件都还在，所以只要装上新包重进 `githup AI`，就会自动把缺的软链补齐。
+阶段 D 那句「已校验 41,426 / 41,426 · 本次新增 0」是正常命中缓存，不是没干活。
+
+只改 1 个 Java 文件，`SRC_SHA256` 与 `assets.sha` 相应重算；包名、签名、版本、双入口均不动。
