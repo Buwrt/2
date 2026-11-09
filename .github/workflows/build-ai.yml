@@ -291,6 +291,13 @@ jobs:
               lines.append('\n--- %s ---'%p)
               txt=open(p,encoding='utf-8',errors='replace').read()
               lines.append(txt[-4000:] if p.endswith('gradle.log') else txt[-6000:])
+          # 编译错误摘录：失败时也能一眼看到根因
+          if os.path.exists('work/gradle.log'):
+              gl=open('work/gradle.log',encoding='utf-8',errors='replace').read().splitlines()
+              errs=[l for l in gl if ('error:' in l or 'FAILURE:' in l or 'What went wrong' in l
+                                      or 'Execution failed for task' in l or 'Caused by:' in l)]
+              lines.append('\n--- gradle errors ---')
+              lines.extend(errs[:60] or ['(none)'])
           body={'message':'ci: AI 合并版构建报告','branch':'main',
                 'content':base64.b64encode('\n'.join(lines).encode()).decode()}
           u='https://api.github.com'+PRE+'/contents/'+urllib.parse.quote('ci/build-ai-report.txt',safe='/')+'?ref=main'

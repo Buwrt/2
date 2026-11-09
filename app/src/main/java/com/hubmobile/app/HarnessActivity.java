@@ -119,10 +119,18 @@ public class HarnessActivity extends Activity {
             p.setColor(LINE);
             int m = 24, len = 46;
             int w = getWidth(), h = getHeight();
-            cv.drawLine(m, m + len, m, m, m + len, m, p);
-            cv.drawLine(w - m - len, m, w - m, m, w - m, m + len, p);
-            cv.drawLine(m, h - m - len, m, h - m, m + len, h - m, p);
-            cv.drawLine(w - m - len, h - m, w - m, h - m, w - m, h - m - len, p);
+            // 左上
+            cv.drawLine(m, m + len, m, m, p);
+            cv.drawLine(m, m, m + len, m, p);
+            // 右上
+            cv.drawLine(w - m - len, m, w - m, m, p);
+            cv.drawLine(w - m, m, w - m, m + len, p);
+            // 左下
+            cv.drawLine(m, h - m - len, m, h - m, p);
+            cv.drawLine(m, h - m, m + len, h - m, p);
+            // 右下
+            cv.drawLine(w - m - len, h - m, w - m, h - m, p);
+            cv.drawLine(w - m, h - m, w - m, h - m - len, p);
         }
     }
 
