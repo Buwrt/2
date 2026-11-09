@@ -267,41 +267,35 @@ public final class LocalBridgeServer {
         boolean v = "1".equals(on) || "true".equals(on);
         SharedPreferences sp = app.getSharedPreferences("dsh_prefs", Context.MODE_PRIVATE);
         if ("fluid".equals(action)) {
-            OverlayService s = OverlayService.get();
-            if (s != null) s.setFluid(v);
-            sp.edit().putBoolean("fluid", v).apply();
-            // 前端读的是 j.on（不是 j.fluid）——上一版没返回，开关点了会立刻弹回
-            return overlayState(true, true, true, v, sp.getBoolean("vscreen", false), v);
+            boolean ok = OverlayService.setFluidFromBridge(v);
+            OverlayService.dispatch(app, "fluid=" + (v ? "1" : "0"), null);
+            return overlayState(true, true, true, ok, OverlayService.vscreenOn(), ok);
         }
         if ("vscreen".equals(action)) {
-            OverlayService s = OverlayService.get();
-            if (s != null) s.setVscreen(v);
-            sp.edit().putBoolean("vscreen", v).apply();
-            return overlayState(true, true, true, sp.getBoolean("fluid", false), v, v);
+            boolean ok = OverlayService.setVscreenFromBridge(v);
+            OverlayService.dispatch(app, "vscreen=" + (v ? "1" : "0"), null);
+            return overlayState(true, true, true, OverlayService.fluidOn(), ok, ok);
         }
         if ("show".equals(action)) {
             OverlayService.dispatch(app, "show", null);
-            sp.edit().putBoolean("pet_running", true).putBoolean("pet_visible", true).apply();
-            // 服务是异步拉起的：先乐观回 online，5 秒后前端 reload 会拉真实状态校准
-            return overlayState(true, true, true, sp.getBoolean("fluid", false),
-                    sp.getBoolean("vscreen", false), true);
+            return overlayState(true, true, true, OverlayService.fluidOn(),
+                    OverlayService.vscreenOn(), true);
         }
         if ("hide".equals(action)) {
             OverlayService.dispatch(app, "hide", null);
-            sp.edit().putBoolean("pet_running", false).putBoolean("pet_visible", false).apply();
-            return overlayState(false, false, true, sp.getBoolean("fluid", false),
-                    sp.getBoolean("vscreen", false), false);
+            return overlayState(false, false, true, OverlayService.fluidOn(),
+                    OverlayService.vscreenOn(), false);
         }
         if ("dock".equals(action)) {
             OverlayService.dispatch(app, "dock", null);
-            return overlayState(true, false, true, sp.getBoolean("fluid", false),
-                    sp.getBoolean("vscreen", false), false);
+            return overlayState(true, false, true, OverlayService.fluidOn(),
+                    OverlayService.vscreenOn(), false);
         }
         if ("panel".equals(action)) {
-            OverlayService.dispatch(app, "panel", null);
-            return "{\"ok\":true,\"running\":true,\"visible\":true}";
+            String r = OverlayService.togglePanelFromBridge(true, true);
+            return r == null || r.contains("\"ok\":true")
+                    ? "{\"ok\":true,\"running\":true,\"visible\":true}" : r;
         }
-        // status
         try {
             return new JSONObject(OverlayService.statusJson(app)).put("on", true).toString();
         } catch (Throwable t) {
@@ -309,7 +303,6 @@ public final class LocalBridgeServer {
         }
     }
 
-    /** running 控「显示桌宠」开关、visible 控「在线/已隐藏」、on 供 fluid/vscreen 开关回显。 */
     private String overlayState(boolean running, boolean visible, boolean ok,
                                 boolean fluid, boolean vscreen, boolean on) {
         try {

@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ic_launcher_background">#24292F</color>
+    <!-- 上游桌宠面板配色（阶段 I 合入，供完整 OverlayService 引用） -->
+    <color name="accent_brand">#4D6BFE</color>
+    <color name="panel_bg">#E61A2140</color>
+    <color name="panel_text_bright">#E8EDFF</color>
+    <color name="panel_text_dim">#9DB4FF</color>
 </resources>

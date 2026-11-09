@@ -500,3 +500,44 @@ payload 里本来就有**桌宠唯一配置源** `pet/pet.json` + 立绘 `pet/pe
 
 「悬浮屏预览」仍是降级卡片（虚拟屏需 Shizuku）；「AI 回复自动飘流体云」需要引擎侧
 hook，本版先覆盖通知与台词/语音结果。桌面双入口、包名、官方签名、版本、底座 SPA 均不动。
+
+
+---
+
+## 十四、阶段 I：桌宠换成上游 4402 行完整实现
+
+用户要求「和上游一模一样」。核查后确认：**payload 里本来就有桌宠唯一配置源
+`pet/pet.json` 与全身立绘 `pet-body.png`**，阶段 H 的 562 行精简实现把它画成了
+40dp 圆球，而上游 v1.90 起用 `bodyDp=96` 透明底全身像（`loadPetBody()` 优先），
+圆形头像只是没图时的兜底。
+
+### 移植范围
+
+- 完整 `OverlayService.java`（上游 4402 行 → 本版 4466 行），只改 3 处：
+  包名、通知回跳 `MainActivity → HarnessActivity`、
+  `AccessibilityService → HarnessAccessibilityService`
+- 上游 7 处 R 资源：`colors.xml`（accent_brand / panel_bg / panel_text_bright /
+  panel_text_dim）、`dimens.xml`（text_caption）、`drawable/ic_whale_black.xml`
+- `VsreenBridgeService.java` 占位：4 个入口安全降级（虚拟屏需 Shizuku）
+- 本地桥兼容层：`dispatch()` / `statusJson()` / `canDraw()` / `get()` /
+  `pushFluid()`，`/overlay` 改走 `togglePanelFromBridge` / `setFluidFromBridge` /
+  `setVscreenFromBridge` / `debugState`
+- `onStartCommand` 接 `bridgeAction`：show / hide / panel / dock / fluid / vscreen / card
+
+### 随之生效的上游能力
+
+全身立绘与三层动画、272dp 展开面板、球内直接发消息给 AI（RPC + `ovl-readreply.js`
+读 `session.v4.jsonl.zstd`）、台词/余额/今日/峰谷加权泡泡、流式流体云卡片、
+贴边半藏（露 68%）、拖底隐藏、通知栏两态开关、每 2 秒探引擎端口、
+扫 `/proc` 会话锁判断 AI 工作状态、前后台联动。
+
+### 仍然 100% 不了的（详见 `githup桌宠对齐上游_所需物料清单.md`）
+
+| 类别 | 内容 |
+|---|---|
+| 需用户授权素材 | `pet/whale-shota.png`（第三方，上游自己都不随包；有全身图时不需要） |
+| 需手机侧 | Shizuku App + 授权 + AIDL（虚拟屏实时画面 / 特权 shell） |
+| 需用户配置 | DeepSeek API Key（余额泡泡 / 峰谷计费读 credentials.yaml） |
+| 按用户口径冲突 | 包名、签名、品牌条；上游原版用户不能覆盖升级 |
+
+桌面双入口、包名、官方签名、`1.2.20 / 1002020`、底座 SPA 均未改动。
