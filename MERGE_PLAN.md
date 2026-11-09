@@ -1,0 +1,94 @@
+# 合并改造方案：以 Buwrt/githup 为底座，增添 deepseek-harness-android
+
+> 本文只依据**源码**分析，未读取 harness 仓库的 README / CHANGELOG 等说明文档。
+> 目标包名 `com.hubmobile.app`，签名沿用 githup 官方密钥（指纹 `863dd1cd…927`）。
+
+## 一、结论先行
+
+**能做源码级合并，不能做「二进制级直接合并」。** 两个仓库根本不是同一种构建物：
+
+| | Buwrt/githup（底座） | guzhou079-arch/deepseek-harness-android |
+|---|---|---|
+| 工程形态 | 标准 Gradle 工程，`./gradlew assembleRelease` | 无 Gradle；靠 `apktool` / `d8` / `proot` 在**手机里**重打包上游发行 APK |
+| 包名 | `com.hubmobile.app` | `com.deepseek.harness` |
+| 入口 | `MainActivity`（WebView 壳） | `MainActivity`（525 KB 的原生壳，**重名**） |
+| 运行时 | 纯前端 SPA + 少量原生桥 | 内置 `node` + `dsh` 内核 + proot/Alpine + `assets/payload.zip` |
+| 源码树里的二进制 | 无 | **无**（0 个 `.apk/.so/.dex/.jar/.aar/.zip`；内核以 160 MB 级 Release 附件分发） |
+| 外部依赖 | 无 | Shizuku（`rikka.shizuku.*` / `moe.shizuku.server.*`）、自带 `R` 资源、若干 hidden API |
+| 防护 | 五环校验链（签名 ↔ GuardKeys ↔ assets.sha ↔ 版本 ↔ 环境） | `checks.manifest` 补丁漂移检测 + 底包 sha256 锁定 |
+
+所以「把 harness 的 APK 解包、把 class 塞进 githup 的 dex」这条路走不通：harness 仓库里根本没有那个 APK 的骨架和内核，只有补丁脚本与 28 个 Java 源文件。
+
+## 二、本次已完成的合并（源码 + 资产入包）
+
+以 `Buwrt/githup` 公开库 v1.2.20 为底座，整个工程原样保留，新增：
+
+1. **`harness/`** —— harness 仓库全部非文档源码（161 个文件）：
+   `android-app/`（28 个 Java + res + Manifest）、`selfbuild/`（59）、`plugins/`（32）、`skills/`（22）、`patches/`。
+   所有 `.md` / README / CHANGELOG / LICENSE 类文档按约定**不纳入**。
+2. **包名适配**（脚本化全量替换）：
+   - Java `package com.deepseek.harness` → `com.hubmobile.app.harness`
+   - Manifest `package`、provider `authorities` → 同一子包
+   - 70 处硬编码 `/data/user/0/com.deepseek.harness/files/...` → `/data/user/0/com.hubmobile.app/files/...`
+   - `pm path com.deepseek.harness` → `pm path com.hubmobile.app`
+   - 斜杠形式 `com/deepseek/harness` → `com/hubmobile/app/harness`
+   放到子包而不是直接塞进 `com.hubmobile.app`，是为了避开与底座 27 个类（尤其同名 `MainActivity`）冲突。
+3. **`app/src/main/assets/harness/`** —— 94 个 JS / Python / Shell / JSON / CSS 脚本资产 + `manifest.json` 清单。
+   这些文件会被 Gradle 打进 APK，因此成品包里确实含 harness 的插件、技能与自构建脚本源码。
+4. **`app/src/main/AndroidManifest.xml`** —— 补入 harness 所需 9 个权限、2 个可选硬件特性，只声明权限，不动原有组件。
+5. **`.github/workflows/build-merged-apk.yml`** —— 用官方密钥构建并回写 APK 的工作流。
+
+### 为什么五环防护链不用改
+
+`tools/gen-guard.py` 只扫描 `app/src/main/assets/web/` 生成 `assets.sha`；
+`tools/gen-srcfingerprint.py` 只扫描 `app/src/main/java/` 与 `assets/web/`。
+本次所有新增内容都在 `assets/harness/` 与仓库根目录 `harness/`，**两个扫描范围都没碰**，所以
+`GuardKeys.java` 的 5 环 CHAIN、`SignCheck.EXPECTED_SHA256`、`api.js` 的 `SRC_SHA256`、
+`version.lock` / `app/build.gradle` 的版本号全部保持原值即可，包不会被自己的第 1/3/4 环拦下。
+构建时工作流仍会跑 `gen-guard.py` 复核，用同一枚官方密钥重算，结果逐字节一致（已复算验证）。
+
+## 三、要让 harness 的 Android 原生能力真正跑起来，还需要怎么改
+
+这部分是**后续接入清单**，不是本次已编译进 dex 的内容（缺依赖会直接编译失败，不做假编译）：
+
+| 项 | 现状 | 需要改什么 |
+|---|---|---|
+| Shizuku 依赖 | `RootShell` / `VsreenBridgeService` / `AccessibilityService` 引用 `rikka.shizuku.Shizuku`、`moe.shizuku.server.IRemoteProcess`、`IShizukuService` | `app/build.gradle` 增加 `mavenCentral()` + `implementation 'dev.rikka.shizuku:api:<ver>'` 与 `provider`；`IRemoteProcess/IShizukuService` 属 server 内部类，需改为反射或移除对应分支 |
+| 资源 R | harness 用 `R.string.text_caption`、`R.drawable.ic_whale_black` 等 20+ 个自定义资源 | 把 `harness/android-app/res/values/{colors,dimens,strings,styles}.xml` 与 2 个 drawable 合进 `app/src/main/res/`，资源名加 `harness_` 前缀避免与底座冲突，同步改 Java 里的 `R.*` 引用 |
+| 入口冲突 | 两边都叫 `MainActivity` | harness 侧重命名为 `HarnessActivity`，在 `AndroidManifest.xml` 用 `<activity android:name=".harness.HarnessActivity">` 单独注册，或在底座 SPA 里加一个跳转入口 |
+| 组件注册 | harness Manifest 有 `EngineService` / `OverlayService` / `VsreenBridgeService` / `AccessibilityService` / `AlarmReceiver` / 2 个 provider | 逐条合并进主 Manifest；`authorities` 必须带 `${applicationId}` 前缀保证唯一；无障碍服务需 `res/xml/accessibility_config.xml` 一并合入 |
+| targetSdk | harness 是 24/28，底座是 34 | `MANAGE_EXTERNAL_STORAGE`、`SYSTEM_ALERT_WINDOW`、`SCHEDULE_EXACT_ALARM`、`FOREGROUND_SERVICE_MICROPHONE` 在 34 上都要补运行时申请与 `foregroundServiceType`，`VsreenBridgeService` 的反射调用需按 Android 14 隐藏 API 限制验证 |
+| dsh 引擎 | 仓库里没有 node / kernel payload | 把上游 `kernel-*.tar.gz` 与发行 APK 里的 `assets/payload.zip` 解出，按 `selfbuild/lib/selfbuild.js` 的 `payload-patch` 流程注入；`selfbuild.sh` 里的 `NODE/CURL/RUN/PY/TC/KEYS` 路径已改成 `/data/user/0/com.hubmobile.app/...`，但工具链本身要随包 |
+| 前端入口 | 底座 SPA 无 harness 页面 | 在 `assets/web/index.html` 增加 `harness-bridge.js` 並从 `assets/harness/manifest.json` 读模块清单；**一旦改动 `web/` 下的文件，必须重跑 `gen-srcfingerprint.py` 与 `gen-guard.py` 并重算 `version.json` 的 `src_sha256`** |
+| 自构建发布 | `release-*.mjs` / `release.sh` 指向上游仓库 | 目标仓库、tag 规则、`RELEASE_NOTES` 来源改成 Buwrt/2；Release 附件名保持 `githup-v<version>.apk` 以匹配底座更新检测的直链拼法 |
+
+## 四、签名与包名口径
+
+- `applicationId` / Manifest `package`：`com.hubmobile.app`（底座原值，**未改**）
+- 软件名：`githup`（底座原值）
+- `versionName 1.2.20` / `versionCode 1002020`（底座原值，避免触发版本锁定与防护链重算）
+- 签名：官方 `keystore/githup-release.jks`（别名 `githup`），证书 SHA-256 `863dd1cd3752e59165e152bc4ab35fde478fcd296d724a6bc58cec0368184927`
+  以加密 Actions Secret 形式提供给 `build-merged-apk.yml`，**不写入仓库文件**。
+- 产物：`apk/githup-v1.2.20.apk` + `.sha256`，由工作流通过 REST API 回写仓库。
+
+## 五、复现构建
+
+```
+# 在 Buwrt/2 的 Actions 页面手动触发 "Build Merged APK"（workflow_dispatch）
+# 或本地（需 JDK 17 + Android SDK 34）：
+python3 tools/gen-guard.py .
+./gradlew assembleRelease --no-daemon
+```
+
+校验点：APK 内 `assets/harness/manifest.json` 存在、`AndroidManifest.xml` 的
+`versionCode=1002020`、`resources.arsc` 含 `githup`、`classes.dex` 含官方证书指纹、
+签名块为 v2/v3。
+
+## 六、诚实边界
+
+1. 成品 APK = **底座全部功能 + harness 的脚本/插件/技能源码资产 + 合并后的权限声明**；
+   harness 的 28 个 Java 原生类与 dsh AI 引擎**尚未编译进 dex**，需按第三节补依赖与 payload 才能启动。
+   没有这些依赖就强行 `include` 会直接 `compileReleaseJavaWithJavac` 失败。
+2. harness 上游 `DeepSeekHarness-v*-dist.apk` 是第三方发行物，其内核与许可证需自行确认后再注入；
+   本合并只搬运仓库内可见源码，不含任何上游二进制。
+3. 未在真机验证读屏/悬浮窗/虚拟屏行为；本方案验证的是源码一致性、Gradle 可构建性与包身份。

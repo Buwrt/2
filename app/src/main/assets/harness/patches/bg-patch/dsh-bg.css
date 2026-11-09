@@ -1,0 +1,186 @@
+/* ============================================================
+   deepdive 背景图 v2 —— 「给自己换背景图」
+   ------------------------------------------------------------
+   是谁加载它的：@deepseek-ai/dsh-client-ui-open-in-app/lib/client.js 的
+   factory 顶部有一段 deepdive 注入（ensure <link id="dsh-user-bg"
+   href="/dsh-bg.css?rev=…">）。选它是因为：不是 bootstrap 模块
+   （client-hmr 能真热替换 → 改完约 1 秒就生效，不必刷新页面）、
+   且本机不渲染任何 UI（热替换不会动界面）。细节见 bg-patch/README.md。
+
+   ⚠️ 自 v1.31 起，本文件（连同 dsh-bg.svg / dsh-bg-user.png / 注入所在
+   open-in-app/lib/client.js）**已列入** APK 的 FORCE_OVERWRITE_PREFIXES：
+   App 每次冷启动都会用包内副本覆盖运行副本。
+   ⇒ 改这里必须同步改 bg-patch/ 源并重新出包。三处必须一致：
+     bg-patch/dsh-bg.css · build-overlay 里 dist/dsh-bg.css · work/payload-new.zip
+
+   ---------- 为什么 v2 不再写死哈希类名----------
+   壁纸一直挂在「前端/插件的 CSS 模块哈希类名」上，前端一重建就整批变，
+   规则全成死选择器 → 壁纸消失（不报错、不崩、清单也查不出来）：
+     0.2.0-rc.1 .D_tfqW_*  →  rc.2 .wSkVaW_*
+     → 0.2.1 只换 AppFrame（.ZTP-Xa_frame → .pI_x6G_frame）
+     → 0.2.2-rc.1 装完 289 壁纸整块消失（这次换的是外壳）
+   实测（0.2.2-rc.1）纠正了两个误判：
+     · .wSkVaW_*（聊天列/输入栏）**没变**。它们写在 dsh-client-ui-conversation
+       自己的 client.js 里，不在前端 CSS 里 —— 所以「在新前端 CSS 里 0 命中」
+       根本不等于「已死」，别照着 0 命中就重写；
+     · .pI_x6G_*（AppFrame 与 mainPanel/centerCol/rightbarCol/bottomRow）
+       **也没变**，在 dsh-client-ui-layout 的 client.js 里。
+     · 真正这次新涂上来的是**前端外壳**：body{background:var(--dsw-alias-bg-base)}
+       以及 dockkit 的 tabHost（._tabHost_3oazc_164、._emptyTabHost_3oazc_145）。
+   ⇒ v2 先做了两条：① 壁纸从 AppFrame 的 ::before 挪到 html::before
+      （position:fixed），跟着窗口走 —— 外壳怎么换都盖不住它；② 外壳实底容器
+      用**语义通配**（[class*="_tabHost_"] 这种）适配会漂的模块哈希。
+   ⇒ 但通配仍然是「追着容器一个个拆」：侧栏、底栏、面板、聊天列各拆一次，
+      拆漏一处就露壁纸，每换一版内核还得重追一批类名。
+   ⇒ 现在定的口径是「只有主页聊天区铺壁纸，其余一律实底」（第 0.5 节）：让外壳
+      AppFrame 让位（它原本是整个外壳的底），聊天列里 tabHost 与聊天内容根一起
+      让开 → 聊天区壁纸 100% 透上来；右栏/底栏在安卓上本来靠 AppFrame 垫底，所以
+      它们自己补实色；左栏 sidebar-fill 本就是实色，浮窗自己涂 layer-2，都不用管。
+      绑的选择器只剩 4 个外壳类 + 1 个聊天根，都是插件稳定类，不是构建哈希。
+   仅存的 .wSkVaW_* 是输入栏 seat 那一条（插件自带类，实测 0.2.2-rc.1 仍在）。
+   下次换内核先自查再删（在 dist/assets/index-*.css 与插件 client.js 里 grep）：
+     grep -c 'wSkVaW_' .../dsh-client-ui-conversation/lib/client.js
+     grep -c 'pI_x6G_'  .../dsh-client-ui-layout/lib/client.js
+     grep -o '_tabHost_[A-Za-z0-9_]*'  dist/assets/index-*.css
+
+   想换图，三种改法（从易到难）：
+     1) 直接替换 dist/dsh-bg.svg（保持文件名，随手用别的 SVG 覆盖即可）；
+     2) 用照片：把照片放到 dist/ 下（如 dist/mybg.jpg），
+        再把下面 --dsh-user-bg-image 改成 url("/mybg.jpg")；
+     3) 不喜欢鲸鱼水印/配色：改 dsh-bg.svg 里的 <defs> 渐变即可。
+
+    可读性由两层保证：图本身是低对比深蓝，再叠一层
+    跟随主题的半透明遮罩（浅色近白 55–70%，深色近黑 60–76%）。
+   ============================================================ */
+
+:root {
+  /* 自定义背景图：把下面这行换成自己的图即可（内置的深蓝星空矢量图是默认值）。
+     ?v= 是给图的缓存版本号：换图就 +1（CSS 本身由注入代码带 ?rev= 时间戳，不受缓存影响）。
+     想换回自带的深蓝星空矢量图：改成 url("/dsh-bg.svg?v=1") 即可。
+     ⚠️ 发行包（make-dist-apk.sh）会把这一行换成 /dsh-bg.svg —— 别忘了那边也要一致。 */
+  --dsh-user-bg-image: url("/dsh-bg-user.png?v=1");
+
+  /* ---------- 遮罩必须跟随主题----------
+     ⚠️ 这里曾经写死成近黑（rgba(4,8,16,0.60/0.76)），注释却说"跟随主题"。
+     后果：浅色主题下前端正文是**深色**，压在近黑底上 → 黑底黑字看不见。
+     实测对比度：修复前 1.23:1（看不见）→ 修复后 10.2:1（AAA）。 */
+  --dsh-user-bg-scrim-top-light: rgba(247, 249, 253, 0.55);
+  --dsh-user-bg-scrim-bottom-light: rgba(247, 249, 253, 0.70);
+  --dsh-user-bg-scrim-top-dark: rgba(4, 8, 16, 0.60);
+  --dsh-user-bg-scrim-bottom-dark: rgba(4, 8, 16, 0.76);
+
+  /* 当前生效值 = **浅色**那套（前端没在 body 上挂 data-ds-dark-theme 时就是浅色主题） */
+  --dsh-user-bg-scrim-top: var(--dsh-user-bg-scrim-top-light);
+  --dsh-user-bg-scrim-bottom: var(--dsh-user-bg-scrim-bottom-light);
+
+  /* 模糊（CSS px）：0 = 原图清晰；1~3 会明显更好读，像壁纸 */
+  --dsh-user-bg-blur: 0px;
+}
+
+body[data-ds-dark-theme] {
+  --dsh-user-bg-scrim-top: var(--dsh-user-bg-scrim-top-dark);
+  --dsh-user-bg-scrim-bottom: var(--dsh-user-bg-scrim-bottom-dark);
+}
+
+/* 壁纸铺在 html::before 上，而变量默认定义在 :root、深色那套又只覆盖 body
+   —— 伪元素读不到 body 上的覆盖值。用 :has 把深色那套提到 html 上（Chromium
+   105+ 支持，本前端自己也在用 :has）。 */
+html:has(body[data-ds-dark-theme]) {
+  --dsh-user-bg-scrim-top: var(--dsh-user-bg-scrim-top-dark);
+  --dsh-user-bg-scrim-bottom: var(--dsh-user-bg-scrim-bottom-dark);
+}
+
+/* ---------- 0) 根层：先把 body/外壳的实底全部撤掉 ----------
+   0.2.2-rc.1 的前端 CSS 里写死了 body{background:var(--dsw-alias-bg-base,#fff)}，
+   这是"顶部一整块死黑"的源头：底是从 body 一路往下涂的，只在子容器上做手脚
+   治不了根。html 也一起撤，否则 canvas 那层照样给白底/主题底。 */
+html,
+body,
+#root {
+  background: transparent !important;
+}
+
+/* ---------- 0.5) 只让主页聊天列铺壁纸，其余区域一律实底 ----------
+   聊天区的链路是 外壳 AppFrame → 聊天列的 tabHost → 聊天内容根，三层都自己涂
+   bg-base；只要有一层不让位，壁纸就看不见（同色叠两次等于盖死）。所以这三层
+   一起让开，壁纸从最底下透上来 —— 壁纸层自带 scrim 压暗，正文可读性由那层保证。
+   右栏和底栏在安卓上本来没有自己的底色、就靠 AppFrame 垫着（右栏是 dockkit 那套，
+   连 tabHost 都没有）；AppFrame 一让位，它们必须自己补实色，否则整片露壁纸。
+   左栏的 sidebar-fill 本来就是实色，不用动；浮窗自己涂 layer-2 实底，也不受影响。
+   特异度：聊天列 tabHost 那条 (0,3,2) 压过 mobile.css 里那条 (0,2,2)，不靠加载顺序。 */
+html body .pI_x6G_frame,
+html body .pI_x6G_centerCol [class*="_tabHost_"]:not([class*="_float_"]),
+html body .wSkVaW_root,
+html body .wSkVaW_embeddedBody {
+  background: transparent !important;
+}
+html body .pI_x6G_rightbarCol,
+html body .pI_x6G_bottomRow {
+  background: var(--dsw-alias-bg-base, #151517) !important;
+}
+
+/* ---------- 1) 全窗口铺图（不再挂在 AppFrame 上）----------
+   图与遮罩一起放在 html::before：position:fixed → 相对视口，脱离任何布局容器；
+   z-index:-1 → 画在 canvas 之上、所有内容之下，正文/控件不受 filter 影响。
+   ⚠️ 不要同时给 .pI_x6G_frame 之类的容器也铺图：::before 是半透明的，
+     两层叠加会把图和遮罩各画两遍 → 灰蒙蒙。 */
+html::before {
+  content: "";
+  position: fixed;
+  inset: -10px;                 /* 盖住模糊溢出的边，避免出现一圈亮边 */
+  /* 图没加载出来时退成主题底色，而不是露出白 canvas */
+  background-color: var(--dsw-alias-bg-base, #101014);
+  background-image:
+    linear-gradient(180deg, var(--dsh-user-bg-scrim-top), var(--dsh-user-bg-scrim-bottom)),
+    var(--dsh-user-bg-image);
+  background-size: cover, cover;
+  background-position: center center, center center;
+  background-repeat: no-repeat, no-repeat;
+  filter: blur(var(--dsh-user-bg-blur));
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* ---------- 5) 输入栏周围彻底不留底 ----------
+   两轮迭代的教训：原规则 `linear-gradient(180deg, transparent 0, var(--dsw-alias-bg-base) 36px)`
+   在深色主题下把 36px 以下铺成一整块 #151517，等于一块死黑；退一步改成 60% 半透明
+   + 16px 毛玻璃也没解决 —— 模糊把壁纸抹平，看着仍是一块颜色不同的实心长方形。
+   ⇒ 这里要的是什么都没有：不铺底色、不做模糊，壁纸原样透出。
+   （代价：消息滚到输入栏后面时，会从统计栏底下穿过去。）
+   0.2.2-rc.1 里插件自己的 CSS 仍然只在这两个 phase 上给 composerSeat 上
+   那条 36px 渐变（data-phase / data-content-phase 的 active 取值都还在），
+   所以这条照旧命中，不需要改。 */
+.wSkVaW_root[data-phase="active"] .wSkVaW_composerSeat,
+.wSkVaW_embeddedBody[data-content-phase="active"] .wSkVaW_composerSeat {
+  background: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/* ---------- 6) 空会话/新会话页 ----------
+   v1 在这里写的是 .wSkVaW_root [data-empty-state]；0.2.2-rc.1 起这个属性在
+   前端 CSS 和插件 client.js 里**都是 0 命中**，已随外壳重写消失 —— 留它就是
+   一条死选择器，所以删掉。
+   那一页的实底（外壳的空 tab 容器 / 聊天列本体，新会话是 data-phase="hero"）
+   由官方规则自己涂 bg-base 提供：外壳让位给壁纸层之后，空 tab 容器是这条链上
+   唯一还自己上色的一层，不用再单独写规则。 */
+
+/* ---------- 插件页 / 设置页：不铺壁纸，纯实底 ----------
+   0.2.2 的 dockkit 给 tab 宿主涂了 background:var(--dsw-alias-bg-base)，
+   壁纸只在容器缝隙里漏出顶上一条约 190px，看着是「半壁纸 + 半死黑」的撕裂。
+   逐个追容器不划算：这些类是前端构建时生成的哈希名，换一版内核就整批漂掉
+   （0.2.0 .D_tfqW_ → rc.2 .wSkVaW_ → 0.2.1 .pI_x6G_ → 0.2.2 ._xxx_1hfzl_1），
+   而 dsh-bg.css 里绑死类名的那批规则就是这么静默失效的。
+   所以这里按**页面语义**判：有输入框（composer）才是聊天页，其余一律纯黑。 */
+html::before { opacity: 0 !important; }
+html:has(textarea)::before,
+html:has([contenteditable="true"])::before,
+html:has([class*="composer"])::before { opacity: 1 !important; }
+html:not(:has(textarea)):not(:has([contenteditable="true"])):not(:has([class*="composer"])) {
+  /* 必须用**不透明**实色：外壳已经让位给壁纸层，而非聊天页里没有实底容器，
+     不补这一层就会露出 canvas —— 浅色发白、深色把上一页的图留在那儿。 */
+  background: #f7f8fa !important;
+}
+html:has(body[data-ds-dark-theme]):not(:has(textarea)):not(:has([contenteditable="true"])):not(:has([class*="composer"])) {
+  background: #161616 !important;
+}

@@ -1,0 +1,11179 @@
+package com.hubmobile.app.harness;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.AppOpsManager;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.ContentValues;
+import android.content.Context;
+import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.res.Configuration;
+import android.database.Cursor;
+import android.graphics.Color;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.PowerManager;
+import android.provider.DocumentsContract;
+import android.provider.MediaStore;
+import android.provider.OpenableColumns;
+import android.provider.Settings;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.util.Log;
+import android.util.TypedValue;
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.RadialGradient;
+import android.graphics.RectF;
+import android.graphics.Shader;
+import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.animation.AccelerateDecelerateInterpolator;
+import android.view.animation.AlphaAnimation;
+import android.view.animation.Animation;
+import android.view.animation.DecelerateInterpolator;
+import android.view.animation.LinearInterpolator;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebChromeClient;
+import android.webkit.ValueCallback;
+import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.URL;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+import rikka.shizuku.Shizuku;
+import moe.shizuku.server.IRemoteProcess;
+import moe.shizuku.server.IShizukuService;
+
+public class MainActivity extends Activity {
+    private static final String TAG = "DeepSeekHarness";
+    // 引擎端口：固定默认端口（v1.5.4 起移除「端口冲突自动换端口」功能，用于排查慢启动是否与其相关）。
+    // 共存版（Lite/抢先版）各用独立默认端口，靠包名隔离，不依赖动态切换。
+    private int enginePort = 3080;
+    private String homeUrl() { return "http://127.0.0.1:" + enginePort; }
+    /** 0.1.5 起 web 首页需要一次性 token：引擎启动时会打印带 token 的 URL，
+     *  首次必须用它访问（服务器随即下发签名 cookie，后续可回到普通地址），
+     *  否则首页返回 401 "authentication required"。这里保存解析到的带 token URL。 */
+    private volatile String engineTokenUrl = null;
+
+    // ==================== v1.52 白屏兜底页 ====================
+    // 由来：2026-11-05 群里报「App 一直卡在白屏」。壳原来的做法是主框架加载失败就
+    // 每 2.5 秒重新 loadUrl（最多 120 次），用户面前始终是一块纯白：既不知道在等什么，
+    // 也点不到任何东西（原生控制台已降级，连日志都导不出来）。
+    // 现在改成：失败即切一张**不经过引擎**的静态页（assets/fallback.html），
+    // 上面有状态、版本、WebView 内核、日志路径和四个动作；后台继续探测，
+    // 引擎一通就自动切回主界面。整条路径不碰引擎、不碰插件、不碰原生控制台。
+    private static final String FALLBACK_URL = "file:///android_asset/fallback.html";
+    private volatile boolean fallbackActive = false;   // 主文档当前是兜底页
+    private volatile boolean fallbackProbing = false;  // 后台探测线程在跑
+    private volatile boolean fallbackReady = false;    // 探测到引擎已应答
+    private volatile long fallbackSince = 0L;          // 进入兜底页的时刻（算「已等待 N 秒」）
+    private volatile String fallbackWhy = null;        // 最近一次失败原因（兜底页展示 + 诊断）
+    private volatile long pageLoadedAt = 0L;           // 最近一次主文档 onPageFinished
+    private volatile int bootCycleFailures = 0;        // 「兜底页 → 进主界面 → 又失败」的轮数
+    // 是否曾经真正进过主界面。首装首启要解压 payload，页面 90 秒没加载完是常态，
+    // 那不是「进去又掉回来」；拿它做闸门，否则首启会被自己的失败计数永久锁死在兜底页。
+    private volatile boolean everEnteredHome = false;
+    private volatile int authReloadTries = 0;          // 401 后重捞令牌的次数
+    /** WebView 与健康探测应使用的地址：拿到 token 就用带 token 的，否则退回普通地址。 */
+    private String webHomeUrl() {
+        // v1.39.1：内存里没有令牌时先到日志尾部捞（引擎重启后靠这条兜住，否则 WebView 401）
+        String u = currentEngineTokenUrl();
+        return (u != null && !u.isEmpty()) ? u : homeUrl();
+    }
+    static {
+        // 0.1.5 的浏览器认证靠 cookie：带 token 访问首页会下发 dsh-auth-* cookie。
+        // HttpURLConnection 默认不保存 cookie，装上全局 CookieManager 后，
+        // App 自身的 HTTP 调用（含健康探测）才能像浏览器一样维持会话。
+        try { java.net.CookieHandler.setDefault(new java.net.CookieManager()); } catch (Throwable ignored) {}
+    }
+    // bin.js 相对 dshroot 目录的路径（dshroot 可能位于外部公共目录或内部 fallback）
+    private static final String REL_BINJS = "lib/node_modules/@deepseek-ai/dsh/lib/bin.js";
+    // 外部 dshroot 公共目录名（挂在 /sdcard 下，卸载不丢；node 二进制/凭证仍留内部）
+    // 外部公共根目录不要用常量：它必须按包名派生（正式版 / Lite / 兼容版共存时互不干扰）。
+    // 曾硬编码为 "DeepSeekHarness" → Lite/兼容版会写到正式版的外部目录（vscreen jar、外部回退 dshroot
+    // 都会串到别的版本上）。统一用 pkgRoot()（见下）。
+    // 官方维护、需随 APK 更新的路径前缀：即使外部 dshroot 已有同名文件也强制覆盖
+    // （避免"保留 AI 修改"策略挡住官方修复，例如 shizuku 插件的三层补丁）。
+    private static final String[] FORCE_OVERWRITE_PREFIXES = {
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-shizuku/",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-android/",
+        // v1.9 虚拟屏插件：必须随 APK 覆盖（否则外部/旧 dshroot 里的旧版插件挡住更新 → "未知错误"）
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-vscreen/",
+        // 内核补丁面：以下都是本项目改过或自研的包，必须随 APK 覆盖——
+        // 同内核升级走 fast 同步（内核版本号没变）时不会补它们，旧文件会一直挡住修复。
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-bash-local/",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/",
+        // 本轮（v1.15.2）新增：三个内核补丁包，必须随 APK 覆盖
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-ptc-runtime-node/",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-accessibility/",
+        // v1.16 NFC 读卡插件：新插件在「快速同步」下根本不会落盘（同内核升级只补白名单），
+        // 不列在这里 → 装机后插件目录不存在 → cordis insert 找不到模块 → 引擎起不来。
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-nfc/",
+        // v1.16：交付文件「打开」的 android 分支补丁（引擎侧）
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-native-command/",
+        // v1.24：静态资源门禁补丁 —— 上游 "Non-index assets stay public" 会让 dist 里任何文件
+        // 被无鉴权读取（含用户个人背景图 /dsh-bg-user.png）。此包不在白名单时，
+        // 同内核升级走 fast sync 不会覆盖它，补丁会被旧文件挡住。
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/",
+        // v1.30：/plugins/<id>/client.js 与 /plugins/events 的门禁（此前完全无鉴权）。
+        // ⚠ 历史教训：v1.28 用「改 inject」的方式做同一件事 → 两个 required 插件激活失败、
+        // 引擎起不来。v1.30 换成**懒取 connection**
+        // （handler 里 ctx.get("connection")，不改 inject、拿不到就 fail-open），
+        // 并已通过 preflight 隔离验证：无 cookie→401、带 cookie→200、无 "connection service unavailable"。
+        // 详见 selfbuild/scripts/patch-plugin-auth-lazy.js。
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-hmr/",
+        // v1.31：update-check 的只读状态路由也走懒门禁（此前无 cookie 就能拿版本号）
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-update-check/lib/index.js",
+        // v1.31：背景图资产搬进 payload —— 此前每次重装/内核重解压都会被冲掉、要手动重跑 apply-bg.sh。
+        // 三个资源 + 注入代码所在的 client.js（该文件原本不在白名单，所以注入会随重解压丢失）。
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/dsh-bg.css",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/dsh-bg.svg",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/dsh-bg-user.png",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-open-in-app/lib/client.js",
+        // v1.32：局域网访问 —— 把上游对 `--host 0.0.0.0` 的拒绝改成"仅 DSH_ALLOW_LAN=1 才放行"。
+        // 默认仍拒绝（保持上游安全语义）；只有用户在 /lan 显式开启后 App 才注入该环境变量。
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-app/lib/startup.js",
+        // v1.35：应用更新日志 —— 随包分发（重装/重解压不丢），并在界面里可直接打开 /CHANGELOG.md
+        "dshroot/CHANGELOG.md",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/CHANGELOG.md",
+        // v1.3.x 核心 UI 改动（侧栏改造/插件按钮）必须随 APK 覆盖：
+        // 否则旧版升级用户的外部 dshroot 保留旧 client.js → 页面仍是旧 UI（无竖屏适配）
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-layout/lib/client.js",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-cordis/lib/client.js",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/mobile.css",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/mobile.js",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html",
+        // v1.15.9：dsh-app-boot 打了「插件 warn 落盘」补丁（$DSH_HOME/logs/plugins.log）。
+        // 必须加白名单，否则同内核版本下 fast 同步不会覆盖它，补丁形同没打。
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
+        // v1.16.1：fs-search 的 Android ripgrep 修复必须随 APK 覆盖（上游原写在硬编码 MARKS 里，现统一并入本表）
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/",
+        // v1.36：账户 UI —— 放开上游的「桌面独占」门禁（apply 首行 `if (!("dshDesktop" in globalThis)) return;`）。
+        // 刻意**不注入全局 dshDesktop**：那会让 dsh-client-ui-settings-models 的 API Key 引导消失。
+        // 详见 patches/account-ui-enable/ 与 README 的「来源与许可」一节
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-account/lib/client.js",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/package.json",
+        // v1.71：随包分发的**官方技能**（桌宠/文档/手机自动化那套）。
+        // 前缀匹配 → 只有我们发的这个目录会被更新；用户自己往别处放的技能文件不受影响。
+        "dshhome/skills/",
+        // v1.71：桌宠配置（台词表/球大小/裁剪中心）。⚠️ 精确到文件：
+        // 同目录的 whale-shota.png 授权"仅限本机自用、不得随包分发"，**绝不能**被这条带上。
+        "pet/pet.json",
+        // v1.33：网页设置页「控制台」插件 —— 解压/引擎/救援/权限/插件/自建环境/时光机/主题/更新
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/dsh-android-console/",
+        // v1.72：控制台插件**真正被加载的那一份**在 profile 里 —— 引擎按 profile 目录解析插入名，
+        // 落点是 payload/dshhome/profiles/web/node_modules/dsh-android-console/。
+        // 此前只覆盖 dshroot 那份（引擎根本不加载它）→ 10-07 手工放进 profile 的旧副本一直挡着，
+        // 源码改动永远上不了界面；而线上手工加的「全部账目」页又只存在于运行副本里（两边分叉）。
+        // 加这条 + 出包带上 profile 落点后：装机/每次冷启动都以源码为准，两份不会再分叉。
+        //
+        // v1.38-fix（2026-10-15）：不再逐个包列，改成**整个 profile 落点**。
+        // 为什么：引擎解析插件裸名时 profile 级 node_modules 优先，所以"源码改了却不生效"
+        // 十有八九是这一层没随包更新（v1.38 装机后新建会话全失败就是这么来的：
+        // profiles/web/node_modules/dsh-plugin-auto-summary-policy 里那份旧实现盖住了 dshroot 的新实现）。
+        // 用二选一实验定过解析优先级（selfbuild/scripts/check-session-create-isolated.sh 的
+        // PLANT_USERLAYER_BROKEN / PLANT_USERLAYER_FIXED 对照）：**base profile 盖住用户层**
+        // （用户层副本只在 base 缺失时才生效）⇒ 只要把正本放进 base 且每次冷启动覆盖，
+        // 老用户层里的旧副本再也挡不住，不必再写冷启动迁移。
+        // 前缀只覆盖**包内确实存在**的同名文件，用户自己装的插件/自己改过的其他文件不受影响。
+        // 回滚：删掉本条（回到只有 dshroot 落点被覆盖的状态，profile 层又会开始分叉）。
+        "dshhome/profiles/web/node_modules/",
+        // v1.34：模型与思考分档弹窗 —— 修复移动端 touch/onBlur 闪退与点击冲突
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-model-selection/lib/client.js",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/dsh-plugin-session-rewind/",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/dsh-plugin-turn-notify/",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/dsh-plugin-auto-summary-policy/",
+        // v1.49：终端面板找不到 bash、预设挂载只报「未启动」这两处修复分别落在这两个包里。
+        // 它们不是本项目自研包，此前不在表内 —— 同内核版本走 fast 同步时不覆盖它们，
+        // 补丁虽然进了安装包，运行树里却一直是旧文件（装机后实测两个文件仍是旧版）。
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-terminal-bash/",
+        "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-agent-preset-registry/"
+    };
+    // 外部 dshroot 解压完成标记（App 在 dshroot 补齐后写入；清空/重置时随目录删除）。
+    // 用于识别「解压中途被打断」：即使 REVISION 一致也强制补齐缺失文件。
+    private static final String DSHROOT_COMPLETE = ".complete";
+    private static final String PREFS = "dsh_setup";
+    /** v1.41：本地桥的 CORS 头 —— 让网页设置页(127.0.0.1:3080)能跨端口调这里(127.0.0.1:3081)。
+     *  Origin 仍由 LocalHttpFence 限制在回环引擎源，别处发来的请求照旧 403。 */
+    private static final String CORS_HEADERS =
+            "Access-Control-Allow-Origin: *\r\n"
+            + "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+            + "Access-Control-Allow-Headers: Content-Type\r\n";
+    private static final int REQ_STORAGE = 200;
+    private static final int REQ_NOTIFICATION = 201;
+    private DraftInputBridge draftInput;
+    private static final int REQ_SHIZUKU = 300;
+    /** v1.13：已发出 Shizuku 授权请求、等待结果（用于超时傅底判断）。 */
+    private volatile boolean pendingShizukuReq = false;
+    private static final int REQ_WORKSPACE_TREE = 400;
+    private static final int REQ_FILE_CHOOSER = 500;
+    /** v1.40：附件按钮「拍照」——相机 App 的返回（见 onShowFileChooser / onActivityResult）。 */
+    private static final int REQ_CAMERA_CAPTURE = 501;
+    /** 导入备份（SAF 选 zip 文件）。 */
+    private static final int REQ_BACKUP_FILE = 600;
+    /** 从时光机快照还原（SAF 选 .dshbackup 容器）。和上面的 zip 是两种格式，不能共用一条路径：
+     *  zip 由 Java 自己解包，.dshbackup 是 [DSHB][manifest][gzip] 容器，只有 backup.mjs 认得。 */
+    private static final int REQ_SNAPSHOT_FILE = 601;
+
+    // ---------- 安全模式 / 启动失败计数 ----------
+    // 背景：引擎启动会解析 profile 的 patch 文件，一旦 YAML 语法坏掉（用户装的插件把配置写坏是常见路径），
+    // 内核会直接拒绝启动（实测：failed to parse overlay ...: YAMLException: duplicated mapping key），
+    // 而“修”这件事本身需要引擎跑起来让 AI 去改文件 —— 于是形成死结，只能清数据。
+    // 安全模式的做法：把 profile 的用户层整体旁置 + 恢复出厂文件，**不动用户数据**（会话/凭证/设置全保留）。
+    private static final String KEY_SAFE_MODE = "safe_mode_active";
+    private static final String KEY_BOOT_FAILS = "engine_boot_failures";
+    /** 旁置目录名只允许 enterSafeMode 生成的形状（exitSafeMode 出口再核一次 canonical 父目录）。 */
+    private static final java.util.regex.Pattern SAFE_STASH_NAME =
+            java.util.regex.Pattern.compile("web\\.userlayer-[0-9]{8}-[0-9]{6}");
+    /** 连续启动失败多少次要提醒用户可用安全模式。 */
+    private static final int BOOT_FAIL_HINT_AT = 2;
+
+    // 悬浮窗前后台联动：App 在前台时隐藏悬浮窗（不挡界面），退后台时显示（随时可查引擎状态）。
+    // 由 onStart/onStop 维护；OverlayService 启动时按此标志决定初始可见性。
+    public static volatile boolean overlayForeground = true;
+
+    private WebView webView;
+    private volatile boolean trustedWebDocument = false;
+    /** v1.13.11：页面实测背景色（0 = 还没取到，壳底色用 cBg() 兜底）。见 refreshPageBackground()。 */
+    private volatile int pageBgColor = 0;
+
+    // ---- v1.12 控制台（冷启动首页，原生界面）----
+    private FrameLayout engineRoot;                // WebView + 启动浮层 + 控制台的共同根容器
+    private ScrollView consoleLayer;               // 控制台覆盖层
+    private LinearLayout consoleBody;              // 当前页内容容器
+    private int consolePage = 0;                   // 0 控制台 / 1 权限 / 2 插件 / 3 日志 / 4 自建环境
+    // v1.28 自建环境（按需下载构建环境，让用户能在手机上自己出包）
+    private boolean beInstalling = false;
+    private String beStage = "";
+    private java.util.List<BuildEnvInstaller.Source> beSources = null;   // null=还没查
+    private boolean beResolving = false;
+    private String beResolveErr = "";
+    private boolean consoleVisible = false;
+    private boolean consoleDetailOpen = false;      //「已解压」那一行是否展开
+    private boolean extracting = false;            // 正在解压（控制台进度）
+    private boolean extractOnlyMode = false;       // true：本次只解压，不起引擎
+    private boolean filesPreparedThisBoot = false; // 本进程内文件已就绪 → 跳过重复解压
+    private volatile boolean starting = false;      // 引擎启动中（跨线程读写：启动流程在后台线程、刷新在主线程）
+    private long engineStartTs = 0L;
+    private String conExtractMsg = null;
+    private String conFilesSummary = null;         //「24,806 个文件 · 214 MB」后台算一次
+    private Handler conTick;
+    private TextView conExState, conExMeta, conEnState, conEnMeta, conFoot;
+    private View conBar, conFill, conSpacer;
+    private Button conExBtn, conEnBtn, conEnRestart, conEnStop;
+    private View conDetailBox;
+    private View dialogOverlay = null;   // 自绘弹窗的遮罩层（替代系统 AlertDialog）
+    private final Runnable consoleTick = new Runnable() {
+        @Override public void run() {
+            if (!consoleVisible) return;
+            refreshConsole();
+            if (conTick != null) conTick.postDelayed(this, 1000);
+        }
+    };
+    // 网页 <input type="file"> 选完文件后的回调（见 onShowFileChooser）
+    private ValueCallback<Uri[]> fileChooserCallback;
+    /** v1.40：拍照时相机的输出 URI（往 MediaStore 里刚插入的那一行）。 */
+    private Uri cameraOutputUri;
+    private TextView statusView;
+    private ProgressBar progressBar = null; // v1.32：启动页彻底移除横向进度条，保留引用为 null 兼顾控制台/老接口
+    private View splashLogo;
+    private SplashLogoView splashLogoView;
+    private View splashBox;
+    private TextView splashBrand;
+
+    // ===== 开机动画（assets/boot.html 在主 WebView 里跑；原生启动页退为兜底）=====
+    private static boolean bootFilmPlayed;          // 每个进程只放一次（Activity 重建不重播）
+    private boolean bootFilmOn, bootFilmReady, bootFilmDone;
+    private String bootFilmPending;
+    private float bootFilmP, bootFilmRate, bootFilmTarget;
+    private long bootFilmStartAt, bootFilmAt, bootEngineAt;
+    private int bootStage;                          // 0 文件 1 引擎 2 连接 3 就绪
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    // 运行时确定的 dshroot 目录（外部公共目录优先，失败回退内部 files/payload/dshroot）
+    /** v1.49：当前运行的受管内核树（null = 用内置树）。启动超时回退时用它判断。 */
+    private File kernelManagedTree = null;
+    private File dshrootDir = null;
+    /** 内置树（非受管）的位置。切内核时用来回退，见 applyKernelTreeNow()。 */
+    private File builtinDshrootDir = null;
+    private boolean watchdogStarted = false;
+    private long lastRespawnAt = 0L;
+    private volatile boolean engineStartAborted = false;   // v1.13：「停止」打断在飞的启动等待（否则状态栏一直计时到 90s 超时）
+    private volatile boolean engineStoppedByUser = false;  // v1.13：用户主动停止 → 看门狗不得再自动拉起引擎
+    // v1.13：引擎存活探测结果缓存。控制台的每秒刷新在主线程跑，一旦直接做 HTTP 探测就会抛
+    // NetworkOnMainThreadException（被 catch 吞掉）→ 引擎明明在跑也永远判“未启动”
+    // → 用户再点一次「启动引擎」就又拉起一个 node → EADDRINUSE（用户实测的“启动一会又变回去”）。
+    private volatile boolean engineAliveCached = false;
+    private volatile long engineProbeAt = 0L;
+    private volatile boolean engineProbeBusy = false;
+    private volatile boolean notifyServerStarted = false;  // v1.13：通知通道幂等启动标记
+    // v1.14：通知通道自愈。v1.13 只在 startEngine() 里启动一次；bind 失败（端口被占——真机实测冷启动
+    // 瞬间 3081 被上一个进程遗留的 DSH web 占着）时虽然把标记复位“允许重试”，但**没有任何代码会再调用它**：
+    // 引擎进程一直活着 → 看门狗不进 respawn 分支 → 通知/设置/剪贴板/使用时长/悬浮窗整条链路静默失效，
+    // 直到 App 被杀重启才恢复（实测 19:56 启动后 3081 全程 ECONNREFUSED，20:04 重启后立刻正常）。
+    // 这里记住监听句柄 + 上次尝试时间，交给看门狗兜底重试（15s 节流，防端口被长期占用时刷日志）。
+    private volatile ServerSocket notifyServerSocket = null;
+    private volatile long notifyLastAttemptAt = 0L;
+    // 引擎 node 进程
+    private Process nodeProcess = null;
+    // v1.5.2 慢启动修复：本次启动走了「快速同步」（同内核升级，只补白名单+REVISION）。
+    // 若引擎启动超时，用它触发一次全量补齐（防止快速路径漏掉缺失文件）。
+    private volatile boolean fastSyncedThisBoot = false;
+
+    // 权限界面
+    private final List<PermRow> permRows = new ArrayList<>();
+    private File rishDex;
+    private File vscreenDex;
+    private boolean pendingVscreenExtract;
+    private static volatile IRemoteProcess vscreenProc;
+    private long lastVscreenEnsureTs = 0;
+    // AI 工作区（可选）：外部共享存储目录，传给引擎作为 bash/文件工具的工作根目录
+    private TextView workspaceDescView;
+    private TextView conWorkspaceDesc;             // 控制台「权限」页的工作区状态行（与引导完成页共用同一套选择逻辑）
+
+
+    private interface StatusProvider { boolean granted(); }
+    private static class PermRow {
+        TextView status;
+        StatusProvider provider;
+    }
+
+    //#region dsh-android-patch v2 (2026-09-30)：外部链接交给系统浏览器
+    // 背景：账户登录对话框只提供「复制授权链接」（上游设计，自动拉起浏览器由桌面壳
+    // dshDesktop 负责）。Web 壳没有 dshDesktop，于是每次登录都要手动复制粘贴。
+    // 而 WebView 默认没有 shouldOverrideUrlLoading 时，点链接会「原地加载」——
+    // 整个 GUI 被平台登录页顶掉。这里补上：非本机回环的链接一律外发系统浏览器。
+    // 本机回环（127.0.0.1 / localhost / ::1）是 DSH 自己的 GUI 与 API，仍交回 WebView。
+    //
+    // v1.39.6 (2026-10-18)：本方法从 WebViewClient 匿名类**提到 Activity 级**，
+    // 因为 target=_blank 的弹窗（onCreateWindow）也要复用同一套判据。
+    // 回滚：删掉本 region，把方法体放回 WebViewClient 匿名类（v1.39.5 形态）。
+    /**
+     * @param u 待判定的目标地址。
+     * @return true = 已外发（WebView 不再加载）；false = 交回 WebView 原地加载。
+     */
+    private boolean openExternally(android.net.Uri u) {
+        if (u == null) return true;
+        String scheme = u.getScheme();
+        // 兜底页是内置 asset，只能由 WebView 自己加载：外面没有任何应用能打开它，
+        // 一旦误判成「外发」就会既不显示页面、又弹一个打开失败的错。
+        if (u.toString().startsWith(FALLBACK_URL)) return false;
+        if (com.hubmobile.app.harness.vscreen.LocalHttpFence.isLoopbackUrl(u.toString(), enginePort)) return false;
+        // QQ 群卡片：mqqapi:// 由 QQ 自己接管，放行但不进浏览器选择器。
+        boolean mqq = "mqqapi".equalsIgnoreCase(scheme);
+        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)
+                && !"mailto".equalsIgnoreCase(scheme) && !"tel".equalsIgnoreCase(scheme)
+                && !mqq) return true;
+        try {
+            Intent ext = new Intent(Intent.ACTION_VIEW, u);
+            ext.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            // dsh-android-patch v5 (2026-09-30)：改为「让用户选浏览器」，不直接用默认浏览器。
+            //
+            // 背景：账户登录的回调是环回地址 http://127.0.0.1:<port>/oauth/callback，
+            // 由引擎本地的 HTTP 服务接收。不同浏览器对环回地址的处理差别极大：
+            //   · Chrome / 系统浏览器：正常跳转 ✓
+            //   · UC / 夸克 / QQ浏览器 / 部分厂商浏览器：把 127.0.0.1 当危险地址拦截、
+            //     或当成搜索词、或跳到白页 → 引擎永远收不到 code → 登录卡在"等待中"
+            // 直接 startActivity 会强制用默认浏览器，用户被默认浏览器坑了也无从选择。
+            // 改成选择器后，用户可以换一个能跑通的浏览器重试。
+            // 回滚：把下面三行 chooser 换回 startActivity(ext)。
+            if (mqq) {
+                startActivity(ext);
+                return true;
+            }
+            Intent chooser = Intent.createChooser(ext, "选择浏览器完成登录");
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(chooser);
+            return true;
+        } catch (Throwable t) {
+            conToast("无法打开外部链接");
+            return true;
+        }
+    }
+
+    //#region dsh-android-patch v1.39.6 (2026-10-18)：target=_blank 的落地
+    // 背景：v1.39.5 为了让「聊天文件卡片里的 APK」能被拦到，打开了
+    // setSupportMultipleWindows(true) 并实现 onCreateWindow。但那个探针只认
+    // file:// 与 .apk，**其余 URL 一律静默丢弃** —— 而这类链接在打开多窗口之前
+    // 本来会走主框架导航 → shouldOverrideUrlLoading → 系统浏览器。
+    // 结果：设置 → 账号与余额 里的「查询用量 / 充值 / 更多账号信息」点了没反应
+    // （2026-10-18 用户实测）。
+    // 这里给弹窗 URL 补上与主框架完全相同的落地判据。
+    // 回滚：删掉本 region，onCreateWindow 的探针恢复成「只处理 file:// 与 .apk」。
+    /**
+     * @param u 弹窗（target=_blank / window.open）要打开的地址。
+     * @return 恒为 true：弹窗请求已被本方法接管。
+     */
+    private boolean routeNewWindow(String u) {
+        if (u == null || u.isEmpty()) return true;
+        if (u.startsWith("file://") || u.contains(".apk")) {
+            handleWebDownload(u, null, null, null);
+            return true;
+        }
+        try {
+            if (com.hubmobile.app.harness.vscreen.LocalHttpFence.isLoopbackUrl(u, enginePort)) {
+                // 回环地址属于 DSH 自己：交给主 WebView 原地加载，不要外发。
+                if (webView != null) webView.loadUrl(u);
+                return true;
+            }
+            openExternally(android.net.Uri.parse(u));
+        } catch (Throwable ignored) {}
+        return true;
+    }
+    //#endregion
+
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        // v1.13.11：主题必须先定（且必须在 super.onCreate 之前）。
+        // WebView 的 prefers-color-scheme 只认主题的 android:isLightTheme，不看系统 uiMode
+        // （详见 res/values/styles.xml 里 AppTheme.Light 的注释）——
+        // v1.13.12 起主题可在控制台选「跟随系统/浅色/深色」，不再只能跟系统。
+        setTheme(themePrefersDark() ? R.style.AppTheme : R.style.AppTheme_Light);
+        super.onCreate(savedInstanceState);
+        enginePort = defaultEnginePort(this); // 三版本各自独立端口（见 defaultEnginePort）
+        applyStatusBar(); // 状态栏/导航栏底色跟随 App 主题（浅色模式不再是一条黑条）
+        installCrashHandler();
+        checkAbiCompat(); // ② ABI 检测：非 arm64 设备引擎可能无法运行，弹提示
+        checkBatteryOptimization(); // ④ 电池优化引导：被限制时提示（挂后台可能被杀）
+        // v1.12：不再在启动时自动检查更新；改为控制台底部的「检查更新」手动触发。
+
+        webView = new WebView(this);
+        WebSettings ws = webView.getSettings();
+        ws.setJavaScriptEnabled(true);
+        ws.setDomStorageEnabled(true);
+        ws.setAllowFileAccess(false);
+        ws.setDatabaseEnabled(true);
+        ws.setUseWideViewPort(true);
+        ws.setLoadWithOverviewMode(true);
+        ws.setSupportZoom(false);
+        ws.setBuiltInZoomControls(false);
+        ws.setDisplayZoomControls(false);
+        ws.setTextZoom(100);
+        webView.setBackgroundColor(chromeBg()); // v1.13.11：跟随主题（浅色模式下不再是深色闪屏）
+        checkWebViewCompat(); // WebView 兼容检测：老内核提示引导（DSH 前端需 Chromium 80+）
+        // v1.39.5：网页里点「文件卡片 / 下载链接」时，WebView 默认没有 DownloadListener，
+        // 下载请求会被交给系统（默认浏览器 / 文件预览器）→ 点 APK 卡片只得到「该格式文件
+        // 暂时无法预览」，安装器根本不弹。这里接管：本地 file:// 直接交给安装器，
+        // http(s) 走系统 DownloadManager（通知栏可见，点开即装）。
+        ws.setSupportMultipleWindows(true); // 配合下面的 onCreateWindow，拦 target=_blank
+        webView.setDownloadListener(new android.webkit.DownloadListener() {
+            @Override public void onDownloadStart(String url, String userAgent, String contentDisposition,
+                                                  String mimetype, long contentLength) {
+                handleWebDownload(url, userAgent, contentDisposition, mimetype);
+            }
+        });
+        webView.setWebViewClient(new android.webkit.WebViewClient() {
+            private int errorRetries = 0;
+
+            //#region dsh-android-patch v2 (2026-09-30)：外部链接交给系统浏览器
+            // 判据已提到 Activity 级的 openExternally（v1.39.6）；这里只保留两个重载。
+            // 回滚：删除本 region（含两个 shouldOverrideUrlLoading 重载）。
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view,
+                                                    android.webkit.WebResourceRequest request) {
+                if (request == null) return true;
+                if (!request.isForMainFrame()) {
+                    // 子框架导航用同一套「子资源」判据：blob:/data: 预览与远程 iframe 放行
+                    // （它们跨源，拿不到主文档的原生桥），只拦本地特权协议。
+                    return !resourceAllowed(request.getUrl().toString(), false);
+                }
+                return openExternally(request.getUrl());
+            }
+
+            @Override
+            @SuppressWarnings("deprecation")
+            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                if (url == null) return true;
+                try {
+                    return openExternally(android.net.Uri.parse(url));
+                } catch (Throwable t) {
+                    return true;
+                }
+            }
+            //#endregion
+
+            //#region dsh-android-patch v7 (2026-10-09 审计第三批)：资源放行收窄到「子资源」
+            // 背景：第二批把所有非本实例回环的资源一律 403，把 blob:/data: 也一起挡了 ——
+            // 而文档预览正是拿 URL.createObjectURL(...) 得到的 blob: URL 当 iframe src
+            // （dsh-client-ui-sidebar-documentpreview/lib/client.js:3979 HTML、:4680 图片/PDF、
+            //  :1695 关联 css/js），于是预览整块失效；远程图片也没理由被挡。
+            // 判据：**子资源本来拿不到主文档的原生桥**（跨源子框架受同源策略限制；sandbox 不带
+            // allow-same-origin 的框架是不透明源），真正的门禁是主框架导航 + 原生侧
+            // trustedWebDocument 复查。所以这里只拦「能碰本地文件/特权」的协议。
+            // 回滚：把 guardResource 换回「非回环即 403」，并删掉本 region。
+            private boolean resourceAllowed(String url, boolean mainFrame) {
+                // 判据放在 LocalHttpFence 里（纯字符串实现），这样 JVM 夹具能直接测。
+                return com.hubmobile.app.harness.vscreen.LocalHttpFence.resourceAllowed(url, mainFrame, enginePort);
+            }
+
+            private android.webkit.WebResourceResponse guardResource(String url, boolean mainFrame) {
+                // 开机动画：主文档是 data: URL（不走回环），只在 bootFilmOn 窗口内放行。
+                if (bootFilmOn && mainFrame && url != null
+                        && (url.startsWith("data:") || url.startsWith("about:"))) return null;
+                // v1.52 兜底页：主文档是内置 asset，不走回环；同样只在兜底窗口内放行。
+                if (mainFrame && url != null && url.startsWith(FALLBACK_URL)) return null;
+                if (resourceAllowed(url, mainFrame)) return null;
+                return new android.webkit.WebResourceResponse("text/plain", "UTF-8", 403, "Forbidden",
+                        java.util.Collections.<String, String>emptyMap(), new java.io.ByteArrayInputStream(new byte[0]));
+            }
+            //#endregion
+
+            @Override
+            public android.webkit.WebResourceResponse shouldInterceptRequest(WebView view, android.webkit.WebResourceRequest request) {
+                if (request == null) return null;
+                return guardResource(request.getUrl().toString(), request.isForMainFrame());
+            }
+
+            @Override
+            @SuppressWarnings("deprecation")
+            public android.webkit.WebResourceResponse shouldInterceptRequest(WebView view, String url) {
+                return guardResource(url, false);
+            }
+
+            @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                super.onPageStarted(view, url, favicon);
+                if (FALLBACK_URL.equals(url)) {
+                    trustedWebDocument = false;
+                    fallbackActive = true;
+                    if (fallbackSince == 0L) fallbackSince = System.currentTimeMillis();
+                    if (draftInput != null) draftInput.navigation();
+                    diagLog("FALLBACK", "page started");
+                    return;
+                }
+                fallbackActive = false;
+                trustedWebDocument = com.hubmobile.app.harness.vscreen.LocalHttpFence.isLoopbackUrl(url, enginePort);
+                // 开机动画的主文档不是回环 → 放行，但绝不注入 DSH 脚本（trustedWebDocument 保持 false）。
+                if (bootFilmOn && !trustedWebDocument) return;
+                if (draftInput != null) draftInput.navigation();
+                if (!trustedWebDocument) { view.stopLoading(); return; }
+                injectAbortSignalAny(view);
+            }
+
+            @Override
+            public void onReceivedError(WebView view, android.webkit.WebResourceRequest request,
+                                         android.webkit.WebResourceError error) {
+                // v1.52：主框架加载失败不再盲目 2.5s 重试（用户面前只剩一块白）。
+                // 改成交给兜底页：现场给状态 / 版本 / 日志出口 / 安全模式，后台自己继续探。
+                if (request == null || !request.isForMainFrame()) return;
+                if (FALLBACK_URL.equals(String.valueOf(request.getUrl()))) return;   // 兜底页自身失败：别递归
+                String desc = "";
+                try { desc = String.valueOf(error == null ? "" : error.getDescription()); } catch (Throwable ignored) {}
+                errorRetries++;
+                diagLog("FALLBACK", "main frame error: " + desc);
+                showBootFallback("主页面加载失败" + (desc.isEmpty() ? "" : "：" + desc));
+            }
+
+            // 2026-10-19 诊断用：把子资源的 4xx/5xx 打到 logcat。
+            // 客户端插件包 URL 带 rev，而 rev 取自文件 mtime（dsh-client-modules：mtimeMs），
+            // 对不上就被服务端拒绝（"mismatched revisions are rejected"）→ 404，
+            // 前端只少加载一个插件、界面看不出异常，功能整块消失。没有这条日志就完全瞎。
+            @Override
+            public void onReceivedHttpError(WebView view, android.webkit.WebResourceRequest request,
+                                            android.webkit.WebResourceResponse errorResponse) {
+                try {
+                    if (request == null || errorResponse == null) return;
+                    int code = errorResponse.getStatusCode();
+                    if (code >= 400) diagLog("DSHNET", code + " " + String.valueOf(request.getUrl()));
+                    if (code == 401 && request.isForMainFrame()) {
+                        // token 一次性：内存里那条早就作废了，必须强制从日志重捞，
+                        // 否则拿着废令牌反复 loadUrl，用户看到的就是「白屏刷不完」。
+                        final String u = authReloadTries < 2 ? reloadTokenFromLog() : null;
+                        if (u != null && !u.isEmpty()) {
+                            authReloadTries++;
+                            final WebView wv = view;
+                            diagLog("FALLBACK", "401, token reloaded x" + authReloadTries);
+                            ui.post(new Runnable() { @Override public void run() { wv.loadUrl(u); }});
+                            return;
+                        }
+                        showBootFallback("引擎在，但认证反复没通过（401，token 重捞也没拿到）");
+                    }
+                } catch (Throwable ignored) {}
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                if (FALLBACK_URL.equals(url)) { diagLog("FALLBACK", "page finished"); return; }
+                if (bootFilmOn && !trustedWebDocument) {
+          // 片子就绪：补发积压的那条指令
+                    bootFilmReady = true;
+                    if (bootFilmPending != null) {
+                        view.evaluateJavascript(bootFilmPending, null);
+                        bootFilmPending = null;
+                    }
+                    return;
+                }
+                if (!trustedWebDocument || !com.hubmobile.app.harness.vscreen.LocalHttpFence.isLoopbackUrl(url, enginePort)) return;
+                // 只有真正的主文档才算「加载成功」：开机动画那份 data: 文档不能记账，
+                // 否则它晚到一步就会把 stall 看门狗骗过去，白屏重新变成没人管。
+                pageLoadedAt = System.currentTimeMillis();
+                bootCycleFailures = 0;
+                everEnteredHome = true;
+                authReloadTries = 0;
+                errorRetries = 0;
+                injectDraftBootstrap(view);
+                diagLog("PAGE", "finished trusted=" + trustedWebDocument + " " + url);
+                probePageState(view);
+                // v1.13.11：页面底色决定状态栏/导航栏颜色（前端主题可独立于系统设置），
+                // 且主题可能在页面挂载后才被前端插件应用 → 多试几次，取到即刷新。
+                final int[] delays = {0, 700, 2000, 5000};
+                for (int i = 0; i < delays.length; i++) {
+                    final int d = delays[i];
+                    view.postDelayed(new Runnable() {
+                        @Override public void run() { refreshPageBackground(); }
+                    }, d);
+                }
+                // v1.34：控制台改由前端插件 dsh-android-console 提供设置页，
+                // 这里不再往设置弹窗里注入 DOM（旧的 SETTINGS_ENTRY_JS / openSettings 已删）。
+                // v1.13.12：让页面把底色变化主动推给壳（用户在前端里切深浅色时状态栏能跟着变，
+                // 不再只靠页面加载时的几次采样）。注入 MutationObserver，主题 class/属性一变就上报。
+                try {
+                    final String cssDark = cssRgb(getColor(R.color.shell_bg_dark));
+                    final String cssLight = cssRgb(getColor(R.color.shell_bg_light));
+                    view.evaluateJavascript(
+                        "(function(){try{if(window.__dshBgWatch)return;window.__dshBgWatch=1;"
+                        + "function opaque(s){return s&&!/rgba?\\([^)]*,\\s*0\\s*\\)/.test(s);}"
+                        // 壁纸模式下 body/html 的底被壁纸层撤掉了，量出来是透明或上游默认白 ——
+                        // 把白推给壳会把系统栏染成一条白带，这里按页面自己的深浅色标记给壳色。
+                        + "function wall(){try{return (getComputedStyle(document.documentElement,'::before')"
+                        + ".backgroundImage||'').indexOf('url(')>=0}catch(e){return false}}"
+                        + "function dark(){try{return !!(document.body&&document.body.hasAttribute('data-ds-dark-theme'))}catch(e){return false}}"
+                        + "function cur(){if(wall())return dark()?'" + cssDark + "':'" + cssLight + "';"
+                        + "var b='';try{b=getComputedStyle(document.body).backgroundColor||''}catch(e){}"
+                        + "if(opaque(b))return b;var h='';try{h=getComputedStyle(document.documentElement).backgroundColor||''}catch(e){}"
+                        + "return opaque(h)?h:b;}"
+                        + "function push(){try{if(window.dshshell&&dshshell.onBg)dshshell.onBg(cur())}catch(e){}}"
+                        + "var t=null;function soon(){if(t)return;t=setTimeout(function(){t=null;push()},250);}"
+                        + "try{new MutationObserver(soon).observe(document.documentElement,"
+                        + "{attributes:true,attributeFilter:['class','style','data-theme','color-scheme']})}catch(e){}"
+                        + "document.addEventListener('transitionend',soon,true);"
+                        + "push();setTimeout(push,800);setTimeout(push,2500);}catch(e){}})()",
+                        null);
+                } catch (Throwable ignored) {}
+                // v1.45 壳层导航：**不在 onPageFinished 里清历史**。
+                // 会审（Gemini 4 Argon / Kimi K3.1 Pro，2026-10-27）两条独立指控：
+                //   1) Chromium 对同文档导航（pushState/replaceState/hash）也可能回调 onPageFinished，
+                //      无条件 clearHistory() 会把 SPA 刚推进去的路由项当场抹平，history.back() 永远失效；
+                //   2) 重载、加载中的早期 pushState 也会被清，路由史丢失。
+                // 结论：白屏问题在 onBackUnhandled 里解决（prev 不是 loopback 就不 goBack，直接 confirmExit），
+                // 不清历史也不会有机会落到 data: 文档上。
+                //
+                // 侧边栏/浮层要靠前端自己吃返回，这里补一个窗口级桥；前端没有就别答（返回 false 走兜底）。
+                try {
+                    view.evaluateJavascript(DSH_BACK_JS, null);
+                } catch (Throwable ignored) {}
+                // 升级后首次启动时插件 bundle 的 rev 会在启动途中变化（rev 由 client.js 的 mtime 派生），
+                // 早开的页面会停在「Failed to load plugins」——这里自愈：探测到就 reload，最多两次。
+                try {
+                    schedulePluginFailureProbe(view);
+                } catch (Throwable ignored) {}
+            }
+        });
+
+        // v1.13.12：页面 → 壳的底色上报通道（配合上面注入的观察器；只暴露一个只读回调）
+        // v1.34：控制台搬进网页设置页后，这里换成两个窄接口 —— 状态 / 动作，见 ctlStateJson()。
+        try {
+            webView.addJavascriptInterface(new Object() {
+                /** 客户端插件 dsh-android-console 拉状态用（返回 JSON 字符串）。 */
+                @android.webkit.JavascriptInterface
+                public String ctlState() { return trustedWebDocument ? ctlStateJson() : "{\"error\":\"untrusted document\"}"; }
+
+                /** 客户端插件 dsh-android-console 发动作用；动作在主线程执行，这里立刻回。 */
+                @android.webkit.JavascriptInterface
+                public String ctlAct(String id, String arg) {
+                    return trustedWebDocument ? ctlAction(id, arg) : "{\"ok\":false,\"msg\":\"untrusted document\"}";
+                }
+
+                @android.webkit.JavascriptInterface
+                public void onBg(String css) {
+                    if (!trustedWebDocument) return;
+                    final int c = parseCssColor(css);
+                    if (c == 0) return;
+                    ui.post(new Runnable() { @Override public void run() {
+                        if (c == pageBgColor) return;
+                        pageBgColor = c;
+                        applyStatusBar();
+                        if (engineRoot != null) engineRoot.setBackgroundColor(c);
+                        if (webView != null) webView.setBackgroundColor(c);
+                    }});
+                }
+            }, "dshshell");
+            webView.addJavascriptInterface(new BootBridge(), "dshboot");
+            draftInput = new DraftInputBridge(this, new DraftInputBridge.Guard() {
+                public boolean allowed() { return trustedWebDocument; }
+            });
+            webView.addJavascriptInterface(draftInput, "dshinput");
+        } catch (Throwable ignored) {}
+
+        // 附件/文件选择：官方前端用 <input type="file"> 选文件，Android WebView 必须实现
+        // onShowFileChooser 才会弹系统文件选择器，否则点「添加附件」没有任何反应。
+        webView.setWebChromeClient(new WebChromeClient() {
+            // 2026-10-19 诊断用：WebView 里的 JS 异常与 console 输出以前**完全看不到**
+            // （没有 onConsoleMessage 转发），插件加载失败的原因只能靠猜。
+            // ERROR/WARNING 全记；INFO/LOG 只在含插件相关关键词时记，避免刷爆 256KiB 环形缓冲。
+            @Override
+            public boolean onConsoleMessage(android.webkit.ConsoleMessage m) {
+                try {
+                    if (m == null) return true;
+                    String lvl = String.valueOf(m.messageLevel());
+                    String msg = String.valueOf(m.message());
+                    boolean bad = "ERROR".equals(lvl) || "WARNING".equals(lvl);
+                    String low = msg.toLowerCase();
+                    if (bad || low.contains("plugin") || low.contains("console")
+                            || low.contains("slot") || low.contains("inject")) {
+                        diagLog("DSHJS", lvl + " " + m.sourceId() + ":" + m.lineNumber() + " " + msg);
+                    }
+                } catch (Throwable ignored) {}
+                return true;
+            }
+            // v1.39.5：target=_blank / window.open 的下载或本地文件，同样交给 handleWebDownload，
+            // 否则 WebView 会把它交回系统，APK 又落进「文件预览」而不是安装器。
+            // v1.39.6 (2026-10-18)：其余 URL 不再静默丢弃 —— 交给 routeNewWindow 落地
+            // （回环 → 主 WebView；其余 http(s)/mailto/tel → 系统浏览器）。
+            @Override
+            public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture,
+                                          android.os.Message resultMsg) {
+                try {
+                    final WebView probe = new WebView(MainActivity.this);
+                    // 两个重载只允许落地一次（老内核可能先走 String 版再走 Request 版）。
+                    final boolean[] routed = {false};
+                    probe.setWebViewClient(new android.webkit.WebViewClient() {
+                        private boolean routeOnce(String u) {
+                            // 登录对话框会先 window.open("about:blank") 预占一个标签页，
+                            // 再 location.replace(授权地址)。空页不能算「已落地」，否则
+                            // 真正的授权地址会被这道闸挡掉（2026-10-18 账号登录复现）。
+                            if (u == null || u.isEmpty() || "about:blank".equals(u)) return false;
+                            if (routed[0]) return true;
+                            routed[0] = true;
+                            probe.destroy();
+                            return routeNewWindow(u);
+                        }
+
+                        @Override
+                        public boolean shouldOverrideUrlLoading(WebView v,
+                                                                android.webkit.WebResourceRequest r) {
+                            return routeOnce(r == null ? null : r.getUrl().toString());
+                        }
+
+                        @Override
+                        @SuppressWarnings("deprecation")
+                        public boolean shouldOverrideUrlLoading(WebView v, String url) {
+                            return routeOnce(url);
+                        }
+                    });
+                    android.webkit.WebView.WebViewTransport tr =
+                            (android.webkit.WebView.WebViewTransport) resultMsg.obj;
+                    tr.setWebView(probe);
+                    resultMsg.sendToTarget();
+                } catch (Throwable ignored) {}
+                return true;
+            }
+
+            // dsh-android-patch v6b (2026-09-30)：给 WebView 补上 onJsPrompt。
+            // WebView 默认不实现它（返回 false = 网页调 prompt() 什么都不显示），
+            // 这里接一个原生输入框，把这个通用能力补齐。
+            // 注：本方法最初是为一个"手动粘贴登录回调地址"的方案加的，
+            //     该方案经实测无效已作废；但 onJsPrompt 本身通用，故保留。
+            @Override
+            public boolean onJsPrompt(WebView view, String url, String message,
+                                      String defaultValue, final android.webkit.JsPromptResult result) {
+                try {
+                    final android.widget.EditText input = new android.widget.EditText(MainActivity.this);
+                    input.setText(defaultValue == null ? "" : defaultValue);
+                    input.setSingleLine(false);
+                    input.setHint("http://127.0.0.1:.../oauth/callback?code=...&state=...");
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("粘贴回调地址")
+                            .setMessage(message)
+                            .setView(input)
+                            .setPositiveButton("提交", new DialogInterface.OnClickListener() {
+                                @Override public void onClick(DialogInterface d, int w) {
+                                    result.confirm(input.getText().toString().trim());
+                                }
+                            })
+                            .setNegativeButton("取消", new DialogInterface.OnClickListener() {
+                                @Override public void onClick(DialogInterface d, int w) { result.cancel(); }
+                            })
+                            .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                                @Override public void onCancel(DialogInterface d) { result.cancel(); }
+                            })
+                            .show();
+                } catch (Throwable t) {
+                    result.cancel();
+                }
+                return true;
+            }
+
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
+                                             FileChooserParams params) {
+                if (fileChooserCallback != null) {
+                    fileChooserCallback.onReceiveValue(null);
+                }
+                fileChooserCallback = callback;
+                // v1.40（2026-10-12）：附件按钮加「拍照」入口。
+                // 前端是 <input type="file">：以前只能弹系统文件选择器（相册/文件），
+                // 想拍照必须先开相机 App 拍完、再回相册里挑 —— 用户明确要求能直接拍。
+                // 只在"要的是图片"时给这个入口（accept 为空 / */* / image/*）；
+                // 其它类型（比如导入插件的 zip）保持原样，只弹文件选择器。
+                if (attachWantsImage(params)) {
+                    try {
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("添加图片")
+                                .setItems(new String[]{"拍照", "从相册/文件选择"},
+                                        new DialogInterface.OnClickListener() {
+                                            @Override public void onClick(DialogInterface d, int which) {
+                                                if (which == 0) launchCameraCapture();
+                                                else launchFilePicker(params);
+                                            }
+                                        })
+                                .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                                    @Override public void onCancel(DialogInterface d) { cancelFileChooser(); }
+                                })
+                                .show();
+                        return true;
+                    } catch (Throwable t) {
+                        Log.w(TAG, "attach dialog failed, fallback to file picker", t);
+                    }
+                }
+                return launchFilePicker(params);
+            }
+        });
+
+        statusView = new TextView(this);
+        statusView.setText("");
+        statusView.setTextColor(cSub());
+        statusView.setTextSize(TypedValue.COMPLEX_UNIT_PX, getResources().getDimension(R.dimen.text_body));
+        statusView.setGravity(Gravity.CENTER);
+        statusView.setPadding(dp(24), dp(8), dp(24), dp(8));
+        statusView.setVisibility(View.GONE);
+
+        // 提取 rish dex（DSH 的 shizuku_shell 插件执行命令用，与 payload 解压解耦）
+        rishDex = extractRishDex();
+        vscreenDex = extractVscreenDex();
+        // 虚拟屏接入桥：启动 Operit server + HTTP->binder 转发（插件走 8999）
+        // 原实现用反射按包名拼类名（getPackageName() + ".VsreenBridgeService"）——
+        //   API 包名一改（本项目另有 Lite / 兼容版等只改 manifest 包名的变体），
+        //   拼出来的类名就找不到 → ClassNotFoundException → 桥服务根本没起来 → 预览窗永远不出现。
+        // 改用类字面量即与包名解耦（manifest 里的组件名仍由变体构建脚本展开成绝对包名）。
+        try {
+            startService(new Intent(this, VsreenBridgeService.class));
+        } catch (Throwable t) {
+            Log.w(TAG, "start VsreenBridgeService failed", t);
+        }
+        // 存储权限未授予时自动请求（写 /sdcard 提取 vscreen jar 需要；Android 10+ targetSdk28 必须运行时授权），
+        // 授权回调里重新提取外部 jar（首次启动提取会 EACCES，不弹窗用户根本不知道要授权）。
+        try {
+            if (checkSelfPermission("android.permission.WRITE_EXTERNAL_STORAGE") != PackageManager.PERMISSION_GRANTED) {
+                pendingVscreenExtract = true;
+                requestPermissions(new String[]{
+                        "android.permission.READ_EXTERNAL_STORAGE",
+                        "android.permission.WRITE_EXTERNAL_STORAGE"}, REQ_STORAGE);
+            }
+        } catch (Throwable ignored) {}
+
+        // Shizuku API：监听 binder 与授权结果（实现授权弹窗）
+        try {
+            Shizuku.addBinderReceivedListenerSticky(new Shizuku.OnBinderReceivedListener() {
+                @Override public void onBinderReceived() { probeShizuku(); }
+            });
+            Shizuku.addBinderDeadListener(new Shizuku.OnBinderDeadListener() {
+                @Override public void onBinderDead() { shizukuOk = false; refreshAllStatuses(); }
+            });
+            Shizuku.addRequestPermissionResultListener(new Shizuku.OnRequestPermissionResultListener() {
+                @Override public void onRequestPermissionResult(int requestCode, int grantResult) {
+                    pendingShizukuReq = false;   // v1.13：无论结果都结束“等待授权”状态
+                    shizukuOk = grantResult == PackageManager.PERMISSION_GRANTED;
+                    Log.i(TAG, "shizuku permission result: " + grantResult);
+                    refreshAllStatuses();
+                }
+            });
+        } catch (Throwable t) {
+            Log.w(TAG, "Shizuku listener init failed", t);
+        }
+
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (prefs.getBoolean("setup_done", false)) {
+            // 定时任务自动执行：闹钟到点可能带着 scheduledTask extra 启动本 Activity
+            Intent in = getIntent();
+            if (in != null) {
+                String task = in.getStringExtra("scheduledTask");
+                if (task != null && !task.isEmpty()) pendingScheduledTask = task;
+            }
+            showEngineScreen();
+            // v1.14：冷启动不再停在控制台（原来要点「启动引擎」+「打开主界面」两下）。
+            //   · 通知里的「控制台」按钮（open_console）→ 直接进控制台；
+            //   · 文件未就绪（覆盖安装后的首次启动）→ 仍进控制台，走「解压文件」；
+            //   · 其余情况 → 直接 startEngine()，界面显示启动页，引擎就绪后
+            //     waitForServer() → loadHome() 自动进聊天页，**零点击**。
+            // 控制台本身没删：常驻通知的「控制台」按钮是它的入口（见 EngineService.buildNotification）。
+            // 动态注册桌面长按快捷方式 (App Shortcuts: 仅保留安全模式)
+            initDynamicShortcuts();
+
+            if (in != null && in.getBooleanExtra("safe_mode_boot", false)) {
+                conToast("正在通过桌面快捷方式进入安全模式…");
+                conSafeModeNow();
+            } else if (in != null && in.getBooleanExtra("safe_mode_exit", false)) {
+                conToast("正在通过桌面快捷方式退出安全模式…");
+                conExitSafeModeNow();
+            } else {
+                startEngine();
+            }
+        } else {
+            showPermissionScreen();
+        }
+        ui.post(new Runnable() {
+            @Override public void run() {
+                handleNotificationIntent(getIntent());
+                injectDraftBootstrap(webView);   // v1.40.5：分享进来先补令牌，否则前端桥是空的
+                if (draftInput != null) draftInput.accept(getIntent());
+            }
+        });
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent != null && intent.getBooleanExtra("safe_mode_boot", false)) {
+            conToast("正在通过桌面快捷方式进入安全模式…");
+            conSafeModeNow();
+        } else if (intent != null && intent.getBooleanExtra("safe_mode_exit", false)) {
+            conToast("正在通过桌面快捷方式退出安全模式…");
+            conExitSafeModeNow();
+        }
+        handleNotificationIntent(intent);
+        injectDraftBootstrap(webView);   // v1.40.5：同 onCreate
+        if (draftInput != null) draftInput.accept(intent);
+    }
+
+    /**
+     * v1.40.5：把输入栏桥的令牌**主动补注入**进页面。
+     *
+     * 只在 onPageFinished 注一次并不够：WebView 复用/恢复文档、或从别的 App 分享进来时，
+     * 文档可能没走完一次 onPageStarted→onPageFinished 就活着，令牌永远进不了页面；
+     * 前端 nativeInput() 恒为 null → 分享卡片、听写**全都静默不工作**，界面上一个字都没有。
+     * 注入幂等（bootstrap 只设全局变量、不轮换令牌），resume / 分享到达时各补一次。
+     */
+    private void injectDraftBootstrap(final android.webkit.WebView view) {
+        if (view == null || draftInput == null || !trustedWebDocument) return;
+        view.post(new Runnable() {
+            @Override public void run() {
+                try { view.evaluateJavascript(draftInput.bootstrap(), null); }
+                catch (Throwable t) { Log.w(TAG, "inject draft bootstrap failed", t); }
+            }
+        });
+    }
+
+    //#region dsh-android-patch v1.39.5 (2026-10-18)：网页端「文件卡片」点击的落地点
+    // 背景：DSH 聊天里的交付卡片给出的是文件下载 URL。WebView 默认没有 DownloadListener，
+    // 这类请求被交回系统 → 点 APK 卡片只会拉起「文件预览」，一路显示「该格式文件暂时无法
+    // 预览」，安装器根本不弹（2026-10-18 用户实测）。这里接管两类 URL：
+    //   · file:// 且文件存在 → 直接交给系统（.apk 走安装器）
+    //   · 其余 http(s) → 系统 DownloadManager 下载到「下载」目录，通知栏点开即装
+    // 回滚：删掉本 region，并删掉 new WebView 处两行 setDownloadListener / setSupportMultipleWindows
+    //      以及 WebChromeClient 里的 onCreateWindow。
+    /** 网页触发的下载：本地文件直接交给安装器/系统打开；远程走 DownloadManager。 */
+    private void handleWebDownload(String url, String userAgent, String contentDisposition, String mimetype) {
+        if (url == null || url.isEmpty()) return;
+        try {
+            if (url.startsWith("file://")) {
+                String p = android.net.Uri.decode(url.substring("file://".length()));
+                if (openLocalFile(p)) return;
+            }
+            android.app.DownloadManager dm =
+                    (android.app.DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+            if (dm == null) throw new IllegalStateException("系统下载服务不可用");
+            android.app.DownloadManager.Request req =
+                    new android.app.DownloadManager.Request(android.net.Uri.parse(url));
+            if (userAgent != null && !userAgent.isEmpty()) req.addRequestHeader("User-Agent", userAgent);
+            String name = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimetype);
+            req.setTitle(name);
+            req.setNotificationVisibility(
+                    android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            req.setDestinationInExternalPublicDir(
+                    android.os.Environment.DIRECTORY_DOWNLOADS, name);
+            dm.enqueue(req);
+            conToast("已开始下载：" + name);
+        } catch (Throwable t) {
+            Log.w(TAG, "handleWebDownload failed: " + url, t);
+            conToast("下载失败：" + t.getMessage());
+        }
+    }
+
+    /** 用系统打开本地文件（.apk 走安装器）。返回 false 表示这个文件没法交给系统。 */
+    private boolean openLocalFile(String path) {
+        try {
+            java.io.File f = new java.io.File(path);
+            if (!f.isFile()) {
+                conToast("文件不存在：" + path);
+                return true;
+            }
+            boolean apk = path.toLowerCase().endsWith(".apk");
+            android.net.Uri u = LogShareProvider.uriForAbs(this, path);
+            if (u == null) {
+                Log.w(TAG, "openLocalFile: cannot expose " + path);
+                return false;
+            }
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(u, apk ? "application/vnd.android.package-archive" : "*/*");
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "openLocalFile failed: " + path, t);
+            conToast("打开失败：" + t.getMessage());
+            return true;
+        }
+    }
+    //#endregion
+
+    private void initDynamicShortcuts() {
+        if (Build.VERSION.SDK_INT < 25) return;
+        try {
+            android.content.pm.ShortcutManager sm = getSystemService(android.content.pm.ShortcutManager.class);
+            if (sm == null) return;
+
+            // v1.39.4：快捷方式跟随安全模式状态 —— 处于安全模式时给「退出安全模式」，
+            // 否则给「安全模式启动」。长按桌面图标即可就近操作，不必先进控制台
+            // （安全模式下控制台可能因插件问题打不开，这条是逃生口）。
+            boolean inSafe = safeModeActive();
+            Intent si = new Intent(Intent.ACTION_VIEW, null, this, MainActivity.class);
+            si.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
+            android.content.pm.ShortcutInfo sc;
+            if (inSafe) {
+                si.putExtra("safe_mode_exit", true);
+                sc = new android.content.pm.ShortcutInfo.Builder(this, "shortcut_exit_safe_mode")
+                        .setShortLabel("退出安全模式")
+                        .setLongLabel("退出安全模式（还原被旁置的用户层）")
+                        .setIcon(android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_launcher))
+                        .setIntent(si)
+                        .build();
+            } else {
+                si.putExtra("safe_mode_boot", true);
+                sc = new android.content.pm.ShortcutInfo.Builder(this, "shortcut_safe_mode")
+                        .setShortLabel("安全模式启动")
+                        .setLongLabel("安全模式启动（跳过用户层，保护数据）")
+                        .setIcon(android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_launcher))
+                        .setIntent(si)
+                        .build();
+            }
+
+            java.util.List<android.content.pm.ShortcutInfo> list = new java.util.ArrayList<android.content.pm.ShortcutInfo>();
+            list.add(sc);
+            sm.setDynamicShortcuts(list);
+        } catch (Throwable t) {
+            Log.w(TAG, "initDynamicShortcuts failed", t);
+        }
+    }
+
+    // 定时任务自动执行：闹钟到点带来的任务文本（引擎就绪后自动 prompt 执行）
+    private String pendingScheduledTask = null;
+
+    // ============ WebView 兼容检测（老安卓 WebView 缺失/过旧） ============
+    /** DSH 前端需要较新的 Chromium：
+     *  · 80+  才能渲染（<script type="module"> + 可选链/nullish）
+     *  · 116+ 才有 AbortSignal.any()，DSH 的"选择工作区目录"等功能直接调它，
+     *         低版本会抛「AbortSignal.any is not a function」→ 界面卡在"重新连接中"
+     *         （2026-09-30 实机反馈：两台新装的机器都卡在这里，报错就是这一条）
+     *  阈值取 116。检测到过旧时弹提示引导，不阻断启动
+     *  （引擎本身与 WebView 无关，node 进程照常拉起）。 */
+    private void checkWebViewCompat() {
+        try {
+            int chrome = parseChromeMajor(webView.getSettings().getUserAgentString());
+            // UA 无 Chrome 标记时（部分 ROM 魔改 UA），API 26+ 用 WebView 包版本兜底
+            if (chrome <= 0 && Build.VERSION.SDK_INT >= 26) {
+                try {
+                    android.content.pm.PackageInfo pi = WebView.getCurrentWebViewPackage();
+                    if (pi != null && pi.versionName != null) {
+                        chrome = parseChromeMajor(pi.versionName);
+                    }
+                } catch (Throwable ignored) {}
+            }
+            if (chrome <= 0 || chrome >= 116) return; // 拿不到版本或够新 → 不打扰
+            final int ver = chrome;
+            ui.post(new Runnable() {
+                @Override public void run() {
+                    try {
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("系统 WebView 版本过旧")
+                                .setMessage("检测到系统 WebView 内核为 Chromium " + ver
+                                        + "（较新版本为 116 以上）。\n\n"
+                                        + "先直接点「继续尝试」—— 本版已内置兼容补丁，"
+                                        + "多数情况可以直接正常使用。\n\n"
+                                        + "如果点完仍卡在「重新连接中」，再考虑更新系统组件：\n"
+                                        + "① 到手机自带的应用商店搜「Android System WebView」更新；\n"
+                                        + "② 商店里搜不到：设置→应用管理→右上角「显示系统程序」→"
+                                        + "搜 WebView→点进去，看有没有「应用商店/更新」入口；\n"
+                                        + "③ 装了 Chrome 或其他较新 Chromium 内核浏览器的，"
+                                        + "可在 开发者选项→WebView 实现 里改选它。\n\n"
+                                        + "⚠️ 不要点「卸载更新」—— 那是退回出厂预装版本，只会更旧。")
+                                .setPositiveButton("去更新", new DialogInterface.OnClickListener() {
+                                    @Override public void onClick(DialogInterface d, int w) { openWebViewUpdate(); }
+                                })
+                                .setNegativeButton("继续尝试", null)
+                                .show();
+                    } catch (Throwable ignored) {}
+                }
+            });
+        } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 给老 WebView 补上 AbortSignal.any（Chromium 116+ 才有）。
+     *
+     * DSH 前端大量使用它（工作区目录、侧栏文件、文档预览、账户等 6 个 client 包，
+     * 服务端另有 75 个文件在用），缺失时界面直接抛
+     * 「AbortSignal.any is not a function」并卡在「重新连接中」。
+     *
+     * 实机案例：2026-09-30，用户设备 Chromium 97，装上后一直连不上，
+     * 「选择工作区目录」对话框里报的就是这一条 —— 引擎完全正常，纯粹是前端跑不起来。
+     *
+     * 这里在每次页面开始加载时注入一段等价实现（幂等：已有则直接返回）。
+     * 回滚：删除本方法与 WebViewClient 里的 onPageStarted 覆写。
+     */
+    private void injectAbortSignalAny(WebView view) {
+        if (view == null) return;
+        final String js =
+            "(function(){try{" +
+            "if(typeof AbortSignal!=='undefined'){" +
+            "if(!AbortSignal.any)AbortSignal.any=function(sigs){" +
+            "var c=new AbortController();var a=Array.prototype.slice.call(sigs||[]);" +
+            "function f(e){var r=e&&e.target?e.target.reason:undefined;" +
+            "try{c.abort(r)}catch(_){try{c.abort()}catch(__){}}}" +
+            "for(var i=0;i<a.length;i++){var s=a[i];if(!s)continue;" +
+            "if(s.aborted){f({target:s});break}s.addEventListener('abort',f,{once:true})}" +
+            "return c.signal};" +
+            "if(!AbortSignal.prototype.throwIfAborted)AbortSignal.prototype.throwIfAborted=function(){" +
+            "if(this.aborted)throw this.reason};" +
+            "if(!AbortSignal.timeout)AbortSignal.timeout=function(ms){var c=new AbortController();" +
+            "setTimeout(function(){try{c.abort(new DOMException('TimeoutError','TimeoutError'))}" +
+            "catch(_){c.abort()}},ms);return c.signal};}" +
+            "if(typeof structuredClone!=='function'){window.structuredClone=function(v){" +
+            "return JSON.parse(JSON.stringify(v))};}" +
+            "var AP=Array.prototype;" +
+            "if(!AP.toSorted)AP.toSorted=function(c){return this.slice().sort(c)};" +
+            "if(!AP.toReversed)AP.toReversed=function(){return this.slice().reverse()};" +
+            "if(!AP.with)AP.with=function(i,v){var a=this.slice();a[i<0?a.length+i:i]=v;return a};" +
+            "if(!Promise.withResolvers)Promise.withResolvers=function(){var r,j;" +
+            "var p=new Promise(function(a,b){r=a;j=b});return{promise:p,resolve:r,reject:j}};" +
+            "if(typeof URL!=='undefined'&&!URL.canParse)URL.canParse=function(u,b){try{new URL(u,b);return true}" +
+            "catch(_){return false}};" +
+            "}catch(e){}})();";
+        try { view.evaluateJavascript(js, null); } catch (Throwable ignored) {}
+    }
+
+    /** 从 UA（"... Chrome/51.0.2704.81 ..."）或版本名（"80.0.3987.149"）解析主版本号。 */
+    private int parseChromeMajor(String s) {
+        if (s == null) return -1;
+        int i = s.indexOf("Chrome/");
+        int base = 0;
+        if (i < 0) { i = s.indexOf("Chrome "); if (i < 0) return -1; base = "Chrome ".length(); }
+        else { base = "Chrome/".length(); }
+        int start = i + base;
+        int e = start;
+        while (e < s.length() && Character.isDigit(s.charAt(e))) e++;
+        if (e == start) return -1;
+        try { return Integer.parseInt(s.substring(start, e)); } catch (Throwable t) { return -1; }
+    }
+
+    /** 引导更新系统 WebView：优先系统 WebView 设置页，失败兜底应用商店。 */
+    private void openWebViewUpdate() {
+        try {
+            Intent i = new Intent("android.settings.WEBVIEW_SETTINGS");
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+            return;
+        } catch (Throwable ignored) {}
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=com.google.android.webview"));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Throwable ignored) {}
+    }
+
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    private float dpF(float v) {
+        return v * getResources().getDisplayMetrics().density;
+    }
+
+    private int sp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().scaledDensity);
+    }
+
+    // ============ 权限引导界面 ============
+    private void detachView(View v) {
+        if (v != null && v.getParent() != null) {
+            ((ViewGroup) v.getParent()).removeView(v);
+        }
+    }
+
+    // ============ 启动过渡动画（光晕 + 流光圆环进度） ============
+    private class SplashLogoView extends View {
+        private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint trackPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint progressPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint dotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        private float breath = 0f;
+        private float appear = 0f;
+        private ValueAnimator breathAnim;
+        private ValueAnimator appearAnim;
+        private ValueAnimator spinAnim;
+        private ValueAnimator progressAnim;
+
+        private boolean indeterminate = true; // 默认拉起引擎时为流光巡航
+        private float spinAngle = 0f;
+        private float targetProgress = 0f;
+        private float displayProgress = 0f;
+
+        private int lastGlowColor = 0;
+        private float lastGlowRadius = 0f;
+        private final RectF arcRect = new RectF();
+
+        // 官方 DSH 鲸鱼矢量：ic_whale_black 与 ic_launcher 的同一条 pathData（3394 字符，逐字节相同），
+        // 只少了 ic_launcher 的白底板 —— 白底板在深色启动页上就是那块「方形」；不能用 ic_launcher + setTint。
+        private Drawable whale;
+        private int lastWhaleColor = 0;
+
+        public SplashLogoView(Context context) {
+            super(context);
+
+            whale = getResources().getDrawable(R.drawable.ic_whale_black, getTheme());
+
+            trackPaint.setStyle(Paint.Style.STROKE);
+            trackPaint.setStrokeWidth(dpF(2.5f));
+
+            progressPaint.setStyle(Paint.Style.STROKE);
+            progressPaint.setStrokeCap(Paint.Cap.ROUND);
+            progressPaint.setStrokeWidth(dpF(2.5f));
+
+            dotPaint.setStyle(Paint.Style.FILL);
+        }
+
+        public void setProgress(int percent) {
+            indeterminate = false;
+            targetProgress = Math.max(0, Math.min(100, percent));
+            if (progressAnim != null) progressAnim.cancel();
+            progressAnim = ValueAnimator.ofFloat(displayProgress, targetProgress);
+            progressAnim.setDuration(240);
+            progressAnim.setInterpolator(new DecelerateInterpolator());
+            progressAnim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                @Override public void onAnimationUpdate(ValueAnimator animation) {
+                    displayProgress = (Float) animation.getAnimatedValue();
+                    invalidate();
+                }
+            });
+            progressAnim.start();
+        }
+
+        public void setIndeterminate(boolean ind) {
+            if (this.indeterminate == ind) return;
+            this.indeterminate = ind;
+            if (ind && (spinAnim == null || !spinAnim.isRunning())) {
+                startSpin();
+            }
+            invalidate();
+        }
+
+        private void startSpin() {
+            if (spinAnim != null) spinAnim.cancel();
+            spinAnim = ValueAnimator.ofFloat(0f, 360f);
+            spinAnim.setDuration(1600);
+            spinAnim.setRepeatCount(ValueAnimator.INFINITE);
+            spinAnim.setInterpolator(new LinearInterpolator());
+            spinAnim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                @Override public void onAnimationUpdate(ValueAnimator animation) {
+                    spinAngle = (Float) animation.getAnimatedValue();
+                    invalidate();
+                }
+            });
+            spinAnim.start();
+        }
+
+        public void startAnim() {
+            stopAnim();
+            // 入场：520ms 缩放 + 淡入
+            appearAnim = ValueAnimator.ofFloat(0f, 1f);
+            appearAnim.setDuration(520);
+            appearAnim.setInterpolator(new DecelerateInterpolator());
+            appearAnim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                @Override public void onAnimationUpdate(ValueAnimator animation) {
+                    appear = (Float) animation.getAnimatedValue();
+                    invalidate();
+                }
+            });
+            appearAnim.start();
+
+            // 呼吸：2600ms 循环微缩放 + 光晕脉冲
+            breathAnim = ValueAnimator.ofFloat(0f, 1f);
+            breathAnim.setDuration(2600);
+            breathAnim.setRepeatMode(ValueAnimator.REVERSE);
+            breathAnim.setRepeatCount(ValueAnimator.INFINITE);
+            breathAnim.setInterpolator(new AccelerateDecelerateInterpolator());
+            breathAnim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                @Override public void onAnimationUpdate(ValueAnimator animation) {
+                    breath = (Float) animation.getAnimatedValue();
+                    invalidate();
+                }
+            });
+            breathAnim.start();
+
+            // 启动巡航光弧
+            if (indeterminate) {
+                startSpin();
+            }
+        }
+
+        public void stopAnim() {
+            if (appearAnim != null) { appearAnim.cancel(); appearAnim = null; }
+            if (breathAnim != null) { breathAnim.cancel(); breathAnim = null; }
+            if (spinAnim != null) { spinAnim.cancel(); spinAnim = null; }
+            if (progressAnim != null) { progressAnim.cancel(); progressAnim = null; }
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            int w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            float cx = w / 2f, cy = h / 2f;
+            int accent = cAccent();
+
+            // ③ 官方 DSH 鲸鱼（ic_launcher 里那条矢量路径，同一条 pathData；只去掉白底板，
+            //    因为白底板在深色启动页上就是那块「方形」）。先画鲸鱼，光晕与圆环叠在其上。
+            if (whale != null) {
+                int whaleColor = isDark() ? 0xFFFFFFFF : 0xFF101014;
+                if (whaleColor != lastWhaleColor) {
+                    whale.setTint(whaleColor);
+                    lastWhaleColor = whaleColor;
+                }
+                float ws = dp(72) * (1f + 0.03f * breath);
+                int half = (int) (ws / 2f);
+                whale.setBounds((int) (cx - half), (int) (cy - half),
+                        (int) (cx + half), (int) (cy + half));
+                whale.setAlpha((int) (255f * appear * (0.86f + 0.14f * breath)));
+                whale.draw(canvas);
+            }
+
+            // ① 柔和径向渐变光晕
+            float glowR = dp(84) * (1f + 0.08f * breath);
+            if (accent != lastGlowColor || Math.abs(glowR - lastGlowRadius) > 0.5f) {
+                RadialGradient gradient = new RadialGradient(
+                        cx, cy, Math.max(1f, glowR),
+                        new int[]{accent, accent & 0x00FFFFFF},
+                        new float[]{0f, 1f},
+                        Shader.TileMode.CLAMP);
+                glowPaint.setShader(gradient);
+                lastGlowColor = accent;
+                lastGlowRadius = glowR;
+            }
+            float baseAlpha = isDark() ? 0.24f : 0.12f;
+            int alpha = (int) (255f * baseAlpha * (0.60f + 0.40f * breath) * appear);
+            glowPaint.setAlpha(Math.max(0, Math.min(255, alpha)));
+            canvas.drawCircle(cx, cy, glowR, glowPaint);
+
+            // ② 环绕流光圆环进度（Orbital Progress Ring）
+            float ringR = dp(64); // 半径 64dp，包裹 104dp Logo 并留出微隙
+            arcRect.set(cx - ringR, cy - ringR, cx + ringR, cy + ringR);
+
+            // 2.1 底环暗色轨道
+            int trackColor = isDark() ? (accent & 0x00FFFFFF | 0x24000000) : (accent & 0x00FFFFFF | 0x1A000000);
+            trackPaint.setColor(trackColor);
+            trackPaint.setAlpha((int) (255f * appear * 0.45f));
+            canvas.drawCircle(cx, cy, ringR, trackPaint);
+
+            // 2.2 动态进度弧线
+            progressPaint.setColor(accent);
+            progressPaint.setAlpha((int) (255f * appear * (0.75f + 0.25f * breath)));
+
+            if (indeterminate) {
+                // 未定进度：80° 优雅流光巡航旋转
+                canvas.drawArc(arcRect, spinAngle, 80f, false, progressPaint);
+            } else if (displayProgress > 0.01f) {
+                // 确定进度：0%~100% 顺时针精准生长
+                float sweep = Math.min(360f, Math.max(0.1f, 360f * (displayProgress / 100f)));
+                canvas.drawArc(arcRect, -90f, sweep, false, progressPaint);
+
+                // 进度端点高亮微光点
+                if (sweep < 358f) {
+                    double rad = Math.toRadians(-90f + sweep);
+                    float dotX = (float) (cx + ringR * Math.cos(rad));
+                    float dotY = (float) (cy + ringR * Math.sin(rad));
+                    dotPaint.setColor(isDark() ? 0xFFFFFFFF : accent);
+                    dotPaint.setAlpha((int) (255f * appear));
+                    canvas.drawCircle(dotX, dotY, dpF(3.2f), dotPaint);
+                }
+            }
+
+        }
+    }
+
+    private void showEngineScreen() {
+        if (engineRoot == null) engineRoot = new FrameLayout(this);
+        FrameLayout root = engineRoot;
+        root.setBackgroundColor(chromeBg()); // v1.13.11：跟随主题/页面底色
+        // 成员视图可能已挂在旧容器上，先全部摘下，避免重复挂载崩溃。
+        detachView(webView);
+        detachView(statusView);
+        detachView(splashBox);
+        root.addView(webView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        box.setTranslationY(-dp(24)); // 居中微抬，视觉重心更舒展
+        splashBox = box;
+
+        // 1. 呼吸光晕 + 流光圆环
+        splashLogoView = new SplashLogoView(this);
+        splashLogo = splashLogoView;
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(dp(168), dp(168));
+        llp.gravity = Gravity.CENTER_HORIZONTAL;
+        box.addView(splashLogoView, llp);
+
+        // 2. 品牌名（排版质感升级：22sp + 0.35em 大字距 + 错峰入场）
+        splashBrand = new TextView(this);
+        splashBrand.setText("DSH");
+        splashBrand.setTextColor(cText());
+        splashBrand.setTextSize(TypedValue.COMPLEX_UNIT_PX, getResources().getDimension(R.dimen.text_title));
+        splashBrand.setLetterSpacing(0.35f);
+        splashBrand.setGravity(Gravity.CENTER);
+        splashBrand.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        splashBrand.setAlpha(0f);
+        splashBrand.setTranslationY(dp(8));
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        blp.topMargin = dp(4);
+        blp.gravity = Gravity.CENTER_HORIZONTAL;
+        box.addView(splashBrand, blp);
+
+        // 3. 状态文字（移除 ProgressBar，保留优雅的状态文字展示）
+        statusView.setTextColor(cSub());
+        statusView.setAlpha(0f);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        slp.topMargin = dp(12);
+        slp.gravity = Gravity.CENTER_HORIZONTAL;
+        box.addView(statusView, slp);
+
+        // 入场动效编排
+        splashLogoView.startAnim();
+        splashBrand.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(480)
+                .setStartDelay(160)
+                .setInterpolator(new DecelerateInterpolator())
+                .start();
+        statusView.animate()
+                .alpha(1f)
+                .setDuration(480)
+                .setStartDelay(280)
+                .setInterpolator(new DecelerateInterpolator())
+                .start();
+
+        FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        bp.gravity = Gravity.CENTER;
+        root.addView(box, bp);
+
+        setContentView(root);
+        showBootFilm();
+    }
+
+    /**
+     * 开机动画：把片子放进主 WebView（不新开 WebView，省内存；片子走 data: 文档，
+     * 由 bootFilmOn 临时放行主文档围栏）。任何异常都退回原生启动页，不让启动白屏。
+     */
+    private void showBootFilm() {
+        if (bootFilmOn || bootFilmPlayed || webView == null) return;
+        try {
+            showBootFilmImpl();
+        } catch (Throwable t) {                                  // 片子出错绝不能连累启动
+            Log.w(TAG, "boot film failed, keep native splash", t);
+            bootFilmOn = false;
+            bootFilmReady = false;
+            if (splashBox != null) splashBox.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private void showBootFilmImpl() {
+        String html;
+        try {
+            html = readAssetText("boot.html");          // 复用已有的 assets 读取实现
+        } catch (Throwable t) {
+            Log.w(TAG, "boot.html missing, keep native splash", t);
+            return;
+        }
+        if (html == null || html.length() < 2000) return;          // 没有片子 → 保持原生启动页
+        bootFilmPlayed = true;
+        bootFilmOn = true;
+        bootFilmReady = false;
+        bootFilmDone = false;
+        bootFilmP = 0f;
+        bootFilmRate = 0f;
+        bootFilmTarget = 0.10f;
+        bootStage = 0;
+        bootFilmStartAt = System.currentTimeMillis();
+        bootFilmAt = bootFilmStartAt;
+        final String body = html.replace("<body>", "<body class=\"clean\">");
+        webView.setBackgroundColor(0xFF04050A);
+        webView.post(new Runnable() {
+            @Override public void run() {
+                webView.loadDataWithBaseURL(null, body, "text/html", "utf-8", null);
+            }
+        });
+        if (splashBox != null) splashBox.setVisibility(View.INVISIBLE);
+        ui.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (bootFilmOn && !bootFilmReady) {
+                    Log.w(TAG, "boot film not ready in 6s, fall back to native splash");
+                    bootFilmOn = false;
+                    if (splashBox != null) splashBox.setVisibility(View.VISIBLE);
+                }
+            }
+        }, 6000);
+        ui.post(bootFilmTick);
+    }
+
+    /** 200ms 心跳：把平滑后的总进度 / 阶段 / 剩余秒数推给片子。 */
+    private final Runnable bootFilmTick = new Runnable() {
+        @Override public void run() {
+            if (!bootFilmOn) return;
+            if (!bootFilmDone) {                 // ready() 之后停推，否则会把 100% 又盖回 97%
+                try {
+                    bootFilmTickBody();
+                } catch (Throwable t) {
+                    Log.w(TAG, "boot film tick failed", t);
+                }
+            }
+            ui.postDelayed(this, 200);
+        }
+    };
+
+    private void bootFilmTickBody() {
+            long now = System.currentTimeMillis();
+            float dt = Math.min(1.5f, Math.max(0.05f, (now - bootFilmAt) / 1000f));
+            bootFilmAt = now;
+            float prev = bootFilmP;
+            bootFilmP += (bootFilmTarget - bootFilmP) * Math.min(0.75f, dt / 0.55f);
+            if (bootFilmP > bootFilmTarget) bootFilmP = bootFilmTarget;
+            if (bootFilmTarget - bootFilmP < 0.003f) bootFilmP = bootFilmTarget;
+            float inst = (bootFilmP - prev) / dt;
+            bootFilmRate = bootFilmRate * 0.72f + inst * 0.28f;
+            filmJs("DSH_BOOT.progress(" + String.format(java.util.Locale.US, "%.3f", bootFilmP) + ")");
+            filmJs("DSH_BOOT.stage(" + bootStage + ")");
+            int eta = bootFilmEta();
+            if (eta > 0) filmJs("DSH_BOOT.eta(" + eta + ")");
+    }
+
+    private int bootFilmEta() {
+        if (bootFilmP >= 0.995f) return 0;
+        if (bootStage == 1) {                                   // 起引擎：按历史均值倒数
+            long e = (System.currentTimeMillis() - (bootEngineAt > 0 ? bootEngineAt : bootFilmStartAt)) / 1000L;
+            return (int) Math.max(1, avgEngineSecs() - e);
+        }
+        if (bootFilmRate > 3e-4f) {                             // 解压：按实测速率外推
+            int eta = Math.round((1f - bootFilmP) / bootFilmRate);
+            return Math.max(1, Math.min(180, eta));
+        }
+        return 0;
+    }
+
+    private int avgEngineSecs() {
+        String s = getSharedPreferences(PREFS, MODE_PRIVATE).getString("engine_secs", "");
+        int sum = 0, n = 0;
+        for (String x : s.split(",")) {
+            try {
+                int v = Integer.parseInt(x.trim());
+                if (v > 0 && v < 300) { sum += v; n++; }
+            } catch (Throwable ignored) {}
+        }
+        return n > 0 ? Math.max(2, Math.round(sum / (float) n)) : 6;
+    }
+
+    private void recordEngineSecs() {
+        if (bootEngineAt <= 0) return;
+        int sec = (int) Math.max(1, Math.min(300, (System.currentTimeMillis() - bootEngineAt) / 1000L));
+        SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
+        java.util.ArrayList<String> list = new java.util.ArrayList<String>();
+        for (String x : sp.getString("engine_secs", "").split(",")) if (x.trim().length() > 0) list.add(x.trim());
+        list.add(String.valueOf(sec));
+        while (list.size() > 5) list.remove(0);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < list.size(); i++) { if (i > 0) sb.append(','); sb.append(list.get(i)); }
+        SharedPreferences.Editor e = sp.edit();
+        e.putString("engine_secs", sb.toString());
+        e.apply();
+        Log.i(TAG, "engine start " + sec + "s, history=" + sb);
+    }
+
+    private void filmJs(final String js) {
+        if (!bootFilmOn) return;
+        final WebView wv = webView;
+        if (wv == null) return;
+        if (!bootFilmReady) { bootFilmPending = js; return; }
+        wv.post(new Runnable() {
+            @Override public void run() { wv.evaluateJavascript(js, null); }
+        });
+    }
+
+    /** 退出确认对话框（浮动按钮与系统返回键共用） */
+    private void confirmExit() {
+        // v1.13.12 文案纠偏：退出只是关掉本界面，引擎 node 进程是独立子进程，会在后台继续运行
+        // （这正是"手机当服务器"的设计意图，不需要停）。旧文案"服务器将停止运行"与实际行为不符。
+        conDialog3("退出 DeepSeek Harness", "确定要退出吗？界面会关闭，服务器将在后台继续运行。",
+                "导日志", new Runnable() { @Override public void run() { conShareLog(); } },
+                "退出", new Runnable() {
+            @Override public void run() {
+                stopKeepAliveService(); // 用户主动退出：停止保活服务
+                // v1.45：不 finish()，改成退到后台。
+                // finish() 会销毁 Activity，再进时重建 → 走「兜底动画 + 重新 loadUrl」，
+                // 而重载很可能命中 WebView 里的旧 HTML（旧插件 rev），于是必现「Failed to load plugins」。
+                // 退到后台保留视图，再进走 onResume 恢复，既不重载也不会 rev 失配。
+                moveTaskToBack(true);
+            }
+        }, "取消");
+    }
+
+    /**
+     * v1.13.11：修「状态栏不显示」「状态栏没有沉浸」两个问题，实现要点有三：
+     * ① **颜色之前根本没生效**。父主题 Theme.Black.NoTitleBar 是 Holo 时代主题，
+     *   不设 windowDrawsSystemBarBackgrounds → Window 上缺 FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS，
+     *   于是 setStatusBarColor()/setNavigationBarColor() 全是空操作（Holo 主题默认色是纯黑）：
+     *   实测顶栏恒为 #000000，而浅色模式下又给了 SYSTEM_UI_FLAG_LIGHT_STATUS_BAR（深色图标）
+     *   → 深色图标画在纯黑条上 = 时间/信号/电池全看不见。这就是「状态栏不显示」。
+     *   现在显式 addFlags(FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)，颜色才真正落地。
+     * ② 底色不再固定用 cBg()，而优先用**页面实测背景色**（refreshPageBackground()）：
+     *   DSH 前端底色实测 #151517，与壳底色 #0b0f1a 并不相同 → 状态栏会与页面割裂成一条色带，
+     *   观感上就是「没有沉浸」。取到页面真实底色后，状态栏/导航栏与页面同色，视觉上无缝。
+     * ③ 图标深浅按**底色亮度**判定，而不是按系统深浅色判定：用户在前端手动选「浅色/深色」时
+     *   系统设置并不跟着变，只有按底色亮度算才不会出现「浅底配白图标」。
+     */
+    private void applyStatusBar() {
+        applySystemBars(chromeBg());
+    }
+
+    /** 壳的界面底色：优先用页面实测底色，未取到（启动页/控制台）时用主题底色。 */
+    private int chromeBg() {
+        return pageBgColor != 0 ? pageBgColor : cBg();
+    }
+
+    /**
+     * 两条系统栏各自涂一个颜色（页面上半部的底色），图标深浅按该颜色算。
+     *
+     * 试过让壁纸铺进这两条区域（栏透明 + WebView 铺满），视觉上确实没有了"色带"，
+     * 但顶部的图标和时间直接压在壁纸图案上，浅色壁纸下就看不清，所以退回涂色方案。
+     */
+    private void applySystemBars(int barColor) {
+        try {
+            android.view.Window w = getWindow();
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+            w.setStatusBarColor(barColor);
+            w.setNavigationBarColor(barColor);
+            android.view.View decor = w.getDecorView();
+            int flags = decor.getSystemUiVisibility();
+            boolean lightBar = isLightColor(barColor);
+            if (lightBar) flags |= android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            else          flags &= ~android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            if (Build.VERSION.SDK_INT >= 26) {
+                if (lightBar) flags |= android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                else          flags &= ~android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            }
+            decor.setSystemUiVisibility(flags);
+        } catch (Throwable ignored) {}
+    }
+
+    /** 系统栏实际占用高度（px），取不到就给 0。 */
+    private int sysBarSize(String name) {
+        try {
+            int id = getResources().getIdentifier(name, "dimen", "android");
+            if (id <= 0) return 0;
+            return getResources().getDimensionPixelSize(id);
+        } catch (Throwable t) { return 0; }
+    }
+
+    /** 底色是否偏亮 —— 决定状态栏/导航栏图标用深色还是浅色。 */
+    private boolean isLightColor(int color) {
+        double lum = 0.299 * Color.red(color) + 0.587 * Color.green(color) + 0.114 * Color.blue(color);
+        return lum > 140d;
+    }
+
+    /**
+     * 读页面实测背景色并刷新状态栏/导航栏与壳底色。
+     * 页面主题由 DSH 前端自己的偏好决定（light/dark/system），与壳的系统深浅色**不一定一致**，
+     * 所以只能从页面实际渲染结果里取，不能靠猜。
+     */
+    private void refreshPageBackground() {
+        if (webView == null) return;
+        try {
+            // body 透明（全透明底）时退回 <html> 的底色 —— 有些前端把底色画在根元素上
+            final String cssDark = cssRgb(getColor(R.color.shell_bg_dark));
+            final String cssLight = cssRgb(getColor(R.color.shell_bg_light));
+            webView.evaluateJavascript(
+                "(function(){try{function op(s){return s&&!/rgba?\\([^)]*,\\s*0\\s*\\)/.test(s);}"
+                // 壁纸模式下壁纸层铺在 html::before 上，body/html/#root 的底色全被撤掉，
+                // 实测出来是透明或上游默认白 —— 拿它给系统栏上色会和页面的视觉底色对不上
+                // （深色壁纸配出一条白状态栏）。这种情况改按页面自身的深浅色标记取壳色。
+                + "var wall=(getComputedStyle(document.documentElement,'::before').backgroundImage||'').indexOf('url(')>=0;"
+                + "if(wall){var dk=!!(document.body&&document.body.hasAttribute('data-ds-dark-theme'));"
+                + "return dk?'" + cssDark + "':'" + cssLight + "';}"
+                + "var b=getComputedStyle(document.body).backgroundColor||'';if(op(b))return b;"
+                + "var h=getComputedStyle(document.documentElement).backgroundColor||'';return op(h)?h:''}catch(e){return ''}})()",
+                new android.webkit.ValueCallback<String>() {
+                    @Override public void onReceiveValue(String v) {
+                        final int c = parseCssColor(v);
+                        if (c == 0 || c == pageBgColor) return;
+                        pageBgColor = c;
+                        applyStatusBar();
+                        if (engineRoot != null) engineRoot.setBackgroundColor(c);
+                        if (webView != null) webView.setBackgroundColor(c);
+                    }
+                });
+        } catch (Throwable ignored) {}
+    }
+
+    /** 解析 "rgb(r, g, b)" / "rgba(r, g, b, a)"；透明或解析失败返回 0（交给主题底色兜底）。 */
+    private int parseCssColor(String css) {
+        try {
+            if (css == null || css.indexOf("rgb") < 0) return 0;
+            int a = css.indexOf('('), b = css.indexOf(')');
+            if (a < 0 || b <= a) return 0;
+            String[] parts = css.substring(a + 1, b).split(",");
+            if (parts.length < 3) return 0;
+            int r = (int) Float.parseFloat(parts[0].trim());
+            int g = (int) Float.parseFloat(parts[1].trim());
+            int bl = (int) Float.parseFloat(parts[2].trim());
+            int al = 255;
+            if (parts.length >= 4) al = Math.round(Float.parseFloat(parts[3].trim()) * 255f);
+            if (al < 8) return 0;   // 全透明取不到底色
+            return Color.argb(al, r, g, bl);
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /** 反方向：把颜色资源拼成页面侧能直接用的 "rgb(r, g, b)"（注入的 JS 读不到资源表）。 */
+    private static String cssRgb(int c) {
+        return "rgb(" + Color.red(c) + "," + Color.green(c) + "," + Color.blue(c) + ")";
+    }
+
+
+    // ============ 界面主题色（跟随系统深/浅色，权限页与加载页共用）============
+    // 取色入口：颜色值统一定义在 res/values/colors.xml（配色/主题统一管理），
+    // 这里按主题挑对应的资源；代码其他位置禁止再写死十六进制颜色。
+    private boolean isDark() {
+        return themePrefersDark();
+    }
+
+    // ---- v1.13.12 主题设置（跟随系统 / 浅色 / 深色）----
+    // 之前壳只能跟随系统深浅色；前端"跟随系统"又是看 App 主题的 isLightTheme 属性，
+    // 用户想白天用深色也没办法。现在主题偏好在控制台可设，onCreate 按偏好选主题，
+    // WebView 的 prefers-color-scheme 自然跟着偏好走（机制见 styles.xml 的注释）。
+    /** 0=跟随系统 1=浅色 2=深色 */
+    public static final int THEME_SYSTEM = 0, THEME_LIGHT = 1, THEME_DARK = 2;
+
+    private int themeMode() {
+        try {
+            return getSharedPreferences(PREFS, MODE_PRIVATE).getInt("theme_mode", THEME_SYSTEM);
+        } catch (Throwable t) { return THEME_SYSTEM; }
+    }
+
+    /** 主题偏好解析出的"是否深色"：浅色偏好恒 false，深色偏好恒 true，跟随系统才看系统 uiMode。 */
+    private boolean themePrefersDark() {
+        int mode = themeMode();
+        if (mode == THEME_LIGHT) return false;
+        if (mode == THEME_DARK) return true;
+        int m = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        return m == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    private String themeModeLabel(int mode) {
+        if (mode == THEME_LIGHT) return "浅色";
+        if (mode == THEME_DARK) return "深色";
+        return "跟随系统";
+    }
+
+    /** 控制台「主题」行弹出的三选一对话框；选择后重建 Activity 使主题立即生效。 */
+    private void conThemeDialog() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int cur = themeMode();
+        for (int i = 0; i <= 2; i++) {
+            final int mode = i;
+            TextView row = cText(themeModeLabel(i) + (i == cur ? "  ✓" : ""), 14f, cText(), false);
+            row.setPadding(0, dp(12), 0, dp(12));
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    closeDialogOverlay();
+                    if (mode == themeMode()) return;
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("theme_mode", mode).apply();
+                    recreate(); // 主题（含 WebView 的 prefers-color-scheme）随 onCreate 重新生效
+                }
+            });
+            box.addView(row);
+        }
+        conDialogView("界面主题", box, null, null, "关闭");
+    }
+    private int cBg() { return getColor(isDark() ? R.color.shell_bg_dark : R.color.shell_bg_light); }
+    private int cCard() { return getColor(isDark() ? R.color.shell_card_dark : R.color.shell_card_light); }
+    private int cText() { return getColor(isDark() ? R.color.text_on_dark : R.color.text_on_light); }
+    private int cSub() { return getColor(isDark() ? R.color.sub_on_dark : R.color.sub_on_light); }
+    private int cGreen() { return getColor(R.color.status_green); }
+    private int cRed() { return getColor(R.color.status_red); }
+
+    private void deleteRecursive(File f) {
+        try { SafeFiles.deleteTree(f); }
+        catch (IOException failed) { throw new IllegalStateException("Cannot safely delete target", failed); }
+    }
+
+    // ② ABI 检测：node 引擎仅 arm64，非 arm64 设备会启动失败——尽早提示用户
+    private void checkAbiCompat() {
+        try {
+            if (Build.SUPPORTED_ABIS == null || Build.SUPPORTED_ABIS.length == 0) return;
+            String abi = Build.SUPPORTED_ABIS[0];
+            boolean arm64 = abi.startsWith("arm64") || abi.contains("arm64-v8a");
+            if (arm64) return; // 支持，正常继续
+            // 非 arm64 设备：引擎（node arm64 二进制）无法原生运行，提示但不阻止。
+            // 用 Toast 轻提示且只提示一次（SharedPreferences 记录）：原来是模态 AlertDialog，
+            // 真机 arm64 根本不会触发，而 x86_64 模拟器上每次切主题/旋转重建 Activity 都弹一次，
+            // 遮住操作还很吵（改成 Toast 式提示）。
+            // 位宽用 Process.is64Bit() 如实描述（API 23+，minSdk 24 可直接用），别猜。
+            SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
+            if (sp.getBoolean("abi_warned", false)) return;
+            sp.edit().putBoolean("abi_warned", true).apply();
+            final String abiDesc = (android.os.Process.is64Bit() ? "64 位 " : "32 位 ") + abi;
+            ui.post(new Runnable() {
+                @Override public void run() {
+                    try {
+                        Toast.makeText(MainActivity.this,
+                                "设备架构为 " + abiDesc + "，DSH 引擎仅提供 arm64 版本，AI 引擎可能无法启动",
+                                Toast.LENGTH_LONG).show();
+                    } catch (Throwable ignored) {}
+                }
+            });
+        } catch (Throwable t) {
+            Log.w(TAG, "checkAbiCompat error", t);
+        }
+    }
+
+    // ④ 电池优化引导：App 被系统限制后台时，引擎挂后台可能被杀——提示用户设"不限制"
+    private void checkBatteryOptimization() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm == null) return;
+            if (pm.isIgnoringBatteryOptimizations(getPackageName())) return; // 已"不限制"，正常
+            ui.post(new Runnable() {
+                @Override public void run() {
+                    try {
+                        conDialog("建议：允许后台运行",
+                                "当前应用被系统限制后台活动，AI 执行任务时挂后台可能被系统杀掉。\n\n建议把本应用设为「不限制」电池优化，确保任务持续运行。",
+                                "去设置", new Runnable() { @Override public void run() {
+                                    openSystemSetting(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                                }}, "暂不");
+                    } catch (Throwable ignored) {}
+                }
+            });
+        } catch (Throwable t) {
+            Log.w(TAG, "checkBatteryOptimization error", t);
+        }
+    }
+
+    // ⑧ 更新提示：**两个仓库对等并行**，各查各的，谁更新用谁。
+    //   ⚠️ 2026-09-30 重写：原来只查 Gitee，文案却写「前往 GitHub Releases」、
+    //   按钮又打开 Gitee —— 等于把 GitHub 写成了附庸。用户明确要求：
+    //   两个仓库是**并行对等**的，谁也不是谁的镜像/备胎，两边都要照顾到。
+    //   现在：两边都查、两个链接都列出来且都可点、按钮打开"报出更新版本"的那一边
+    //   （并列时固定取 GitHub —— 那只是确定性取舍，不代表优先级）。
+    public static class ReleaseInfo {
+        public String tag = "";
+        public String name = "";
+        public String body = "";
+        public String pageUrl = "";
+        public String apkName = "";
+        public String apkUrl = "";
+        public long apkSize = 0;
+        public String sha256 = "";
+        public String source = ""; // "GitHub" / "Gitee"
+    }
+
+    // ⑧ 更新提示：**两个仓库对等并行**，各查各的，谁更新用谁。
+    //   支持多源智能测速（Gitee/GitHub/加速镜像）与应用内一键下载覆盖安装。
+    private static final String GH_RELEASES_API =
+            "https://api.github.com/repos/guzhou079-arch/deepseek-harness-android/releases/latest";
+    private static final String GH_RELEASES_PAGE =
+            "https://github.com/guzhou079-arch/deepseek-harness-android/releases";
+    private static final String GI_RELEASES_API =
+            "https://gitee.com/api/v5/repos/zhou-gu24/deepseek-harness-android/releases/latest";
+    private static final String GI_RELEASES_PAGE =
+            "https://gitee.com/zhou-gu24/deepseek-harness-android/releases";
+
+    private ReleaseInfo parseReleaseJson(String json, String source, String pageUrl) {
+        if (json == null || json.isEmpty()) return null;
+        try {
+            org.json.JSONObject obj = new org.json.JSONObject(json);
+            ReleaseInfo info = new ReleaseInfo();
+            info.source = source;
+            info.pageUrl = pageUrl;
+            info.tag = obj.optString("tag_name", "");
+            info.name = obj.optString("name", "");
+            info.body = obj.optString("body", "");
+            if (info.body.length() > 0) {
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile("([a-fA-F0-9]{64})").matcher(info.body);
+                if (m.find()) {
+                    info.sha256 = m.group(1).toLowerCase();
+                }
+            }
+            org.json.JSONArray assets = obj.optJSONArray("assets");
+            if (assets != null) {
+                for (int i = 0; i < assets.length(); i++) {
+                    org.json.JSONObject a = assets.getJSONObject(i);
+                    String aname = a.optString("name", "");
+                    String aurl = a.optString("browser_download_url", "");
+                    long asize = a.optLong("size", 0);
+                    if (aname.toLowerCase().endsWith(".apk") && aurl.length() > 0) {
+                        info.apkName = aname;
+                        info.apkUrl = aurl;
+                        info.apkSize = asize;
+                        break;
+                    }
+                }
+            }
+            return info;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private ReleaseInfo fetchLatestRelease(String api, String source, String pageUrl) {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(api).openConnection();
+            c.setConnectTimeout(6000);
+            c.setReadTimeout(8000);
+            c.setRequestProperty("User-Agent", "dsh-android");
+            c.setRequestProperty("Accept", "application/json");
+            if (c.getResponseCode() != 200) return null;
+            InputStream in = c.getInputStream();
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] b = new byte[8192];
+            int n;
+            while ((n = in.read(b)) > 0) out.write(b, 0, n);
+            in.close();
+            String json = new String(out.toByteArray(), "UTF-8");
+            return parseReleaseJson(json, source, pageUrl);
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            if (c != null) try { c.disconnect(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** tag → 纯版本号（去掉 v 前缀与 -lite/-beta 后缀）。 */
+    private static String normalizeTag(String tag) {
+        return tag == null ? "" : tag.replace("v", "").replace("-lite", "").replace("-beta", "");
+    }
+
+    private void checkForUpdate(final boolean manual) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    // 两个渠道**对等**：各查各的，一个挂了不影响另一个
+                    ReleaseInfo ghRel = fetchLatestRelease(GH_RELEASES_API, "GitHub", GH_RELEASES_PAGE);
+                    ReleaseInfo giRel = fetchLatestRelease(GI_RELEASES_API, "Gitee", GI_RELEASES_PAGE);
+                    if (ghRel == null && giRel == null) {
+                        if (manual) ui.post(new Runnable() { @Override public void run() { conToast("检查更新失败（两个仓库都没连上）"); } });
+                        return;
+                    }
+                    ReleaseInfo target = ghRel != null ? ghRel : giRel;
+                    if (giRel != null && (ghRel == null || isNewerVersion(normalizeTag(giRel.tag), normalizeTag(ghRel.tag)))) {
+                        target = giRel;
+                    }
+                    final ReleaseInfo fTarget = target;
+                    final boolean ghOk = ghRel != null, giOk = giRel != null;
+                    String local = "";
+                    try { local = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Throwable ignored) {}
+                    final String fLocal = local;
+                    if (isNewerVersion(normalizeTag(fTarget.tag), fLocal)) {
+                        // 构建多源候选下载列表 —— ⚠️ **必须只指向 target 那一个 release**
+                        // 2026-10-10 修：以前把「Gitee 最新版」和「GitHub 最新版」混着放进候选，
+                        // 两个仓库版本一旦不一致（例如 Gitee 停在旧版），就会先去下**另一个仓库的旧包**；
+                        // 下完才发现 SHA-256 不对，而校验又在循环之外、不换源 ⇒ 应用内升级直接死。
+                        final List<String> candidateUrls = new ArrayList<String>();
+                        String targetUrl = fTarget.apkUrl == null ? "" : fTarget.apkUrl;
+                        if (targetUrl.length() > 0) {
+                            if ("Gitee".equals(fTarget.source)) {
+                                candidateUrls.add(targetUrl);
+                            } else {
+                                candidateUrls.add("https://ghproxy.net/" + targetUrl);
+                                candidateUrls.add("https://mirror.ghproxy.com/" + targetUrl);
+                                candidateUrls.add("https://gh-proxy.com/" + targetUrl);
+                                candidateUrls.add("https://ghfast.top/" + targetUrl);
+                                candidateUrls.add(targetUrl);
+                            }
+                        }
+
+                        ui.post(new Runnable() {
+                            @Override public void run() {
+                                try {
+                                    String sizeText = fTarget.apkSize > 0 ? ("（约 " + (fTarget.apkSize / 1048576) + "MB）") : "";
+                                    String title = "发现新版本 " + fTarget.tag;
+                                    String html = "当前版本 <b>" + fLocal + "</b>，最新 <b>" + fTarget.tag + "</b>" + sizeText + "。<br><br>"
+                                            + (fTarget.name.length() > 0 ? ("<b>" + android.text.TextUtils.htmlEncode(fTarget.name) + "</b><br><br>") : "")
+                                            + "发布仓库状态：<br>"
+                                            + "· <a href=\"" + GH_RELEASES_PAGE + "\">GitHub Releases</a>"
+                                            + (ghOk ? "" : "（直连未响应）") + "<br>"
+                                            + "· <a href=\"" + GI_RELEASES_PAGE + "\">Gitee Releases</a>"
+                                            + (giOk ? "" : "（直连未响应）");
+                                    TextView tv = cText("", 12.5f, cSub(), false);
+                                    tv.setText(android.text.Html.fromHtml(html));
+                                    tv.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
+
+                                    if (!candidateUrls.isEmpty()) {
+                                        showUpdateChoiceDialog(title, tv, "立即更新 (应用内)", new Runnable() {
+                                            @Override public void run() {
+                                                startInAppUpdate(fTarget, candidateUrls);
+                                            }
+                                        }, "网页查看", new Runnable() {
+                                            @Override public void run() {
+                                                try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(fTarget.pageUrl))); } catch (Throwable ignored) {}
+                                            }
+                                        }, "稍后");
+                                    } else {
+                                        conDialogView(title, tv, "打开更新页", new Runnable() {
+                                            @Override public void run() {
+                                                try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(fTarget.pageUrl))); } catch (Throwable ignored) {}
+                                            }
+                                        }, "稍后");
+                                    }
+                                } catch (Throwable ignored) {}
+                            }
+                        });
+                    } else if (manual) {
+                        ui.post(new Runnable() { @Override public void run() { conToast("已是最新版本（" + fLocal + "）"); } });
+                    }
+                } catch (final Throwable t) {
+                    if (manual) ui.post(new Runnable() { @Override public void run() { conToast("检查更新失败：" + t.getMessage()); } });
+                }
+            }
+        }, "update-check").start();
+    }
+
+    private void showUpdateChoiceDialog(String title, View content, String primaryLabel, final Runnable onPrimary,
+                                        String secondaryLabel, final Runnable onSecondary, String cancelLabel) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackground(cShape(cBg(), 0, 0, 16));
+        box.setPadding(dp(22), dp(22), dp(22), dp(14));
+        if (title != null && title.length() > 0) box.addView(cText(title, 16f, cText(), true));
+        if (content != null) box.addView(content, cTop(dp(12)));
+
+        LinearLayout acts = new LinearLayout(this);
+        acts.setOrientation(LinearLayout.HORIZONTAL);
+        acts.setGravity(Gravity.RIGHT);
+
+        if (cancelLabel != null) {
+            Button cb = cButton(cancelLabel, false);
+            cb.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { closeDialogOverlay(); }
+            });
+            acts.addView(cb);
+        }
+        if (secondaryLabel != null) {
+            Button sb = cButton(secondaryLabel, false);
+            sb.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    closeDialogOverlay();
+                    if (onSecondary != null) onSecondary.run();
+                }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.leftMargin = dp(8);
+            acts.addView(sb, lp);
+        }
+        if (primaryLabel != null) {
+            Button pb = cButton(primaryLabel, true);
+            pb.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    closeDialogOverlay();
+                    if (onPrimary != null) onPrimary.run();
+                }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.leftMargin = dp(8);
+            acts.addView(pb, lp);
+        }
+        box.addView(acts, cTop(dp(18)));
+        showDialogOverlay(box);
+    }
+
+    private volatile boolean updateDownloadCancelled = false;
+
+    private void startInAppUpdate(final ReleaseInfo info, final List<String> candidateUrls) {
+        updateDownloadCancelled = false;
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackground(cShape(cBg(), 0, 0, 16));
+        box.setPadding(dp(22), dp(22), dp(22), dp(16));
+
+        box.addView(cText("正在下载更新 (" + info.tag + ")", 16f, cText(), true));
+
+        final TextView statusTv = cText("正在连接加速节点…", 12.5f, cSub(), false);
+        box.addView(statusTv, cTop(dp(12)));
+
+        final LinearLayout progressTrack = new LinearLayout(this);
+        progressTrack.setOrientation(LinearLayout.HORIZONTAL);
+        progressTrack.setBackground(cShape(cTrack(), 0, 0, 4));
+        final View fillView = new View(this);
+        fillView.setBackground(cShape(cAccent(), 0, 0, 4));
+        final View spacerView = new View(this);
+
+        progressTrack.addView(fillView, new LinearLayout.LayoutParams(0, dp(8), 0));
+        progressTrack.addView(spacerView, new LinearLayout.LayoutParams(0, dp(8), 100));
+        box.addView(progressTrack, cTop(dp(12)));
+
+        final TextView pctTv = cText("0%", 11.5f, cAccent(), false);
+        pctTv.setGravity(Gravity.RIGHT);
+        box.addView(pctTv, cTop(dp(4)));
+
+        LinearLayout acts = new LinearLayout(this);
+        acts.setOrientation(LinearLayout.HORIZONTAL);
+        acts.setGravity(Gravity.RIGHT);
+        Button cancelBtn = cButton("取消", false);
+        cancelBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                updateDownloadCancelled = true;
+                closeDialogOverlay();
+                conToast("已取消下载");
+            }
+        });
+        acts.addView(cancelBtn);
+        box.addView(acts, cTop(dp(16)));
+
+        showDialogOverlay(box);
+
+        new Thread(new Runnable() {
+            @Override public void run() {
+                File dir = new File(Environment.getExternalStorageDirectory(), "DeepSeekHarness/updates");
+                if (!dir.exists()) dir.mkdirs();
+                String saveName = (info.apkName != null && info.apkName.length() > 0) ? info.apkName : ("DeepSeekHarness-" + info.tag + ".apk");
+                File apkFile = new File(dir, saveName);
+                File tmpFile = new File(apkFile.getAbsolutePath() + ".tmp");
+
+                boolean ok = false;
+                String errMsg = "";
+                String hashFailMsg = "";
+
+                for (int i = 0; i < candidateUrls.size(); i++) {
+                    if (updateDownloadCancelled) break;
+                    String tryUrl = candidateUrls.get(i);
+                    HttpURLConnection conn = null;
+                    InputStream in = null;
+                    OutputStream out = null;
+                    try {
+                        final String hostLabel = tryUrl.contains("gitee.com") ? "Gitee 高速源" :
+                                (tryUrl.contains("ghproxy") || tryUrl.contains("ghfast") ? "GitHub 加速节点" : "GitHub 官方源");
+                        ui.post(new Runnable() {
+                            @Override public void run() { statusTv.setText("连接中: " + hostLabel + "…"); }
+                        });
+
+                        long existing = tmpFile.exists() ? tmpFile.length() : 0;
+                        conn = (HttpURLConnection) new URL(tryUrl).openConnection();
+                        conn.setConnectTimeout(8000);
+                        conn.setReadTimeout(45000);
+                        conn.setRequestProperty("User-Agent", "dsh-android");
+                        conn.setInstanceFollowRedirects(true);
+                        if (existing > 0) {
+                            conn.setRequestProperty("Range", "bytes=" + existing + "-");
+                        }
+                        int code = conn.getResponseCode();
+                        long total = -1;
+                        if (code == 206) {
+                            out = new FileOutputStream(tmpFile, true);
+                            long remaining = conn.getContentLength();
+                            total = remaining > 0 ? (existing + remaining) : -1;
+                        } else if (code == 200) {
+                            existing = 0;
+                            out = new FileOutputStream(tmpFile, false);
+                            total = conn.getContentLength();
+                        } else if (code == 416) {
+                            tmpFile.delete();
+                            existing = 0;
+                            conn.disconnect();
+                            conn = (HttpURLConnection) new URL(tryUrl).openConnection();
+                            conn.setConnectTimeout(8000);
+                            conn.setReadTimeout(45000);
+                            conn.setRequestProperty("User-Agent", "dsh-android");
+                            conn.setInstanceFollowRedirects(true);
+                            code = conn.getResponseCode();
+                            if (code != 200) throw new IOException("HTTP " + code);
+                            out = new FileOutputStream(tmpFile, false);
+                            total = conn.getContentLength();
+                        } else {
+                            throw new IOException("HTTP " + code);
+                        }
+
+                        in = conn.getInputStream();
+                        byte[] buf = new byte[65536];
+                        long got = existing;
+                        int n;
+                        long lastUpdate = System.currentTimeMillis();
+                        long bytesSinceUpdate = 0;
+                        int lastPct = -1;
+
+                        while ((n = in.read(buf)) > 0) {
+                            if (updateDownloadCancelled) throw new IOException("已取消");
+                            out.write(buf, 0, n);
+                            got += n;
+                            bytesSinceUpdate += n;
+
+                            long now = System.currentTimeMillis();
+                            if (now - lastUpdate >= 200 || (total > 0 && got == total)) {
+                                double sec = Math.max(0.001, (now - lastUpdate) / 1000.0);
+                                double speedMb = (bytesSinceUpdate / 1048576.0) / sec;
+                                lastUpdate = now;
+                                bytesSinceUpdate = 0;
+
+                                final int pct = total > 0 ? (int) (got * 100 / total) : 0;
+                                final String statusStr = "已下载 " + (got / 1048576) + "MB"
+                                        + (total > 0 ? (" / " + (total / 1048576) + "MB") : "")
+                                        + String.format(Locale.US, " (%.1fMB/s)", speedMb);
+
+                                if (pct != lastPct || (now - lastUpdate >= 400)) {
+                                    lastPct = pct;
+                                    ui.post(new Runnable() {
+                                        @Override public void run() {
+                                            statusTv.setText(statusStr);
+                                            pctTv.setText(pct + "%");
+                                            LinearLayout.LayoutParams fp = (LinearLayout.LayoutParams) fillView.getLayoutParams();
+                                            LinearLayout.LayoutParams sp = (LinearLayout.LayoutParams) spacerView.getLayoutParams();
+                                            fp.weight = Math.max(0, Math.min(100, pct));
+                                            sp.weight = 100 - fp.weight;
+                                            progressTrack.requestLayout();
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        out.flush();
+                        out.close(); out = null;
+                        in.close(); in = null;
+                        if (apkFile.exists()) apkFile.delete();
+                        if (!tmpFile.renameTo(apkFile)) throw new IOException("安装包重命名失败");
+
+                        // ⚠️ 校验必须在**候选循环内**（2026-10-10 修）：不通过就删干净、换下一个源。
+                        // 以前校验在循环之后只做一次：一个坏源（例如另一个仓库的旧版本）就能毒死整条升级链。
+                        if (info.sha256 != null && info.sha256.length() == 64) {
+                            final String vLabel = hostLabel;
+                            ui.post(new Runnable() {
+                                @Override public void run() { statusTv.setText("正在校验（" + vLabel + "）…"); }
+                            });
+                            String actualSha = calculateFileSha256(apkFile);
+                            if (!info.sha256.equalsIgnoreCase(actualSha)) {
+                                apkFile.delete();
+                                // ⚠️ 断点文件也必须清：否则下一个源会从「错误文件的前缀」续传
+                                if (tmpFile.exists()) tmpFile.delete();
+                                hashFailMsg = vLabel;
+                                errMsg = "SHA-256 校验不通过";
+                                continue;
+                            }
+                        }
+                        ok = true;
+                        break;
+                    } catch (Throwable t) {
+                        if (updateDownloadCancelled) return;
+                        errMsg = t.getMessage();
+                    } finally {
+                        if (out != null) try { out.close(); } catch (Throwable ignored) {}
+                        if (in != null) try { in.close(); } catch (Throwable ignored) {}
+                        if (conn != null) try { conn.disconnect(); } catch (Throwable ignored) {}
+                    }
+                }
+
+                if (updateDownloadCancelled) {
+                    if (tmpFile.exists()) tmpFile.delete();
+                    return;
+                }
+
+                if (!ok || !apkFile.exists()) {
+                    // 所有候选源都试完仍未通过：区分「网络失败」与「每个源都校验不过」
+                    final String failMsg = hashFailMsg.length() > 0
+                            ? ("所有下载源的安装包都没通过 SHA-256 校验（最后失败：" + hashFailMsg + "）")
+                            : (errMsg != null && errMsg.length() > 0 ? errMsg : "网络连接失败");
+                    ui.post(new Runnable() {
+                        @Override public void run() {
+                            closeDialogOverlay();
+                            conDialog("下载更新失败", "下载过程中发生错误：" + failMsg + "\n\n可尝试在控制台手动点击检查更新重试，或直接在网页下载。", "我知道了", null, null);
+                        }
+                    });
+                    return;
+                }
+
+                // 校验已在候选循环内逐个源完成（不通过的源已被丢弃并换下一个）
+                ui.post(new Runnable() {
+                    @Override public void run() {
+                        closeDialogOverlay();
+                        promptInstallApk(apkFile);
+                    }
+                });
+            }
+        }, "dsh-inapp-update").start();
+    }
+
+    private String calculateFileSha256(File f) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            FileInputStream in = new FileInputStream(f);
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) md.update(buf, 0, n);
+            in.close();
+            byte[] digest = md.digest();
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private void promptInstallApk(final File apkFile) {
+        if (Build.VERSION.SDK_INT >= 26) {
+            if (!getPackageManager().canRequestPackageInstalls()) {
+                conDialog("需要安装权限", "系统需要授予「安装未知应用」权限才能自动执行覆盖安装。\n\n点击「去授权」开启后即可一键安装。", "去授权", new Runnable() {
+                    @Override public void run() {
+                        openSystemSetting(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES);
+                    }
+                }, "取消");
+                return;
+            }
+        }
+        try {
+            Uri uri = LogShareProvider.uriForAbs(this, apkFile.getAbsolutePath());
+            if (uri == null) {
+                conToast("生成安装链接失败");
+                return;
+            }
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(uri, "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+        } catch (Throwable t) {
+            conDialog("唤起安装失败", "无法启动系统安装器：" + t.getMessage() + "\n\n文件已保存至：\n" + apkFile.getAbsolutePath(), "确定", null, null);
+        }
+    }
+
+    /** 简单版本号比较："1.4.0" vs "1.3.3" → true（1.4.0 更新）。 */
+    private boolean isNewerVersion(String latest, String local) {
+        try {
+            String[] a = latest.split("\\.");
+            String[] b = (local == null ? "" : local).split("\\.");
+            for (int i = 0; i < Math.max(a.length, b.length); i++) {
+                int x = i < a.length ? parseIntSafe(a[i]) : 0;
+                int y = i < b.length ? parseIntSafe(b[i]) : 0;
+                if (x != y) return x > y;
+            }
+            return false;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private int parseIntSafe(String s) {
+        // 版本段可能带后缀（如 "5-test"/"5-lite"）：提取前导数字，避免 1.6.5-test 被误判为低于 1.6.1
+        if (s == null) return 0;
+        int i = 0;
+        String t = s.trim();
+        while (i < t.length() && Character.isDigit(t.charAt(i))) i++;
+        if (i == 0) return 0;
+        try { return Integer.parseInt(t.substring(0, i)); } catch (Throwable ex) { return 0; }
+    }
+
+    // 捕获未处理异常，写到外部崩溃日志（便于无 adb 时排查闪退）
+    private void installCrashHandler() {
+        final Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            @Override public void uncaughtException(Thread t, Throwable e) {
+                try {
+                    File dir = new File(Environment.getExternalStorageDirectory(), pkgRoot());
+                    if (!dir.exists()) dir.mkdirs();
+                    File f = new File(dir, "crash.log");
+                    FileOutputStream fos = new FileOutputStream(f, true);
+                    String s = "\n==== " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date())
+                            + " thread=" + t.getName() + " ====\n";
+                    fos.write(s.getBytes("UTF-8"));
+                    java.io.StringWriter sw = new java.io.StringWriter();
+                    e.printStackTrace(new java.io.PrintWriter(sw));
+                    fos.write(sw.toString().getBytes("UTF-8"));
+                    fos.close();
+                } catch (Throwable ignored) {}
+                if (prev != null) prev.uncaughtException(t, e);
+                else android.os.Process.killProcess(android.os.Process.myPid());
+            }
+        });
+    }
+
+    // 清理外部公共目录下遗留的 .trash-* 垃圾目录（清空数据 rename 后后台删除未完成）。
+    private void cleanupTrashDirs(File externalRoot) {
+        File[] children = externalRoot.listFiles();
+        if (children == null) return;
+        for (File c : children) {
+            if (c.isDirectory() && c.getName().startsWith(".trash-")) {
+                deleteRecursive(c);
+            }
+        }
+    }
+
+    // ============ 首次使用 · 翻页式权限引导（v1.13.12 重做） ============
+    // 旧版是一屏 9 行权限列表，用户不知道每项是干什么的、也不能跳过某一项。
+    // 现在改成翻页式：一页只讲一个权限（它做什么 / 授权后能得到什么 / 当前状态），
+    // 每页都可以「跳过」，走完再统一「开始使用」。返回键/重进时按 setup_done 判断不再进入。
+
+    /** 引导页的一页。 */
+    private static class GuidePage {
+        String title;            // 权限名
+        String desc;             // 这个权限是做什么的（页面上显示给用户看）
+        String actionLabel;      // 授权按钮文案
+        StatusProvider provider; // 是否已授权
+        View.OnClickListener action; // 授权动作
+    }
+
+    private final java.util.ArrayList<GuidePage> guidePages = new java.util.ArrayList<GuidePage>();
+    private int guideIndex = 0;                 // 当前页（== guidePages.size() 时是最后的完成页）
+    private LinearLayout guideBody = null;      // 页面内容区（每页重建）
+    private TextView guideDots = null;          // 顶部进度文字（第 X / N 步）
+    private Button guidePrevBtn = null, guideNextBtn = null;
+    private TextView guideSkipBtn = null;
+    private Button guideActionBtn = null;       // 当前页的授权按钮（授权回来后要刷新成"已授权"）
+
+    /** 定义每一页（顺序即翻页顺序，与旧列表一致）。 */
+    private void buildGuidePages() {
+        guidePages.clear();
+
+        GuidePage p1 = new GuidePage();
+        p1.title = "存储权限"; p1.actionLabel = "去授权";
+        p1.desc = "读写手机上的文件：导入/导出内容、把 AI 生成的文件存到手机、写日志与运行数据。\n\n不给的话，AI 无法保存任何文件。";
+        p1.provider = new StatusProvider() { @Override public boolean granted() {
+            return checkSelfPermission("android.permission.READ_EXTERNAL_STORAGE") == PackageManager.PERMISSION_GRANTED
+                    && checkSelfPermission("android.permission.WRITE_EXTERNAL_STORAGE") == PackageManager.PERMISSION_GRANTED;
+        }};
+        p1.action = new View.OnClickListener() { @Override public void onClick(View v) {
+            requestPermissions(new String[]{
+                    "android.permission.READ_EXTERNAL_STORAGE",
+                    "android.permission.WRITE_EXTERNAL_STORAGE"}, REQ_STORAGE);
+        }};
+        guidePages.add(p1);
+
+        GuidePage p2 = new GuidePage();
+        p2.title = "所有文件访问"; p2.actionLabel = "去授权";
+        p2.desc = "访问手机上所有文件（Android 11 及以上需要单独授权，11 以下由存储权限覆盖）。\n\nAI 读写你的项目文件、整理文档都靠它。";
+        p2.provider = new StatusProvider() { @Override public boolean granted() {
+            if (Build.VERSION.SDK_INT >= 30) {
+                return Environment.isExternalStorageManager();
+            } else {
+                return checkSelfPermission("android.permission.WRITE_EXTERNAL_STORAGE") == PackageManager.PERMISSION_GRANTED;
+            }
+        }};
+        p2.action = new View.OnClickListener() { @Override public void onClick(View v) {
+            if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    Intent i = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                    i.setData(Uri.parse("package:" + getPackageName()));
+                    startActivity(i);
+                } catch (Exception e) {
+                    try {
+                        startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+                    } catch (Exception e2) {
+                        Log.w(TAG, "无法打开所有文件访问设置", e2);
+                    }
+                }
+            } else {
+                requestPermissions(new String[]{
+                        "android.permission.READ_EXTERNAL_STORAGE",
+                        "android.permission.WRITE_EXTERNAL_STORAGE"}, REQ_STORAGE);
+            }
+        }};
+        guidePages.add(p2);
+
+        GuidePage p3 = new GuidePage();
+        p3.title = "悬浮窗"; p3.actionLabel = "去授权";
+        p3.desc = "在其它应用之上显示内容：桌面小鲸鱼状态窗、虚拟屏预览窗都靠它。\n\n不给的话没有小鲸鱼，也看不到虚拟屏画面。";
+        p3.provider = new StatusProvider() { @Override public boolean granted() {
+            return Settings.canDrawOverlays(MainActivity.this);
+        }};
+        p3.action = new View.OnClickListener() { @Override public void onClick(View v) {
+            openSystemSetting(Settings.ACTION_MANAGE_OVERLAY_PERMISSION);
+        }};
+        guidePages.add(p3);
+
+        GuidePage p4 = new GuidePage();
+        p4.title = "修改系统设置"; p4.actionLabel = "去授权";
+        p4.desc = "允许读写系统设置，比如调亮度、音量、保持屏幕常亮。\n\nAI 帮你改设置时需要；不给只是这类操作不可用。";
+        p4.provider = new StatusProvider() { @Override public boolean granted() {
+            return Settings.System.canWrite(MainActivity.this);
+        }};
+        p4.action = new View.OnClickListener() { @Override public void onClick(View v) {
+            openSystemSetting(Settings.ACTION_MANAGE_WRITE_SETTINGS);
+        }};
+        guidePages.add(p4);
+
+        GuidePage p5 = new GuidePage();
+        p5.title = "使用情况访问"; p5.actionLabel = "去授权";
+        p5.desc = "查看应用使用时长与统计信息，AI 才能回答\"我今天用了多久微信\"这类问题。\n\n不给的话应用使用统计相关功能不可用。";
+        p5.provider = new StatusProvider() { @Override public boolean granted() {
+            AppOpsManager ops = (AppOpsManager) getSystemService(Context.APP_OPS_SERVICE);
+            int mode = ops.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), getPackageName());
+            return mode == AppOpsManager.MODE_ALLOWED;
+        }};
+        p5.action = new View.OnClickListener() { @Override public void onClick(View v) {
+            openSystemSetting(Settings.ACTION_USAGE_ACCESS_SETTINGS);
+        }};
+        guidePages.add(p5);
+
+        GuidePage p6 = new GuidePage();
+        p6.title = "安装未知来源应用"; p6.actionLabel = "去授权";
+        p6.desc = "允许安装 APK：侧载应用、AI 帮你下载并安装应用时需要。\n\n不给的话 AI 无法替你安装应用。";
+        p6.provider = new StatusProvider() { @Override public boolean granted() {
+            if (Build.VERSION.SDK_INT < 26) return true;
+            return getPackageManager().canRequestPackageInstalls();
+        }};
+        p6.action = new View.OnClickListener() { @Override public void onClick(View v) {
+            openSystemSetting(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES);
+        }};
+        guidePages.add(p6);
+
+        GuidePage p7 = new GuidePage();
+        p7.title = "忽略电池优化"; p7.actionLabel = "去授权";
+        p7.desc = "让本应用在后台常驻、不被系统提前杀掉 —— 引擎要一直在跑，这是稳定在线的前提。\n\n强烈建议授权；不给的话切后台后引擎可能被杀。";
+        p7.provider = new StatusProvider() { @Override public boolean granted() {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            return pm.isIgnoringBatteryOptimizations(getPackageName());
+        }};
+        p7.action = new View.OnClickListener() { @Override public void onClick(View v) {
+            openSystemSetting(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+        }};
+        guidePages.add(p7);
+
+        GuidePage p8 = new GuidePage();
+        p8.title = "通知权限"; p8.actionLabel = "去授权";
+        p8.desc = "接收 AI 完成、定时提醒等通知，人不在应用里也能知道任务跑完了。\n\n不给的话收不到这些提醒（其它功能不受影响）。";
+        p8.provider = new StatusProvider() { @Override public boolean granted() {
+            if (Build.VERSION.SDK_INT < 33) return true;
+            return checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED;
+        }};
+        p8.action = new View.OnClickListener() { @Override public void onClick(View v) {
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, REQ_NOTIFICATION);
+                } else {
+                    try {
+                        Intent i = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+                        i.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+                        startActivity(i);
+                    } catch (Exception e) {
+                        openSystemSetting(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+                    }
+                }
+            } else {
+                openSystemSetting(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+            }
+        }};
+        guidePages.add(p8);
+
+        GuidePage p9 = new GuidePage();
+        p9.title = "Shizuku / Root 特权（可选）"; p9.actionLabel = "去配置";
+        p9.desc = "授权后 AI 可以执行系统级操作：安装/卸载应用、改系统设置、模拟点击等。\n\n不给也完全能用 —— 文件读写、预览、编辑只需要上面的「所有文件访问」。";
+        p9.provider = new StatusProvider() { @Override public boolean granted() {
+            // 只读缓存：root 探测在后台线程执行（probeShizuku），不在主线程跑 su
+            return (shizukuOk != null && shizukuOk) || (rootOk != null && rootOk);
+        }};
+        p9.action = new View.OnClickListener() { @Override public void onClick(View v) {
+            showShizukuDialog();
+        }};
+        guidePages.add(p9);
+    }
+
+    private void showPermissionScreen() {
+        buildGuidePages();
+        guideIndex = 0;
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(cBg());
+
+        // 顶部：品牌标题 + 进度
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.VERTICAL);
+        head.setPadding(dp(24), dp(20), dp(24), dp(8));
+        guideDots = new TextView(this);
+        guideDots.setTextColor(cSub());
+        guideDots.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        head.addView(guideDots);
+        TextView headTitle = new TextView(this);
+        headTitle.setText("首次使用 · 配置手机权限");
+        headTitle.setTextColor(cText());
+        headTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        headTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        headTitle.setPadding(0, dp(6), 0, 0);
+        head.addView(headTitle);
+        root.addView(head);
+
+        // 中间：每页内容（滚动）
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        guideBody = new LinearLayout(this);
+        guideBody.setOrientation(LinearLayout.VERTICAL);
+        guideBody.setPadding(dp(24), dp(8), dp(24), dp(12));
+        scroll.addView(guideBody, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        root.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        // 底部：跳过 / 上一步 / 下一步
+        LinearLayout nav = new LinearLayout(this);
+        nav.setOrientation(LinearLayout.HORIZONTAL);
+        nav.setGravity(Gravity.CENTER_VERTICAL);
+        nav.setPadding(dp(20), dp(10), dp(20), dp(16));
+
+        guideSkipBtn = new TextView(this);
+        guideSkipBtn.setText("跳过");
+        guideSkipBtn.setTextColor(cSub());
+        guideSkipBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        guideSkipBtn.setPadding(dp(6), dp(10), dp(6), dp(10));
+        guideSkipBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            guideGo(+1);
+        }});
+        nav.addView(guideSkipBtn);
+
+        guidePrevBtn = cButton("上一步", false);
+        LinearLayout.LayoutParams prevLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        prevLp.leftMargin = dp(8);
+        guidePrevBtn.setLayoutParams(prevLp);
+        guidePrevBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            guideGo(-1);
+        }});
+        nav.addView(guidePrevBtn);
+
+        guideNextBtn = cButton("下一步", true);
+        LinearLayout.LayoutParams nextLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        nextLp.leftMargin = dp(8);
+        guideNextBtn.setLayoutParams(nextLp);
+        guideNextBtn.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            if (guideIndex >= guidePages.size()) {
+                guideFinish();          // 完成页上的「下一步」就是开始使用
+            } else {
+                guideGo(+1);
+            }
+        }});
+        nav.addView(guideNextBtn);
+        root.addView(nav);
+
+        setContentView(root);
+        renderGuidePage();
+        probeShizuku();
+    }
+
+    /** 翻一页（dir=+1/-1），越界即停在完成页/首页。 */
+    private void guideGo(int dir) {
+        int next = guideIndex + dir;
+        if (next < 0) next = 0;
+        if (next > guidePages.size()) next = guidePages.size();
+        if (next == guideIndex) return;
+        guideIndex = next;
+        renderGuidePage();
+    }
+
+    /** 走完引导：记录 setup_done 并进入引擎流程（与旧「开始使用」一致）。 */
+    private void guideFinish() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("setup_done", true).apply();
+        showEngineScreen();
+        startEngine();
+    }
+
+    /** 渲染当前页（guideIndex == guidePages.size() 时是完成页）。 */
+    private void renderGuidePage() {
+        if (guideBody == null) return;
+        guideBody.removeAllViews();
+        permRows.clear();
+        guideActionBtn = null;
+        boolean finishPage = guideIndex >= guidePages.size();
+        int total = guidePages.size() + 1;
+
+        guideDots.setText(finishPage
+                ? "准备完成 · 最后一步"
+                : "第 " + (guideIndex + 1) + " / " + total + " 步");
+        guidePrevBtn.setEnabled(guideIndex > 0);
+        guideNextBtn.setText(finishPage ? "开始使用" : "下一步");
+        guideSkipBtn.setVisibility(finishPage ? View.GONE : View.VISIBLE);
+        guideSkipBtn.setText(guideIndex == guidePages.size() - 1 ? "跳过" : "跳过这页");
+
+        if (finishPage) {
+            TextView t = new TextView(this);
+            t.setText("配置完成");
+            t.setTextColor(cText());
+            t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+            t.setTypeface(null, android.graphics.Typeface.BOLD);
+            guideBody.addView(t, cTop(dp(18)));
+
+            guideBody.addView(cText("权限可以随时在控制台的「权限」页里再改。现在可以进入 DeepSeek Harness 了。",
+                    13.5f, cSub(), false), cTop(dp(10)));
+
+            // AI 工作区（可选）：沿用原来的选择逻辑
+            LinearLayout wsRow = new LinearLayout(this);
+            wsRow.setOrientation(LinearLayout.HORIZONTAL);
+            wsRow.setGravity(Gravity.CENTER_VERTICAL);
+            wsRow.setPadding(dp(16), dp(14), dp(16), dp(14));
+            wsRow.setBackgroundColor(cCard());
+            LinearLayout.LayoutParams wslp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            wslp.topMargin = dp(18);
+            wsRow.setLayoutParams(wslp);
+            LinearLayout wsLeft = new LinearLayout(this);
+            wsLeft.setOrientation(LinearLayout.VERTICAL);
+            wsLeft.addView(cText("AI 工作区（可选）", 15f, cText(), true));
+            workspaceDescView = new TextView(this);
+            workspaceDescView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            workspaceDescView.setTextColor(cSub());
+            workspaceDescView.setPadding(0, dp(3), 0, 0);
+            wsLeft.addView(workspaceDescView);
+            wsRow.addView(wsLeft, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            wsRow.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+                onWorkspaceRowClick();
+            }});
+            guideBody.addView(wsRow);
+            refreshAllStatuses();
+            return;
+        }
+
+        final GuidePage pg = guidePages.get(guideIndex);
+        boolean granted = false;
+        try { granted = pg.provider.granted(); } catch (Throwable ignored) {}
+
+        TextView t = new TextView(this);
+        t.setText(pg.title);
+        t.setTextColor(cText());
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        t.setTypeface(null, android.graphics.Typeface.BOLD);
+        guideBody.addView(t, cTop(dp(14)));
+
+        TextView d = new TextView(this);
+        d.setText(pg.desc);
+        d.setTextColor(cSub());
+        d.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        d.setLineSpacing(dp(3), 1f);
+        guideBody.addView(d, cTop(dp(10)));
+
+        // 状态行（挂进 permRows，onResume / Shizuku 事件回来时 refreshAllStatuses 会统一刷新）
+        LinearLayout stRow = new LinearLayout(this);
+        stRow.setOrientation(LinearLayout.HORIZONTAL);
+        stRow.setGravity(Gravity.CENTER_VERTICAL);
+        stRow.setPadding(0, dp(18), 0, 0);
+        stRow.addView(cText("当前状态：", 13f, cSub(), false));
+        TextView status = new TextView(this);
+        status.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        stRow.addView(status);
+        guideBody.addView(stRow);
+        PermRow pr = new PermRow();
+        pr.status = status;
+        pr.provider = pg.provider;
+        permRows.add(pr);
+
+        Button act = cButton(pg.actionLabel, true);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(46));
+        alp.topMargin = dp(14);
+        act.setLayoutParams(alp);
+        act.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            try { pg.action.onClick(v); } catch (Throwable ignored) {}
+        }});
+        act.setEnabled(!granted);
+        if (granted) act.setText("已授权 ✓");
+        guideBody.addView(act);
+        guideActionBtn = act;
+
+        refreshAllStatuses();
+    }
+
+    /** refreshAllStatuses 的引导页扩展：授权按钮状态跟着"是否已授权"走。 */
+    private void guideSyncButtons() {
+        if (guideActionBtn == null || guideBody == null) return;
+        if (guideIndex < 0 || guideIndex >= guidePages.size()) return;
+        GuidePage pg = guidePages.get(guideIndex);
+        boolean granted = false;
+        try { granted = pg.provider.granted(); } catch (Throwable ignored) {}
+        guideActionBtn.setText(granted ? "已授权 ✓" : pg.actionLabel);
+        guideActionBtn.setEnabled(!granted);
+    }
+
+    private void refreshAllStatuses() {
+        // 线程安全：Shizuku binder 回调、后台线程都可能调用；setText 必须在 UI 线程。
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            ui.post(new Runnable() {
+                @Override public void run() { refreshAllStatuses(); }
+            });
+            return;
+        }
+        for (PermRow pr : permRows) {
+            boolean g = false;
+            try { g = pr.provider.granted(); } catch (Throwable ignored) {}
+            pr.status.setText(g ? "已授权" : "未授权");
+            pr.status.setTextColor(g ? cGreen() : cRed());
+        }
+        // 工作区行状态（非权限，显示已设置/未设置）——引导完成页与控制台「权限」页共用同一份状态
+        {
+            String p = workspacePath();
+            boolean unset = (p == null || p.isEmpty());
+            if (workspaceDescView != null) {
+                workspaceDescView.setText(unset
+                        ? "未设置：AI 文件操作在内部目录。点此选择外部文件夹（如 /sdcard/Documents）。"
+                        : "已设置：" + p + "（点此更改或恢复默认）");
+            }
+            if (conWorkspaceDesc != null) {
+                conWorkspaceDesc.setText(unset ? "未设置（AI 文件操作在内部目录）" : p);
+            }
+        }
+        // 翻页式引导：当前页的授权按钮状态跟着"是否已授权"走（从系统设置授权回来时刷新）
+        guideSyncButtons();
+    }
+
+    // ============ AI 工作区（可选） ============
+    private static final String KEY_WORKSPACE = "workspace_path";
+
+    /** 当前配置的工作区路径（外部共享存储目录），未设置返回 null。 */
+    private String workspacePath() {
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_WORKSPACE, null);
+    }
+
+    /** 工作区行点击：未设置直接选目录；已设置弹菜单（重新选择/恢复默认）。 */
+    private void onWorkspaceRowClick() {
+        final String cur = workspacePath();
+        if (cur == null || cur.isEmpty()) { openWorkspacePicker(); return; }
+        try {
+            new AlertDialog.Builder(this)
+                    .setTitle("AI 工作区")
+                    .setMessage("当前工作区：\n" + cur + "\n\n选择其他文件夹，或恢复默认？")
+                    .setPositiveButton("重新选择", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) { openWorkspacePicker(); }
+                    })
+                    .setNegativeButton("恢复默认", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) {
+                            getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_WORKSPACE).apply();
+                            refreshAllStatuses();
+                            refreshConsolePermIfShown();
+                        }
+                    })
+                    .setNeutralButton("取消", null)
+                    .show();
+        } catch (Throwable ignored) {}
+    }
+
+    /** 打开系统文件夹选择器（SAF），选中的目录持久化为工作区。 */
+    private void openWorkspacePicker() {
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+            startActivityForResult(i, REQ_WORKSPACE_TREE);
+        } catch (Throwable t) {
+            Log.w(TAG, "open document tree failed", t);
+        }
+    }
+
+    // ======================= v1.40：附件「拍照」 (2026-10-12) =======================
+    // 为什么要改：官方前端用 <input type="file"> 走 onShowFileChooser，本机以前只会弹
+    // 系统文件选择器（相册/文件）。用户每次都得先开相机 App 拍照、再回相册里挑 —— 明确要求
+    // 「在添加按钮里加一个拍照」。
+    //
+    // 实现取"最不侵入"的一条路：
+    //   · 只改 MainActivity.java，不新增 ContentProvider、**不动 AndroidManifest**（骨架复用式
+    //     出包改不了清单，加了 provider 就得走 aapt2 重链接）；R.java 不变。
+    //   · 相机输出走 MediaStore 自己 insert 出来的一行，配合
+    //     FLAG_GRANT_WRITE_URI_PERMISSION 授权给相机 App 写入（MediaStore 支持逐 URI 授权）。
+    //     好处：照片同时出现在系统相册里（和用户现在的习惯一致），且是 JPEG。
+    //   · 拿到 URI 后**查一次 SIZE**：相机忽略 EXTRA_OUTPUT 时不会把 0 字节图片塞给前端。
+    //
+    // 回滚：删掉 REQ_CAMERA_CAPTURE / cameraOutputUri / 下面 6 个方法，
+    //       并把 onShowFileChooser 恢复成"直接 params.createIntent() 起 REQ_FILE_CHOOSER"。
+
+    /** 这个 input[type=file] 要的是不是图片（accept 为空、任意类型、image 开头都算）。 */
+    private boolean attachWantsImage(WebChromeClient.FileChooserParams params) {
+        try {
+            String[] types = params.getAcceptTypes();
+            if (types == null || types.length == 0) return true; // 没写 accept：附件按钮就是这种
+            for (int i = 0; i < types.length; i++) {
+                String s = types[i] == null ? "" : types[i].trim().toLowerCase(Locale.US);
+                if (s.isEmpty() || s.equals("*/*") || s.contains("image")) return true;
+                // 有的前端把 accept 写成扩展名列表（".jpg,.png"），这类也当图片
+                if (s.contains(".jpg") || s.contains(".jpeg") || s.contains(".png")
+                        || s.contains(".heic") || s.contains(".webp") || s.contains(".gif")
+                        || s.contains(".bmp")) return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    /** 原「附件」行为：系统文件选择器（相册/文件）。 */
+    private boolean launchFilePicker(WebChromeClient.FileChooserParams params) {
+        try {
+            Intent intent = params.createIntent();
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            startActivityForResult(intent, REQ_FILE_CHOOSER);
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "file chooser failed", t);
+            cancelFileChooser();
+            return false;
+        }
+    }
+
+    /** 拍照：往 MediaStore 插一行 → 交给相机 App 写 → 回来后把那个 URI 当附件交回前端。 */
+    private void launchCameraCapture() {
+        try {
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.Images.Media.DISPLAY_NAME,
+                    "DSH_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".jpg");
+            v.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+            if (Build.VERSION.SDK_INT >= 29) {
+                v.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/DSH");
+            }
+            cameraOutputUri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+            if (cameraOutputUri == null) {
+                toastMsg("无法创建照片文件（存储权限是否已给？）");
+                cancelFileChooser();
+                return;
+            }
+            Intent i = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+            i.putExtra(MediaStore.EXTRA_OUTPUT, cameraOutputUri);
+            i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivityForResult(i, REQ_CAMERA_CAPTURE);
+        } catch (Throwable t) {
+            Log.w(TAG, "camera capture failed", t);
+            toastMsg("打不开相机：" + t.getClass().getSimpleName());
+            cancelFileChooser();
+        }
+    }
+
+    /** 附件流程中途取消：把 null 交回 WebView，并清掉刚插入的空照片条目。 */
+    private void cancelFileChooser() {
+        try {
+            if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
+        } catch (Throwable ignored) {}
+        fileChooserCallback = null;
+        if (cameraOutputUri != null) {
+            try { getContentResolver().delete(cameraOutputUri, null, null); } catch (Throwable ignored) {}
+            cameraOutputUri = null;
+        }
+    }
+
+    /** 照片大小（字节）；查不到返回 -1。用来判"相机到底写没写进去"。 */
+    private long mediaSize(Uri uri) {
+        Cursor c = null;
+        try {
+            c = getContentResolver().query(uri, new String[]{OpenableColumns.SIZE}, null, null, null);
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.SIZE);
+                if (idx >= 0 && !c.isNull(idx)) return c.getLong(idx);
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            if (c != null) { try { c.close(); } catch (Throwable ignored) {} }
+        }
+        return -1;
+    }
+
+    private void toastMsg(final String msg) {
+        try { Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show(); } catch (Throwable ignored) {}
+    }
+    // ===================== v1.40 附件「拍照」结束 =====================
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQ_FILE_CHOOSER) {
+            if (fileChooserCallback != null) {
+                Uri[] picked = null;
+                if (resultCode == RESULT_OK && data != null) {
+                    if (data.getClipData() != null) {
+                        int count = data.getClipData().getItemCount();
+                        picked = new Uri[count];
+                        for (int i = 0; i < count; i++) picked[i] = data.getClipData().getItemAt(i).getUri();
+                    } else if (data.getData() != null) {
+                        picked = new Uri[]{data.getData()};
+                    }
+                }
+                fileChooserCallback.onReceiveValue(picked);
+                fileChooserCallback = null;
+            }
+            return;
+        }
+        if (requestCode == REQ_CAMERA_CAPTURE) {  // v1.40：拍照回来
+            if (fileChooserCallback != null) {
+                Uri out = null;
+                Uri file = cameraOutputUri;
+                if (resultCode == RESULT_OK) {
+                    if (file == null && data != null) file = data.getData();
+                    // 相机忽略 EXTRA_OUTPUT 时条目会是 0 字节 —— 那种别当附件交出去
+                    if (file != null && (file != cameraOutputUri || mediaSize(file) > 0)) out = file;
+                }
+                if (out == null) {
+                    if (file != null) {
+                        try { getContentResolver().delete(file, null, null); } catch (Throwable ignored) {}
+                    }
+                    if (resultCode == RESULT_OK) {
+                        toastMsg("拍照没有返回图片，请重试或改用「从相册/文件选择」");
+                    }
+                }
+                fileChooserCallback.onReceiveValue(out == null ? null : new Uri[]{out});
+                fileChooserCallback = null;
+                cameraOutputUri = null;
+            }
+            return;
+        }
+        if (requestCode == REQ_BACKUP_FILE) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                conImportFromUri(data.getData());
+            }
+            return;
+        }
+        if (requestCode == REQ_SNAPSHOT_FILE) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                conSnapshotImportFromUri(data.getData());
+            }
+            return;
+        }
+        if (requestCode == REQ_WORKSPACE_TREE && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            Uri tree = data.getData();
+            // 持久化 SAF 授权（重启后仍可访问该目录）
+            try {
+                getContentResolver().takePersistableUriPermission(tree,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            } catch (Throwable ignored) {}
+            String path = treeUriToPath(tree);
+            if (path != null && !path.isEmpty()) {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_WORKSPACE, path).apply();
+                refreshAllStatuses();
+                refreshConsolePermIfShown();
+            } else {
+                try {
+                    new AlertDialog.Builder(this)
+                            .setTitle("无法使用该目录")
+                            .setMessage("无法解析所选文件夹的真实路径，请选择手机存储（内部存储或 SD 卡）内的文件夹。")
+                            .setPositiveButton("知道了", null)
+                            .show();
+                } catch (Throwable ignored) {}
+            }
+            return;
+        }
+        super.onActivityResult(requestCode, resultCode, data);
+    }
+
+    /** SAF 树 URI → 真实路径。
+     *  关键：SAF 的 docId 与真实挂载路径不是简单字符串拼接。
+     *  - "primary:*"（内部存储）→ /storage/emulated/0/*（Environment.getExternalStorageDirectory 基准）
+     *  - "downloads:*"（Downloads 卷）→ /storage/emulated/0/Download/*
+     *  - "home:*" → 内部存储根
+     *  - "XXXX-XXXX:*"（SD 卡卷）→ 无法可靠映射，回退 /storage/<volume>/*
+     *  - "raw:/..."（部分 ROM）→ 直接用 raw: 后的真实路径
+     *  解析失败返回 null（调用方提示用户重新选择）。 */
+    private String treeUriToPath(Uri uri) {
+        try {
+            String docId = DocumentsContract.getTreeDocumentId(uri);
+            if (docId == null || docId.isEmpty()) return null;
+            Log.i(TAG, "SAF docId=" + docId);
+            if (docId.startsWith("raw:")) {
+                String raw = docId.substring(4);
+                return raw.isEmpty() ? null : raw;
+            }
+            int colon = docId.indexOf(':');
+            String volume = colon > 0 ? docId.substring(0, colon) : docId;
+            String rest = colon > 0 ? docId.substring(colon + 1) : "";
+            File base;
+            if ("primary".equals(volume)) {
+                base = Environment.getExternalStorageDirectory();
+            } else if ("downloads".equals(volume)) {
+                // Downloads 卷实际位于内部存储的 Download 目录
+                base = new File(Environment.getExternalStorageDirectory(), "Download");
+            } else if ("home".equals(volume)) {
+                base = Environment.getExternalStorageDirectory();
+            } else {
+                // 其它卷（如 SD 卡 XXXX-XXXX）：返回 /storage/<volume>/<rest>（可能不准，但极少用）
+                String p = "/storage/" + volume + (rest.isEmpty() ? "" : "/" + rest);
+                Log.w(TAG, "SAF 非标准卷 -> " + p);
+                return p;
+            }
+            File out;
+            if (rest.isEmpty()) out = base;
+            else out = new File(base, rest.replace('\\', '/'));
+            Log.i(TAG, "SAF 路径 -> " + out.getAbsolutePath());
+            return out.getAbsolutePath();
+        } catch (Throwable t) {
+            Log.w(TAG, "treeUriToPath error", t);
+            return null;
+        }
+    }
+
+    private void openSystemSetting(String action) {
+        try {
+            Intent i = new Intent(action);
+            i.setData(Uri.parse("package:" + getPackageName()));
+            startActivity(i);
+        } catch (Exception e) {
+            try {
+                Intent i = new Intent(action);
+                startActivity(i);
+            } catch (Exception e2) {
+                Log.w(TAG, "无法打开设置: " + action, e2);
+            }
+        }
+    }
+
+    private void openShizukuApp() {
+        String[] pkgs = {"moe.shizuku.privileged.api", "rikka.shizuku"};
+        for (String p : pkgs) {
+            Intent i = getPackageManager().getLaunchIntentForPackage(p);
+            if (i != null) {
+                try { startActivity(i); return; } catch (Exception ignored) {}
+            }
+        }
+        Log.w(TAG, "未找到 Shizuku 应用，请手动打开并授权");
+    }
+
+    private void showShizukuDialog() {
+        boolean installed = false;
+        for (String p : new String[]{"moe.shizuku.privileged.api", "rikka.shizuku"}) {
+            try { getPackageManager().getPackageInfo(p, 0); installed = true; break; } catch (Exception ignored) {}
+        }
+        boolean binderOk = false;
+        try { binderOk = Shizuku.pingBinder(); } catch (Throwable ignored) {}
+        boolean rootOkNow = rootOk != null && rootOk;
+
+        // v1.13：**实时探测**，不信 shizukuOk 缓存。
+        // 缓存由 probeShizuku() 异步刷新，而用户“在 Shizuku 里撤销授权 → 回来马上点授权”时缓存
+        // 往往还是旧的 true → 会走“已授权”分支而不调 requestPermission → 表现为“点了没任何弹窗”。
+        boolean shizukuNow = false;
+        int selfPerm = -1, apiVer = -1;
+        boolean rationale = false;
+        try {
+            if (binderOk) {
+                selfPerm = Shizuku.checkSelfPermission();
+                shizukuNow = selfPerm == PackageManager.PERMISSION_GRANTED;
+                try { apiVer = Shizuku.getVersion(); } catch (Throwable ignored) {}
+                try { rationale = Shizuku.shouldShowRequestPermissionRationale(); } catch (Throwable ignored) {}
+            }
+        } catch (Throwable t) { Log.w(TAG, "Shizuku state probe failed", t); }
+        if (binderOk) shizukuOk = shizukuNow;   // 用实时值刷新缓存
+        Log.i(TAG, "shizuku state: binder=" + binderOk + " selfPerm=" + selfPerm
+                + " apiVer=" + apiVer + " rationale=" + rationale);
+
+        if (rootOkNow || shizukuNow) {
+            AlertDialog.Builder b = new AlertDialog.Builder(this);
+            b.setTitle("系统特权（可选）");
+            b.setMessage((rootOkNow ? "已检测到 Root（su）可用，AI 可以执行系统级操作。\n" : "") +
+                    (shizukuNow ? "Shizuku 已授权，AI 可以执行系统级操作。\n" : "") +
+                    "\n不授予特权也能正常使用：文件读写、预览、编辑只需「所有文件访问」权限。");
+            b.setNegativeButton("关闭", null);
+            b.show();
+        } else if (binderOk) {
+            // 服务在运行但未授权 → 请求 Shizuku 弹授权框；若系统/ROM 没弹出来，8 秒后引导手动授权
+            requestShizukuPermission(installed);
+        } else {
+            fallbackShizukuDialog(installed);
+        }
+    }
+
+    /**
+     * 请求 Shizuku 授权 + **超时傅底**。
+     * v1.13：授权框由 Shizuku 应用弹出；在部分 ROM（ColorOS 等）上它可能被拦截/不弹，
+     * 而 requestPermission 本身不报错也不回调 —— 用户看到的就是“点了没任何反应”。
+     * 这里过 8 秒仍未拿到结果，就弹一个“怎么手动授权”的引导框（附当前状态供排查）。
+     */
+    private void requestShizukuPermission(final boolean installed) {
+        pendingShizukuReq = true;
+        try {
+            Shizuku.requestPermission(REQ_SHIZUKU);
+        } catch (Throwable t) {
+            Log.w(TAG, "Shizuku requestPermission failed", t);
+        }
+        // v1.13.3：真机实测本机（Shizuku 13.6.0 + ColorOS 15）上 requestPermission() 不弹框，
+        // 而“引擎里 AI 调 rish”能弹 —— 因为 Shizuku 的授权框是 Shizuku 应用在收到**真实请求**时才弹。
+        // 所以这里补两条与引擎同款的真实触发；授权框弹出后用户点允许，3 秒后回探一次即可反映到界面。
+        triggerShizukuPrompt();
+        ui.postDelayed(new Runnable() {
+            @Override public void run() { probeShizuku(); }
+        }, 3000L);
+        ui.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (!pendingShizukuReq) return;   // 已经回调过（用户处理了）
+                pendingShizukuReq = false;
+                showShizukuGuideDialog(installed);
+            }
+        }, 12000L);
+    }
+
+    /**
+     * 发两条**真实请求**逼 Shizuku 弹授权框（requestPermission 在本机不弹）：
+     *   ① 向 Shizuku 应用要 binder（client provider 路径）；
+     *   ② 用 App 自己 spawn 一个 rish（与引擎里 rish 完全同款：同样的 dex、同样的 env 清理、同样的广播）。
+     * ② 会超时（5 秒广播预算）也没关系——我们要的是它在 Shizuku 应用侧触发的授权框。
+     */
+    private void triggerShizukuPrompt() {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try { Shizuku.getBinder(); } catch (Throwable ignored) {}
+            }
+        }, "shizuku-binder-warm").start();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                Process p = null;
+                try {
+                    File dex = (rishDex != null && rishDex.exists()) ? rishDex : extractRishDex();
+                    if (dex == null || !dex.exists()) {
+                        Log.w(TAG, "triggerShizukuPrompt: rish dex 不可用");
+                        return;
+                    }
+                    try { android.system.Os.chmod(dex.getAbsolutePath(), 0444); } catch (Throwable ignored) {}
+                    ProcessBuilder pb = new ProcessBuilder(
+                            "/system/bin/app_process",
+                            "-Djava.class.path=" + dex.getAbsolutePath(),
+                            "/system/bin",
+                            "--nice-name=rish",
+                            "rikka.shizuku.shell.ShizukuShellLoader",
+                            "-c", "id");
+                    java.util.Map<String, String> env = pb.environment();
+                    env.remove("LD_LIBRARY_PATH");
+                    env.remove("LD_PRELOAD");
+                    env.remove("LD_DEBUG");
+                    env.put("RISH_APPLICATION_ID", getPackageName());
+                    pb.redirectErrorStream(true);
+                    p = pb.start();
+                    try { p.waitFor(9, java.util.concurrent.TimeUnit.SECONDS); } catch (Throwable ignored) {}
+                } catch (Throwable t) {
+                    Log.w(TAG, "triggerShizukuPrompt(rish) failed", t);
+                } finally {
+                    try { if (p != null) p.destroy(); } catch (Throwable ignored) {}
+                }
+            }
+        }, "shizuku-prompt-rish").start();
+    }
+
+    /** 授权框没弹出来时的引导（去 Shizuku 里手动授权），并带上当前状态便于定位。 */
+    private void showShizukuGuideDialog(boolean installed) {
+        String label = getPackageName();
+        try {
+            CharSequence l = getApplicationInfo().loadLabel(getPackageManager());
+            if (l != null && l.length() > 0) label = l + "（" + getPackageName() + "）";
+        } catch (Throwable ignored) {}
+        String msg = "Shizuku 的授权框没有出现（常见于 ColorOS/OPPO 等系统拦截了它的弹窗）。"
+                + "\n\n请手动授权：\n"
+                + "1. 打开 Shizuku 应用\n"
+                + "2. 进入「已授权的应用」（或首页的「授权应用」）\n"
+                + "3. 找到 " + label + " → 打开开关\n\n"
+                + "授权后回到本页会自动刷新。";
+        AlertDialog.Builder b = new AlertDialog.Builder(this);
+        b.setTitle("Shizuku 授权（需手动）");
+        b.setMessage(msg);
+        b.setPositiveButton("打开 Shizuku", new DialogInterface.OnClickListener() {
+            @Override public void onClick(DialogInterface d, int w) { openShizukuApp(); }
+        });
+        b.setNeutralButton("重新检测", new DialogInterface.OnClickListener() {
+            @Override public void onClick(DialogInterface d, int w) { probeShizuku(); conToast("已重新检测"); }
+        });
+        b.setNegativeButton("关闭", null);
+        b.show();
+    }
+
+    private void fallbackShizukuDialog(boolean installed) {
+        String msg;
+        if (installed) {
+            msg = "Shizuku 服务未运行。\n\n请先打开 Shizuku 应用并启动服务，然后回来点击「重新检测」；服务启动后本应用会自动弹出授权对话框。";
+        } else {
+            msg = "未检测到 Shizuku 应用。请先安装 Shizuku（官方版），再回来授权。";
+        }
+        AlertDialog.Builder b = new AlertDialog.Builder(this);
+        b.setTitle("Shizuku 特权");
+        b.setMessage(msg);
+        if (installed) {
+            b.setPositiveButton("去启动 Shizuku", new DialogInterface.OnClickListener() {
+                @Override public void onClick(DialogInterface d, int w) { openShizukuApp(); }
+            });
+        }
+        b.setNeutralButton("重新检测", new DialogInterface.OnClickListener() {
+            @Override public void onClick(DialogInterface d, int w) { probeShizuku(); }
+        });
+        b.setNegativeButton("关闭", null);
+        b.show();
+    }
+
+    // Shizuku 检测（Shizuku API，异步）
+    private volatile Boolean shizukuOk = null;
+
+    private void probeShizuku() {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final boolean ok = shizukuAvailable();
+                shizukuOk = ok;
+                // 顺带在后台探测 root（避免在主线程执行 su）
+                try { rootAvailable(); } catch (Throwable ignored) {}
+                // Shizuku 可用时确保 vscreen server 已启动（特权进程由 App 持有 → 不被命令会话清理）
+                if (ok) {
+                    // v1.10：虚拟屏服务由 App 进程内嵌启动（VsreenBridgeService → Main.start），
+                    // 不再用 Shizuku newProcess 启动旧 jar 的 VirtualScreenServer —— 双 server 抢
+                    // 8999 会导致 displayId 状态错乱（153/154）且旧 shell server SIGABRT。
+                    // Shizuku 仅保留用于 input 注入 / am start --display（vscreen 交互）。
+                    // try { ensureVscreenServer(); } catch (Throwable ignored) {}
+                }
+                ui.post(new Runnable() { @Override public void run() { refreshAllStatuses(); } });
+            }
+        }, "shizuku-probe").start();
+    }
+
+    /**
+     * 用 Shizuku newProcess 启动 vscreen server：
+     * 之前用 rish -c 后台 & 启动，Shizuku 命令会话结束会杀子进程（用户 Android 15 实测 server 消失）——
+     * newProcess 创建的是独立进程（App 持有 IRemoteProcess），不被会话清理，这是 Operit 验证过的存活方案。
+     */
+    private void ensureVscreenServer() {
+        try {
+            long now = System.currentTimeMillis();
+            if (now - lastVscreenEnsureTs < 5000) return;  // 5 秒频率限制
+            lastVscreenEnsureTs = now;
+            if (vscreenAlive()) return;  // server 已在监听
+            File src = vscreenDex;
+            if (src == null || !src.exists()) return;
+            if (!shizukuAvailable()) return;
+            android.os.IBinder binder = Shizuku.getBinder();
+            if (binder == null) return;
+            IShizukuService svc = IShizukuService.Stub.asInterface(binder);
+            if (svc == null) return;
+            // 1) 特权拷贝 jar 到 /data/local/tmp（App uid 写不了该目录；等待完成）
+            IRemoteProcess cp = svc.newProcess(new String[]{ "/system/bin/cp", "-f", src.getAbsolutePath(), "/data/local/tmp/vscreen_shizuku.jar" }, null, null);
+            if (cp != null) { cp.waitFor(); }
+            // 2) chmod 644（保证可读）
+            IRemoteProcess ch = svc.newProcess(new String[]{ "/system/bin/chmod", "644", "/data/local/tmp/vscreen_shizuku.jar" }, null, null);
+            if (ch != null) { ch.waitFor(); }
+            // 3) 启动 server（长驻；保存引用防 GC）—— Operit 同款启动方式：
+            //    CLASSPATH=... app_process / <Main>（cmd-dir 用 /，不用 /system/bin；Operit 实测在这类设备可用）
+            String[] env = new String[]{ "CLASSPATH=/data/local/tmp/vscreen_shizuku.jar" };
+            vscreenProc = svc.newProcess(new String[]{
+                    "/system/bin/app_process",
+                    "/",
+                    "com.hubmobile.app.harness.vscreen.VirtualScreenServer"
+            }, env, null);
+            Log.i(TAG, "vscreen server start issued via Shizuku newProcess");
+        } catch (Throwable t) {
+            Log.w(TAG, "ensureVscreenServer failed", t);
+        }
+    }
+
+    private boolean vscreenAlive() {
+        try {
+            java.net.Socket s = new java.net.Socket();
+            s.connect(new java.net.InetSocketAddress("127.0.0.1", 8999), 500);
+            s.close();
+            return true;
+        } catch (Throwable t) { return false; }
+    }
+
+    private boolean shizukuAvailable() {
+        try {
+            if (!Shizuku.pingBinder()) return false;
+            return Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 结果缓存，onResume 时重置；执行端使用同一次探测得到的 su 绝对路径。 */
+    private volatile Boolean rootOk = null;
+    private volatile boolean rootDetected = false;
+    private volatile String rootSuPath = "su";
+    private boolean rootAvailable() {
+        Boolean cached = rootOk;
+        if (cached != null) return cached;
+        boolean ok = probeRoot();
+        rootOk = ok;
+        return ok;
+    }
+
+    private boolean probeRoot() {
+        RootShell.Probe result = RootShell.probe();
+        rootDetected = result.detected;
+        rootSuPath = result.suPath;
+        Log.i(TAG, "root probe: " + result.detail);
+        return result.ok;
+    }
+
+    private File extractRishDex() {
+        try {
+            File dir = new File(getFilesDir(), "rish");
+            if (!dir.exists()) dir.mkdirs();
+            File dex = new File(dir, "rish_shizuku.dex");
+            if (dex.exists() && dex.length() > 0) {
+                // v1.13.6：升级用户走的就是这一支（旧文件不会被重写），而旧版留下的副本可能是 0666
+                // → 同样会被 ART 拒绝加载（静默 SIGABRT），所以“已存在”分支也要收权。
+                secureDexPermissions(dex);
+                return dex;
+            }
+            InputStream in = getAssets().open("rish_shizuku.dex");
+            FileOutputStream out = new FileOutputStream(dex);
+            byte[] b = new byte[8192];
+            int n;
+            while ((n = in.read(b)) > 0) out.write(b, 0, n);
+            out.close();
+            in.close();
+            // v1.13.5：刚写出来的是 rw-rw-rw-，而 Android 14+ 拒绝加载可写 dex（SIGABRT）——
+            // 插件侧每次调用会 chmod，但“App 自己刚提取、插件还没跑”的窗口期同样会中招，所以这里就收权。
+            secureDexPermissions(dex);
+            return dex;
+        } catch (Exception e) {
+            Log.w(TAG, "extract rish dex failed", e);
+            return null;
+        }
+    }
+
+    private String pkgRoot() {
+        String p = getPackageName();
+        return p.contains("beta") ? "DeepSeekHarnessLite"
+                : p.contains("compat") ? "DeepSeekHarnessCompat" : "DeepSeekHarness";
+    }
+
+    /**
+     * 把 APK 内置 payload.zip 里的自定义引擎插件强制覆盖到内部 payload 目录。
+     * 覆盖范围 = {@link #FORCE_OVERWRITE_PREFIXES}（v1.16 起与常量表单一来源，
+     * 不再各写一份）。均为官方维护、必须随 APK 更新的文件，体积很小。
+     */
+    private void refreshEnginePluginsFromPayload(File payloadDir) {
+        // v1.16 核心修复：直接使用 FORCE_OVERWRITE_PREFIXES（单一来源）。
+        // 上游此处曾硬编码 MARKS（v1.16.1 时仍是 7 条），而常量表更长 —— 两边脱节，
+        // 常量里列的（mobile.css / index.html / 内核补丁包…）实际从未被覆盖，
+        // 「白名单只写不用，等于没有」。上游新增的 fs-search 已并回常量表。
+        final String[] MARKS = FORCE_OVERWRITE_PREFIXES;
+        int copied = 0;
+        java.util.zip.ZipInputStream zis = null;
+        try {
+            zis = new java.util.zip.ZipInputStream(
+                    new java.io.BufferedInputStream(getAssets().open("payload.zip")));
+            java.util.zip.ZipEntry e;
+            byte[] buf = new byte[16384];
+            while ((e = zis.getNextEntry()) != null) {
+                if (e.isDirectory()) {
+                    continue;
+                }
+                String name = e.getName();
+                boolean hit = false;
+                for (String m : MARKS) {
+                    if (name.contains(m)) { hit = true; break; }
+                }
+                if (!hit) {
+                    continue;
+                }
+                File out = new File(payloadDir, name);
+                File parent = out.getParentFile();
+                if (parent == null || (!parent.exists() && !parent.mkdirs())) {
+                    continue;
+                }
+                java.io.FileOutputStream fos = new java.io.FileOutputStream(out);
+                int n;
+                while ((n = zis.read(buf)) > 0) {
+                    fos.write(buf, 0, n);
+                }
+                fos.close();
+                copied++;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "refreshEnginePluginsFromPayload failed: " + t.getMessage());
+        } finally {
+            if (zis != null) { try { zis.close(); } catch (Throwable ignored) {} }
+        }
+        Log.i(TAG, "engine plugins refreshed from payload.zip, files=" + copied);
+        retireDeprecatedPayloadEntries(payloadDir);
+    }
+
+    /**
+     * 退役 payload 里已被改名/下线的条目（v1.47 起）。
+     *
+     * 装机是「覆盖式解包」：payload.zip 只按白名单覆盖文件、不删目标目录下多余的东西。
+     * 技能一改名（dsh-yijing → dsh-zhanbu），老用户升级后 skills/ 里就会同时留下两个
+     * 描述相同的技能 —— 目录重复、关掉一个开关不等于清掉另一个，模型还可能继续挑旧的。
+     *
+     * 做法：payload 落盘之后，把**确切路径**的旧条目整目录移出 skills/（不模糊匹配、
+     * 不清空 skills）。移到 skills-retired/ 而不是直接删 —— 用户自己改过的内容还在，
+     * 技能加载器也不会再去读它。重复执行无副作用。
+     */
+    private void retireDeprecatedPayloadEntries(File payloadDir) {
+        final String[] DEPRECATED = { "dshhome/skills/dsh-yijing" };
+        File retiredRoot = new File(payloadDir, "dshhome/skills-retired");
+        for (String rel : DEPRECATED) {
+            File source = new File(payloadDir, rel);
+            if (!source.exists()) {
+                continue;
+            }
+            File target = new File(retiredRoot, source.getName());
+            try {
+                if (!retiredRoot.isDirectory() && !retiredRoot.mkdirs()) {
+                    throw new java.io.IOException("cannot create " + retiredRoot);
+                }
+                if (target.exists()) {
+                    deleteRecursive(target);
+                }
+                if (!source.renameTo(target)) {
+                    throw new java.io.IOException("rename failed");
+                }
+                Log.i(TAG, "retired deprecated payload entry: " + rel + " -> " + target);
+            } catch (Throwable t) {
+                Log.w(TAG, "retire deprecated payload entry failed: " + rel + " " + t.getMessage());
+            }
+        }
+    }
+
+    private File extractVscreenDex() {
+        // 优先提取到外部共享目录（/sdcard/<EXT_DSHROOT_ROOT>/vscreen/）：
+        // shell(uid 2000) 读不到 app 私有目录（SELinux + 权限双重拦截），但能读 /sdcard ——
+        // 插件需以特权 shell 把 jar 拷到 /data/local/tmp 供 app_process 加载。
+        // 每次启动强制覆盖（旧 jar 残留会导致加载旧版崩溃：NoSuchMethodException / ClassNotFoundException）。
+        try {
+            File extDir = new File(Environment.getExternalStorageDirectory(), pkgRoot() + "/vscreen");
+            if (extDir.exists() || extDir.mkdirs()) {
+                File out = new File(extDir, "vscreen_shizuku.jar");
+                InputStream in = getAssets().open("vscreen_shizuku.jar");
+                FileOutputStream fos = new FileOutputStream(out);
+                byte[] b = new byte[8192];
+                int n;
+                while ((n = in.read(b)) > 0) fos.write(b, 0, n);
+                fos.close();
+                in.close();
+                return out;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "extract vscreen jar to external failed, fallback internal", e);
+        }
+        // 降级：私有目录（未授予存储权限时；shell 读不到，但至少 App 自身逻辑可用）
+        try {
+            File dir = new File(getFilesDir(), "vscreen");
+            if (!dir.exists()) dir.mkdirs();
+            File dex = new File(dir, "vscreen_shizuku.jar");
+            InputStream in = getAssets().open("vscreen_shizuku.jar");
+            FileOutputStream out = new FileOutputStream(dex);
+            byte[] b = new byte[8192];
+            int n;
+            while ((n = in.read(b)) > 0) out.write(b, 0, n);
+            out.close();
+            in.close();
+            return dex;
+        } catch (Exception e) {
+            Log.w(TAG, "extract vscreen jar failed", e);
+            return null;
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
+        super.onRequestPermissionsResult(code, perms, results);
+        if (code == DraftInputBridge.REQ_MIC && draftInput != null) draftInput.permissionResult(results);
+        // 存储权限授予后重新提取 vscreen jar 到外部目录（首次启动时授权在提取之后才完成）
+        if (code == REQ_STORAGE && pendingVscreenExtract) {
+            pendingVscreenExtract = false;
+            for (int i = 0; i < perms.length; i++) {
+                if ("android.permission.WRITE_EXTERNAL_STORAGE".equals(perms[i])
+                        && results[i] == PackageManager.PERMISSION_GRANTED) {
+                    try {
+                        File f = extractVscreenDex();
+                        if (f != null) {
+                            vscreenDex = f;
+                            Log.i(TAG, "vscreen jar re-extracted after permission grant: " + f);
+                        }
+                    } catch (Throwable t) {
+                        Log.w(TAG, "vscreen re-extract failed", t);
+                    }
+                }
+            }
+        }
+        refreshAllStatuses();
+    }
+
+    // ==================== v1.16 NFC 读卡（reader mode） ====================
+    // 为什么必须放 Activity：NfcAdapter.enableReaderMode() 只接受 Activity——只有前台
+    // Activity 才能收到 onTagDiscovered。读到的数据交给 NfcStore，AI 通过无障碍桥
+    // 127.0.0.1:3181 的 /nfc-* 路由取走（同一个进程，静态中转）。
+    // 纪律：只在「用户/AI 显式 arm + App 在前台」时开 reader mode ——
+    // 否则本 App 会在前台一直抢占 NFC，用户刷公交卡/门禁会被截胡。
+    /** App 是否在前台（NfcStore.statusJson 用它判断 reader mode 是否可能生效）。 */
+    public static volatile boolean appForeground = false;
+
+    private android.nfc.NfcAdapter nfcAdapter;
+    private boolean nfcReaderEnabled = false;
+    private boolean nfcListenerSet = false;
+
+    /** 标签回调跑在 binder 线程：解析 NDEF 是阻塞 IO，必须另起线程，不能占主线程。 */
+    private final android.nfc.NfcAdapter.ReaderCallback nfcReaderCallback =
+            new android.nfc.NfcAdapter.ReaderCallback() {
+        @Override
+        public void onTagDiscovered(final android.nfc.Tag tag) {
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    NfcStore.recordTag(MainActivity.this, tag);
+                }
+            }, "nfc-tag").start();
+        }
+    };
+
+    /** 按「App 在前台 && 已待命」同步 reader mode；幂等，可随时调（onResume / arm 变化时）。 */
+    private void syncNfcReader() {
+        NfcStore.init(this);
+        if (!nfcListenerSet) {
+            nfcListenerSet = true;
+            NfcStore.setArmListener(new NfcStore.ArmListener() {
+                @Override
+                public void onArmChanged(boolean armed) {
+                    // arm 是 HTTP 桥（a11y 线程）触发的，切回主线程再动 NFC API
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            syncNfcReader();
+                        }
+                    });
+                }
+            });
+        }
+        try {
+            if (nfcAdapter == null) nfcAdapter = android.nfc.NfcAdapter.getDefaultAdapter(this);
+        } catch (Throwable t) {
+            Log.w("dsh-nfc", "getDefaultAdapter failed", t);
+        }
+        if (NfcStore.isArmed() && appForeground && nfcAdapter != null) enableNfcReader();
+        else disableNfcReader();
+    }
+
+    private void enableNfcReader() {
+        if (nfcReaderEnabled || nfcAdapter == null) return;
+        try {
+            nfcAdapter.enableReaderMode(this, nfcReaderCallback,
+                    android.nfc.NfcAdapter.FLAG_READER_NFC_A
+                            | android.nfc.NfcAdapter.FLAG_READER_NFC_B
+                            | android.nfc.NfcAdapter.FLAG_READER_NFC_F
+                            | android.nfc.NfcAdapter.FLAG_READER_NFC_V
+                            | android.nfc.NfcAdapter.FLAG_READER_NFC_BARCODE,
+                    null);
+            nfcReaderEnabled = true;
+            NfcStore.setReaderActive(true);
+        } catch (Throwable t) {
+            Log.w("dsh-nfc", "enableReaderMode failed", t);
+            nfcReaderEnabled = false;
+            NfcStore.setReaderActive(false);
+        }
+    }
+
+    /** 让出 NFC：退后台 / 取消待命 / 读卡器失效时都要调。 */
+    private void disableNfcReader() {
+        boolean was = nfcReaderEnabled;
+        nfcReaderEnabled = false;
+        NfcStore.setReaderActive(false);
+        if (!was || nfcAdapter == null) return;
+        try {
+            nfcAdapter.disableReaderMode(this);
+        } catch (Throwable t) {
+            Log.w("dsh-nfc", "disableReaderMode failed", t);
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (draftInput != null) draftInput.resume();
+        injectDraftBootstrap(webView);   // v1.40.5：切回前台补注入令牌，页面可能没走完一次加载
+        if (webView != null) { webView.resumeTimers(); webView.onResume(); }
+        rootOk = null; // 从设置页/Shizuku 返回时重新探测 root
+        refreshAllStatuses();
+        // 从 Shizuku/设置页返回时重新检测
+        if (permRows != null && !permRows.isEmpty()) probeShizuku();
+        // v1.13.12：切回前台时补采样一次页面底色（离开期间前端主题可能被改过）
+        refreshPageBackground();
+        syncNfcReader();   // v1.16：已 arm 时回到前台立刻开 reader mode
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        overlayForeground = true;
+        appForeground = true;                    // v1.16：NFC 待命生效的前提之一
+        OverlayService.setOverlayVisible(false); // 回到前台：隐藏悬浮窗
+    }
+
+    @Override
+    protected void onStop() {
+        overlayForeground = false;
+        appForeground = false;                   // v1.16：退后台 → reader mode 必须让出 NFC
+        OverlayService.setOverlayVisible(true);  // 退后台：显示悬浮窗
+        super.onStop();
+    }
+
+    // ============ 引擎启动（原逻辑）============
+    private void startEngine() {
+        engineStartAborted = false;    // v1.13：重新启动 → 清掉「停止」留下的中止/抑制标记
+        engineStoppedByUser = false;
+        startKeepAliveService();   // 前台保活：挂后台不被杀（引擎持续运行）
+        // 引擎端口持久化（供 OverlayService/其他组件读取）；已授权悬浮窗时自动拉起小鲸鱼
+        try {
+            getSharedPreferences("dsh_prefs", MODE_PRIVATE)
+                    .edit().putInt("engine_port", enginePort).apply();
+        } catch (Throwable ignored) {}
+        // v1.14：去掉"无条件自动拉起"（用户明确不需要 —— 退后台不弹窗、少一条常驻通知）。
+        // v1.66：改成**记住用户意图** —— 用户开过就恢复，没开过就保持关闭。
+        //   背景：悬浮球是个独立 foreground service，App 每次重启（含装机）都不会自己回来，
+        //   用户每次都得手动 show，2026-10-01 一天报障两次。
+        //   写 pref 的地方在 handleOverlayRequest()：show/toggle/panel→true，hide/toggle关→false。
+        try {
+            boolean wantOverlay = getSharedPreferences("dsh_prefs", MODE_PRIVATE)
+                    .getBoolean("overlay_wanted", false);
+            if (wantOverlay && (Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this))) {
+                startOverlayService();
+            }
+        } catch (Throwable ignored) {}
+        // v1.10（Operit 方案）：不再请求 MediaProjection 授权（用户反感弹窗；Operit 主 App 也不用）。
+        // 虚拟屏承载外部 App 内容由 PUBLIC|PRESENTATION 建屏实现（真机 Android 15 验证）。
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    // v1.5.4：已移除「端口冲突自动换端口」（resolveEnginePort/portInUse/saveEnginePort/engine_port 持久化），
+                    // 引擎固定默认端口启动，用于排查慢启动是否与端口探测相关。
+                    // 通知通道在后台线程启动（端口 = enginePort+1）。
+                    startNotifyServer();
+
+                    File payload = payloadDir();
+                    // v1.12：解压与启动拆开。「解压文件」把 extractOnlyMode 置 true，跑到下面
+                    // ensurePatchConfig 为止就返回；「启动引擎」复用同一入口，但 filesPreparedThisBoot
+                    // 已置位 → 整段文件准备被跳过。
+                    if (!filesPreparedThisBoot) {
+                    File done = new File(payload, ".extracted");
+
+                    // v1.5.3 慢启动根因修复：内核目录改为【内部存储优先】。
+                    // 现象：v1.5.x 真机启动 50-60s（v1.4 的 10s），payload/node/启动参数逐字节对比无差异，
+                    // 模拟器正常（4s）→ 根因是 node 每次启动从【外部 /sdcard（FUSE）】读取 2 万+ 内核文件，
+                    // require() 解析时海量 stat/read 过 FUSE 极慢（真机如此，模拟器宿主机磁盘快测不出）。
+                    // 修复：node 恒从内部存储（files/payload/dshroot）读内核（快、可靠）；
+                    // 外部目录仅作【内部空间不足】时的回退，以及保留 .nomedia/相册保护等兼容逻辑。
+                    File externalRoot = new File(Environment.getExternalStorageDirectory(), pkgRoot());
+                    boolean useExternal = externalDshrootWritable(externalRoot);
+
+                    // 后台清理上次「清空」遗留的 .trash-* 目录（rename 后后台删除未完成），不阻塞启动。
+                    if (useExternal) {
+                        final File extCleanup = externalRoot;
+                        new Thread(new Runnable() {
+                            @Override public void run() { cleanupTrashDirs(extCleanup); }
+                        }, "trash-cleanup").start();
+                        // 相册保护：外部 dshroot（历史版本遗留）里 2 万+ 文件会被 MediaStore
+                        // 内容嗅探误判为视频。.nomedia 让 MediaStore 忽略整个目录。幂等。
+                        File nomedia = new File(externalRoot, ".nomedia");
+                        if (!nomedia.exists()) {
+                            try { nomedia.createNewFile(); } catch (Throwable ignored) {}
+                        }
+                    }
+
+                    // 2026-10-17：覆盖升级也要刷新运行时二进制。原来只补「缺失」文件
+                    //（internal-patch），node/*.so 这类**同名旧文件永不更新** → 新包配旧运行时，
+                    // 表现为 CANNOT LINK EXECUTABLE … libz.so.1 not found / ERR_MODULE_NOT_FOUND，
+                    // 且从崩溃日志完全看不出是「包没换」而不是「包坏了」。
+                    // 现在 .extracted 里写安装包身份戳（versionCode@lastUpdateTime），不一致就整段重解。
+                    String installStamp = payloadStamp();
+                    String extractedStamp = readStampFile(done);
+                    boolean runtimeStale = done.exists() && !"unknown".equals(installStamp)
+                            && !installStamp.equals(extractedStamp);
+                    if (!done.exists() || runtimeStale) {
+                        if (runtimeStale) Log.i(TAG, "payload 运行时版本不一致，重解：" + extractedStamp + " -> " + installStamp);
+                        // 关键：先解压内部关键运行时（node/.so/dshhome/bin/rish），再解压 dshroot。
+                        // 解压中途被打断时，只要内部已就位引擎仍能启动；缺的文件由 dshrootNeedsSync 幂等补齐。
+                        extractPayload(payload, null, "internal");
+                        writeStampFile(done, installStamp);
+                    } else {
+                        // 同一安装包（或读不到包信息）：只补缺失的新增文件，已有文件不动
+                        try { extractPayload(payload, null, "internal-patch"); } catch (Throwable ignored) {}
+                    }
+
+                    // 引擎插件强制刷新（见 refreshEnginePluginsFromPayload 注释）
+                    // refreshEnginePluginsFromPayload 已移到同步之后（v1.19）
+
+                    // 内部 dshroot 同步（node 从此处读内核）：
+                    // REVISION 不匹配（重装）或 .complete 缺失（中断）都补。
+                    // v1.5.2：REVISION 是构建时间戳每次构建都变——同内核升级走「快速同步」
+                    //（只更新 REVISION+白名单文件，秒级）；.complete 缺失或内核版本变化才全量补齐。
+                    // v1.13.12：布局标记变化也不再全量重推（老版本升上来常因无标记/标记不同被判
+                    // "布局变了"→ 2.5 万文件全部重写，用户看到的就是"更新后又要解压一遍"）。
+                    // 改走「增量补齐」：只写缺失文件 + 官方白名单覆盖 + 清理新树里已不存在的顶层插件包。
+                    File internalBase = payload; // 内部 dshroot 位于 payload/dshroot
+                    File internalDshroot = new File(payload, "dshroot");
+                    boolean kernelOnExternal = false;
+                    try {
+                        if (dshrootNeedsSync(internalBase)) {
+                            boolean revisionChanged = dshrootRevisionChanged(internalBase);
+                            boolean full = dshrootNeedsFullSync(internalBase);
+                            boolean layoutOnly = !full && dshrootLayoutChanged(internalBase);
+                            fastSyncedThisBoot = !full;
+                            String mode = full ? "dshroot" : (layoutOnly ? "dshroot-add" : "dshroot-fast");
+                            // v1.19：全量模式先清空旧树 —— 杜绝「旧内核残留文件被 Node 优先解析」（跨内核升级必需）
+                            if (full) { try { deleteRecursive(internalDshroot); } catch (Throwable ignored) {} }
+                            extractPayload(payload, null, mode);
+                            writeDshrootComplete(internalBase);
+                            if (revisionChanged) refreshInternalConfig(payload);
+                            // 内核指针体检：active.json 指向的内核比这次装进来的内置树旧，就把指针
+                            // 改名挪开（不删、可回滚），否则引擎会一直被指回旧内核，前端停在旧版本。
+                            if (revisionChanged) {
+                                try { KernelStore.parkIfStale(MainActivity.this); } catch (Throwable t) {
+                                    Log.w(TAG, "park stale kernel pointer failed", t);
+                                }
+                            }
+                        }
+                        dshrootDir = internalDshroot;
+                        // v1.19：插件强制刷新移到同步之后 —— 否则 refresh 会先覆盖 dsh/package.json，
+                        // 让 dshKernelChanged 误判「内核没变」，增量同步留下旧内核残留文件（引擎崩溃）。
+                        refreshEnginePluginsFromPayload(payload);
+                    } catch (Throwable t) {
+                        // 内部解压失败（通常为内部存储空间不足）→ 回退外部（慢但可用）
+                        Log.w(TAG, "internal dshroot sync failed, fallback to external", t);
+                        // 清理不完整的内部 dshroot，避免双重占空间
+                        try { deleteRecursive(internalDshroot); } catch (Throwable ignored) {}
+                        if (useExternal) {
+                            if (dshrootNeedsSync(externalRoot)) {
+                                boolean full = dshrootNeedsFullSync(externalRoot);
+                                boolean layoutOnly = !full && dshrootLayoutChanged(externalRoot);
+                                extractPayload(payload, externalRoot, full ? "dshroot" : (layoutOnly ? "dshroot-add" : "dshroot-fast"));
+                                writeDshrootComplete(externalRoot);
+                            }
+                            dshrootDir = new File(externalRoot, "dshroot");
+                            kernelOnExternal = true;
+                        } else {
+                            throw t;
+                        }
+                    }
+
+                    builtinDshrootDir = dshrootDir;   // 记下内置树，切回内置时用
+        // v1.49：受管内核优先（files/kernels/<ver>/dshroot）。
+        // 只在「校验通过」时才用：缺入口/缺 .kernel-ok 一律回落内置树 —— 切内核是实验通道，
+        // 不能拿能不能开机冒险。受管树不参与 FORCE_OVERWRITE_PREFIXES 覆盖，所以替换是安全的。
+        try {
+            File managed = KernelStore.activeTree(MainActivity.this);
+            if (managed != null) {
+                dshrootDir = managed;
+                kernelManagedTree = managed;
+                Log.i(TAG, "engine kernel = managed " + managed.getAbsolutePath());
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "managed kernel resolve failed", t);
+        }
+
+        // 兜底：确保 dshroot 确实就位（例如首次内部解压被系统打断）。
+                    if (!new File(dshrootDir, REL_BINJS).exists()) {
+                        Log.w(TAG, "dshroot missing at " + dshrootDir + ", repopulating");
+                        extractPayload(payload, kernelOnExternal ? externalRoot : null, "dshroot");
+                        if (kernelOnExternal) writeDshrootComplete(externalRoot);
+                    }
+
+                    applyLinks(payload);
+                    setExecutables(payload);
+                    secureDexFiles(payload); // v1.13.5：兜底把旧树里已有的 dex 也收成 0444（覆盖升级不会被重写）
+                    ensurePatchConfig(payload); // ③ 补丁启动自检：cordis.patch.yml 缺失/被改则自动补齐
+                    filesPreparedThisBoot = true;
+                    conMarkPayloadDone();   // 记录“内部这棵树是本次安装解压的”（供控制台/校验判定）
+                    } // end if (!filesPreparedThisBoot)
+                    if (extractOnlyMode) {
+                        // 控制台「解压文件」：到此为止，不碰引擎
+                        extractOnlyMode = false;
+                        extracting = false;
+                        ui.post(new Runnable() { @Override public void run() { conExtractDone(); } });
+                        return;
+                    }
+                    launchEngine(payload);
+                    scheduleBootSelfCheck();   // v1.25：90s 后跑一次 selfcheck.sh，只在失败时通知
+                    maybeNotifyChangelog();    // v1.35：本次构建若带来新更新日志，提示一次
+                } catch (Throwable t) {
+                    Log.e(TAG, "engine error", t);
+                    String msg = String.valueOf(t.getMessage());
+                    filesPreparedThisBoot = false;
+                    final boolean wasExtract = extractOnlyMode;
+                    extractOnlyMode = false;
+                    extracting = false;
+                    starting = false;
+                    setStatus("引擎启动失败：" + msg);
+                    writeStartupDiag(msg);
+                    final String m = msg;
+                    ui.post(new Runnable() { @Override public void run() {
+                        if (wasExtract) conExtractFailed(m); else conEngineFailed(m);
+                    } });
+                }
+            }
+        }, "engine-boot").start();
+    }
+
+    /** v1.7：启动失败时把引擎日志尾部与状态写进外部目录，用户无需 adb 即可反馈排查。 */
+    private void writeStartupDiag(String errorMsg) {
+        try {
+            String sub = getPackageName().contains("beta") ? "DeepSeekHarnessLite"
+                    : getPackageName().contains("compat") ? "DeepSeekHarnessCompat" : "DeepSeekHarness";
+            File dir = new File(android.os.Environment.getExternalStorageDirectory(), sub);
+            if (!dir.exists()) dir.mkdirs();
+            StringBuilder sb = new StringBuilder();
+            sb.append("时间: ").append(new java.util.Date()).append('\n');
+            sb.append("错误: ").append(errorMsg).append('\n');
+            sb.append("enginePort=").append(enginePort).append(" notifyPort=").append(notifyPort()).append('\n');
+            sb.append("node存活=").append(nodeProcess != null && nodeProcess.isAlive()).append('\n');
+            File log = new File(getFilesDir(), "dsh-web.log");
+            if (log.exists()) {
+                java.io.RandomAccessFile raf = new java.io.RandomAccessFile(log, "r");
+                long len = raf.length();
+                long start = Math.max(0, len - 65536);
+                raf.seek(start);
+                byte[] buf = new byte[(int) (len - start)];
+                raf.readFully(buf);
+                raf.close();
+                sb.append("--- dsh-web.log 尾部 ---\n").append(new String(buf, "UTF-8"));
+            }
+            File out = new File(dir, "startup-diag.txt");
+            FileOutputStream fos = new FileOutputStream(out);
+            fos.write(sb.toString().getBytes("UTF-8"));
+            fos.close();
+            Log.i(TAG, "启动诊断已写入 " + out.getAbsolutePath());
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // ============ ③ 补丁启动自检 ============
+    /** 检查内部 dshhome/cordis.patch.yml 是否完整（含 marker 与禁用的插件），
+     *  缺失/被外部改动破坏/版本落后则从 payload.zip 重新提取官方配置（幂等）。
+     *  背景：补丁配置被改/删会导致 sandbox/bash-sandbox 启用失败 → 启动崩溃。
+     *  v1.12：改用顶部 marker 判定版本。旧实现靠“内容里必须有 llm-pi-ai”判定，
+     *        而 v1.12 起 llm-pi-ai 已取消禁用 → 升级用户会被判为“不完整”并自动落地新配置
+     *        （正是我们想要的迁移效果）。
+     *  ⚠ v1.15.9：本常量必须与 config/cordis.patch.yml 首行的 marker **逐字相等**。
+     *        v1.15.1 把那个文件的 marker 提到 v3（强制迁移 sandbox 修复），而这里的
+     *        常量留在 v2 → 上面那句 contains() 恒为 false → 每次启动都判「配置不完整」
+     *        并从 payload 刷新官方配置，用户在 dshhome/cordis.patch.yml 上的改动被反复擦掉
+     *        （issue #33「引擎 boot 时重写全部配置」）。
+     *        今后改 yml 的 marker，必须同步改这一处（共四份源码）。 */
+    private static final String PATCH_CONFIG_MARKER = "dsh-android-patch: v3";
+
+    private void ensurePatchConfig(File payload) {
+        try {
+            File patch = new File(payload, "dshhome/cordis.patch.yml");
+            boolean need = !patch.exists();
+            if (!need) {
+                String content = readFileText(patch);
+                // marker 缺失/落后，或关键禁用项缺失 → 视为需重新落地
+                need = !(content.contains(PATCH_CONFIG_MARKER) && content.contains("sandbox")
+                        && content.contains("bash-sandbox") && content.contains("disabled: true"));
+            }
+            if (need) {
+                Log.w(TAG, "cordis.patch.yml missing or incomplete, restoring from payload.zip");
+                refreshInternalConfig(payload); // 重新覆盖 dshhome 官方配置（凭证/会话保留）
+            } else {
+                conHealPatchConfig();   // v1.13：结构自愈（控制台旧实现关插件会写坏它，见 conHealPatchConfig）
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "ensurePatchConfig error", t);
+        }
+    }
+
+    // ============ ① 端口冲突处理 ============
+    /** 判断端口上是否真的是 DSH 引擎（而非任意 HTTP 服务/占位页）。
+     *  强特征：首页 HTML 含 <title>DeepSeek Harness</title>（占位服务/Termux busy 页不会恰好相同）。
+     *  v1.5.1 修复：旧 healthOk() 只认"任意 HTTP 响应(200-499)"，占位服务返回 200 时被误判为
+     *  引擎健康 → 不换端口、node 不启动、WebView 显示占位内容。 */
+    private boolean isDshEngine(int port) {
+        HttpURLConnection c = null;
+        try {
+            // 0.1.5：首页需要 token（否则 401 authentication required）。
+            // ⚠ 探测**绝不能带 token**：token 是一次性的（用过即废），若被探测吃掉，
+            // 随后 WebView 拿同一个 token 加载就会 401（用户看到的白屏/黑字就是这个）。
+            // 探测只用不带 token 的 /：401 + DSH 专属正文 也足以证明“是本引擎且在跑”。
+            String probe = "http://127.0.0.1:" + port + "/";
+            c = (HttpURLConnection) new URL(probe).openConnection();
+            c.setConnectTimeout(4000);
+            c.setReadTimeout(4000);
+            c.setRequestProperty("User-Agent", "dsh-probe");
+            // 0.1.5：带 token 访问首页会返回 303 + Set-Cookie（浏览器会话 cookie），
+            // 而 HttpURLConnection 默认不保存 cookie → 跟随重定向后又变 401 → 探测永远失败
+            // （旧实现表现为干等 90 秒超时才进兜底）。这里不跟随重定向，把 303/302
+            // 直接当作“引擎已就绪且 token 有效”，正文标题校验只在普通 200 路径上做。
+            c.setInstanceFollowRedirects(false);
+            int code = c.getResponseCode();
+            if (code == 303 || code == 302) return true;
+            if (code == 401) {
+                // v1.12：0.1.5 引擎未带 token 时返回 401 + DSH 专属正文。
+                // 旧实现直接当“不是引擎” → 引擎明明在跑，控制台与健康探测却永远判未就绪
+                // （用户实测：点完「启动引擎」界面又退回「启动引擎」）。
+                String b401 = conReadBody(c, 4096);
+                return b401 != null && b401.indexOf("dsh web authentication required") >= 0;
+            }
+            if (code < 200 || code >= 500) return false;
+            InputStream in = c.getInputStream();
+            // v1.5.5 修复：首页实际约 14KB（13KB 内联脚本在前，<title> 位于页面末尾第 13.4KB 处），
+            // 旧实现只读前 4096 字节 → 永远匹配不到 → waitForServer 干等 90s 超时（慢启动根因）。
+            // 改为读完整页（上限 256KB，本地读取 <50ms）。
+            ByteArrayOutputStream body = new ByteArrayOutputStream();
+            byte[] chunk = new byte[8192];
+            int total = 0;
+            int r;
+            while ((r = in.read(chunk)) > 0 && total < 262144) {
+                body.write(chunk, 0, r);
+                total += r;
+            }
+            try { in.close(); } catch (Throwable ignored) {}
+            return body.toString("UTF-8").contains("<title>DeepSeek Harness</title>");
+        } catch (Throwable t) {
+            return false;
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
+    // ============ 前台保活服务 ============
+    /** 启动前台服务（带常驻通知），引擎运行期间挂后台不被系统杀掉。 */
+    private void startKeepAliveService() {
+        try {
+            Intent i = new Intent(this, EngineService.class);
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(i);
+            } else {
+                startService(i);
+            }
+            Log.i(TAG, "keep-alive service started");
+        } catch (Throwable t) {
+            Log.w(TAG, "keep-alive service start failed", t);
+        }
+    }
+
+    /** 停止前台服务（用户主动退出时调用）。 */
+    private void stopKeepAliveService() {
+        try {
+            stopService(new Intent(this, EngineService.class));
+        } catch (Throwable ignored) {}
+    }
+
+    // ============ AI 发通知通道（本地端口，只需通知权限） ============
+    /** 通知渠道（App 内发通知用，与保活服务的渠道分开）。 */
+    private static final String NOTIFY_CHANNEL_ID = "dsh_ai_notify";
+    private static final String NOTIFY_CHANNEL_NAME = "AI 通知";
+    // 通知端口动态跟随引擎端口（enginePort+1），保证两个 App 共存时不冲突
+    /**
+     * 三版本共存的默认引擎端口，按包名区分（与 AccessibilityService 的口径一致）：
+     * 正式版 3080 / Lite 3082 / 兼容版 3084。通知端口 = 引擎端口 + 1，无障碍端口 = +101。
+     * 否则三套 App 同时安装会抢同一个 3080（表现为 EADDRINUSE、工具连到别的版本的服务）。
+     */
+    private static int defaultEnginePort(Context ctx) {
+        String p = ctx != null ? ctx.getPackageName() : "";
+        if (p.contains("beta")) return 3082;
+        if (p.contains("compat")) return 3084;
+        return 3080;
+    }
+
+    private int notifyPort() { return enginePort + 1; }
+
+    /** 启动本地通知监听：AI 通过插件请求 http://127.0.0.1:<notifyPort> 发通知（仅需通知权限）。 */
+    private void startNotifyServer() {
+        // v1.13：幂等 —— 重复调用（用户连点「启动引擎」、看门狗重试）会对同一端口二次 bind，
+        // 真机日志里表现为“notify server stopped + EADDRINUSE”，期间通知通道短暂不可用。
+        if (notifyServerStarted) return;
+        notifyServerStarted = true;
+        notifyLastAttemptAt = System.currentTimeMillis();   // v1.14：供 ensureNotifyServer() 节流
+        final int port = notifyPort();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                ServerSocket ss = null;
+                try {
+                    ss = new ServerSocket();
+                    ss.setReuseAddress(true);
+                    ss.bind(new InetSocketAddress("127.0.0.1", port));
+                    notifyServerSocket = ss;   // v1.14：记录句柄，看门狗据此判断通道是否真的在听
+                    Log.i(TAG, "notify server listening on " + port);
+                    while (!Thread.currentThread().isInterrupted()) {
+                        try {
+                            final Socket s = ss.accept();
+                            handleNotifyConnection(s);
+                        } catch (Throwable t) {
+                            // accept 异常（连接被重置/中断）不退出监听循环，短暂等待后继续
+                            try { Thread.sleep(100); } catch (Throwable ignored) {}
+                        }
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "notify server stopped", t);
+                    notifyServerStarted = false;   // v1.13：bind 失败（端口被占）时允许下次重试
+                } finally {
+                    try { if (ss != null) ss.close(); } catch (Throwable ignored) {}
+                    notifyServerSocket = null;      // v1.14：通道已退出，句柄失效
+                    notifyServerStarted = false;
+                }
+            }
+        }, "notify-server").start();
+    }
+
+    /**
+     * v1.14：通知通道兜底自愈。由 node 看门狗每 5s 调用一次。
+     * 只在「当前没在监听」且「距上次尝试 ≥15s」时才重新起线程——端口被别人长期占用时不会把日志刷爆，
+     * 端口一释放就会在 15s 内自动补上（不必再等 App 被杀重启）。
+     */
+    private void ensureNotifyServer() {
+        if (notifyServerStarted) return;
+        long now = System.currentTimeMillis();
+        if (now - notifyLastAttemptAt < 15000L) return;
+        Log.i(TAG, "ensureNotifyServer: 通知通道未在监听，重试启动");
+        startNotifyServer();
+    }
+
+    /** 处理一条本地请求：按 HTTP 路径分发（/notify 通知、/setting 系统设置、/clipboard 剪贴板）。 */
+    private void handleNotifyConnection(final Socket s) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    s.setSoTimeout(5000);
+                    InputStream in = s.getInputStream();
+                    // 1) 读请求行 + 请求头，解析路径和 Content-Length
+                    int contentLength = 0;
+                    String h = com.hubmobile.app.harness.vscreen.LocalHttpFence.readHeader(in);
+                    int rejection = com.hubmobile.app.harness.vscreen.LocalHttpFence.rejection(h, s.getLocalPort(), enginePort);
+                    if (rejection != 0) {
+                        com.hubmobile.app.harness.vscreen.LocalHttpFence.reject(s.getOutputStream(), rejection);
+                        s.close();
+                        return;
+                    }
+                    // 请求行形如: POST /notify HTTP/1.1
+                    String path = "/notify";
+                    int sp1 = h.indexOf(' ');
+                    int sp2 = sp1 >= 0 ? h.indexOf(' ', sp1 + 1) : -1;
+                    if (sp1 >= 0 && sp2 > sp1) path = h.substring(sp1 + 1, sp2);
+                    // 修复：/usage 与 /overlay 的处理函数内部要用 queryField(path,"days"/"action")
+                    // 读查询参数，但下面会把 "?" 之后砍掉 → 参数永远是空、永远走默认值
+                    // （现象：android_overlay show/hide 全部无效，一直返回 status）。
+                    // 故先留一份带 query 的原始路径，路由判断仍用砍过的。
+                    final String fullPath = path;
+                    int qIdx = path.indexOf('?');
+                    if (qIdx >= 0) path = path.substring(0, qIdx);
+                    // v1.41：CORS 预检直接 204 放行（设置页若改成 JSON POST，浏览器会先发 OPTIONS）。
+                    if (h.startsWith("OPTIONS ")) {
+                        BufferedWriter ow = new BufferedWriter(new OutputStreamWriter(s.getOutputStream(), "UTF-8"));
+                        ow.write("HTTP/1.1 204 No Content\r\n" + CORS_HEADERS
+                                + "Access-Control-Max-Age: 600\r\nConnection: close\r\n\r\n");
+                        ow.flush();
+                        s.close();
+                        return;
+                    }
+                    int clIdx = h.toLowerCase().indexOf("content-length:");
+                    if (clIdx >= 0) {
+                        int eol = h.indexOf('\r', clIdx);
+                        if (eol < 0) eol = h.indexOf('\n', clIdx);
+                        if (eol < 0) eol = h.length();
+                        try {
+                            contentLength = Integer.parseInt(h.substring(clIdx + 15, eol).trim());
+                        } catch (Exception ignored) {}
+                    }
+                    if (contentLength >= 65536) {
+                        com.hubmobile.app.harness.vscreen.LocalHttpFence.reject(s.getOutputStream(), 413);
+                        s.close();
+                        return;
+                    }
+                    // 2) 读取正文（JSON body）
+                    StringBuilder body = new StringBuilder();
+                    if (contentLength > 0 && contentLength < 65536) {
+                        byte[] buf = new byte[contentLength];
+                        int off = 0;
+                        while (off < contentLength) {
+                            int n = in.read(buf, off, contentLength - off);
+                            if (n < 0) break;
+                            off += n;
+                        }
+                        if (off != contentLength) {
+                            com.hubmobile.app.harness.vscreen.LocalHttpFence.reject(s.getOutputStream(), 400);
+                            s.close();
+                            return;
+                        }
+                        body.append(new String(buf, 0, off, "UTF-8"));
+                    } else {
+                        // contentLength==0（如 GET 请求 /usage?days=N /overlay /status）：不读 body，
+                        // 否则阻塞等 EOF 会 5s 读超时（SocketTimeoutException），所有 GET 路由卡死。
+                    }
+                    // v1.55：三个本地桥统一鉴权 —— 浏览器跨站由上面的 LocalHttpFence 挡（Host/Origin/Sec-Fetch），
+                    // 同机原生调用不带这些头，只能靠共享密钥。X-DSH-Token / ?token= / body token 任一命中即放行。
+                    // v1.55.1：/overlay 是网页设置页（3080 页面）跨端口直连的三个开关，/status /changelog 是只读公开信息；
+                    // 这三个路径不含敏感操作，免密钥放行（否则设置页开关点了没反应）。其余一律要密钥。
+                    boolean openRoute3081 = path.startsWith("/overlay") || path.startsWith("/status") || path.startsWith("/changelog");
+                    if (!openRoute3081 && !com.hubmobile.app.harness.vscreen.LocalBridgeAuth.authorized(h, body.toString(), MainActivity.this)) {
+                        com.hubmobile.app.harness.vscreen.LocalBridgeAuth.reject(s.getOutputStream());
+                        s.close();
+                        return;
+                    }
+                    // 3) 分发处理
+                    String respBody;
+                    if (path.startsWith("/shell")) {
+                        // v1.13.1：App 进程内的特权执行（Shizuku API 通道）——见 handleShellRequest
+                        respBody = handleShellRequest(body.toString());
+                    } else if (path.startsWith("/setting")) {
+                        respBody = handleSettingRequest(body.toString());
+                    } else if (path.startsWith("/clipboard")) {
+                        respBody = handleClipboardRequest(body.toString());
+                    } else if (path.startsWith("/schedule")) {
+                        respBody = handleScheduleRequest(fullPath, body.toString());
+                    } else if (path.startsWith("/usage")) {
+                        respBody = handleUsageRequest(fullPath, body.toString());
+                    } else if (path.startsWith("/overlay")) {
+                        respBody = handleOverlayRequest(fullPath, body.toString());
+                    } else if (path.startsWith("/status")) {
+                        respBody = handleStatusRequest();
+                    } else if (path.startsWith("/lan")) {
+                        respBody = handleLanRequest(h, body.toString());
+                    } else if (path.startsWith("/changelog")) {   // v1.35：应用更新日志
+                        respBody = handleChangelogRequest();
+                    } else if (path.startsWith("/voice")) {       // 语音识别 (STT) 与状态
+                        respBody = handleVoiceRequest(fullPath, body.toString());
+                    } else if (path.startsWith("/tts")) {         // 语音播报 (TTS)
+                        respBody = handleTtsRequest(fullPath, body.toString());
+                    } else if (path.startsWith("/open")) {     // v1.42：用系统应用打开文件 / 定位所在目录
+                        respBody = handleOpenRequest(body.toString());
+                    } else if (path.startsWith("/notify")) {   // 发送通知
+                        respBody = handleNotifyRequest(body.toString());
+                    } else {
+                        respBody = "{\"ok\":false,\"error\":\"未知路径: " + path + "\"}";
+                    }
+                    BufferedWriter w = new BufferedWriter(new OutputStreamWriter(s.getOutputStream(), "UTF-8"));
+                    // v1.41：网页设置页（127.0.0.1:3080）跨端口调本桥（:3081）要 CORS 头，
+                    // 否则浏览器直接抛 TypeError: Failed to fetch —— 开关看起来"点了没反应"。
+                    // 本桥仍由 LocalHttpFence 把 Origin 限制在回环引擎源，不因此对公网开放。
+                    w.write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" + CORS_HEADERS
+                            + "Content-Length: " + respBody.getBytes("UTF-8").length
+                            + "\r\nConnection: close\r\n\r\n" + respBody);
+                    w.flush();
+                    s.close();
+                } catch (Throwable t) {
+                    Log.w(TAG, "local server connection error", t);
+                    try { s.close(); } catch (Throwable ignored) {}
+                }
+            }
+        }, "local-conn").start();
+    }
+
+    /** 处理 /usage：查询应用使用时长（UsageStats）。参数 days=N（默认 1，上限 30）。 */
+    private String handleUsageRequest(String path, String raw) {
+        try {
+            String days = jsonField(raw, "days");
+            if (days.isEmpty()) days = queryField(path, "days");
+            int d = 1;
+            try { if (!days.isEmpty()) d = Integer.parseInt(days.trim()); } catch (Exception ignored) {}
+            return UsageStatsHelper.queryUsageJson(this, d);
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}";
+        }
+    }
+
+    /** 处理 /status：引擎/服务运行状态（供悬浮窗与 AI 查询）。 */
+    private String handleStatusRequest() {
+        boolean engineOk = isDshEngine(enginePort);
+        StringBuilder sb = new StringBuilder("{\"ok\":true");
+        sb.append(",\"enginePort\":").append(enginePort);
+        sb.append(",\"engineReady\":").append(engineOk);
+        sb.append(",\"nodeAlive\":").append(nodeProcess != null && nodeProcess.isAlive());
+        sb.append(",\"overlay\":").append(OverlayService.isRunning);
+        sb.append(",\"overlayEngineUp\":").append(OverlayService.engineUp);
+        sb.append(",\"usageGranted\":").append(UsageStatsHelper.permissionGranted(this));
+        sb.append(",\"overlayGranted\":").append(Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this));
+        sb.append('}');
+        return sb.toString();
+    }
+
+    /**
+     * POST /shell {"command":"…","timeout_ms":N,"token":"…"} —— 在 **App 进程内**经 Shizuku API
+     * 以 shell 身份执行命令并回收 stdout/stderr/退出码。
+     *
+     * 为什么不继续用引擎里的 rish：Shizuku 服务端校验「某个包是否被授权」时要回头问 Shizuku 应用本体，
+     * 而 ColorOS 会冻结/查杀 Shizuku 应用（真机日志实锤：`OplusHansManager … F exit()`、
+     * `NativeFreezeManager … mFgAppPkgname moe.shizuku.privileged.api`、
+     * `reason=EXCESSIVE CPU USAGE … excessive binder traffic during cached state`），
+     * 于是引擎内 spawn 出来的 rish 子进程等不到响应 → Shizuku 客户端库报 “Request timeout…”。
+     * App 进程内的 Shizuku API 通道实测稳定（虚拟屏核心就是用它拉起的），因此特权执行改走这里。
+     */
+    private String handleShellRequest(String raw) {
+        try {
+            String token = jsonField(raw, "token");
+            String mine = localToken();
+            if (mine.isEmpty() || !mine.equals(token)) {
+                return "{\"ok\":false,\"error\":\"token 校验失败（该接口仅限本应用引擎调用）\"}";
+            }
+            String command = jsonField(raw, "command");
+            if (command == null || command.isEmpty()) {
+                return "{\"ok\":false,\"error\":\"缺少 command 参数\"}";
+            }
+            int timeoutMs = 30000;
+            String tm = jsonField(raw, "timeout_ms");
+            if (!tm.isEmpty()) {
+                try { timeoutMs = Math.max(1000, Math.min(Integer.parseInt(tm.trim()), 120000)); }
+                catch (Exception ignored) {}
+            }
+            return shellViaShizuku(command, timeoutMs);
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":\"shell 路由异常：" + jesc(String.valueOf(t.getMessage())) + "\"}";
+        }
+    }
+
+    /** 经 Shizuku（App 进程内）以 shell uid 执行一条命令，回收输出，带超时兜底。 */
+    private String shellViaShizuku(String command, final int timeoutMs) {
+        if (!shizukuAvailable()) {
+            return "{\"ok\":false,\"error\":\"Shizuku 未授权或服务未运行（App 内 pingBinder/checkSelfPermission 失败）\"}";
+        }
+        final StringBuilder out = new StringBuilder();
+        final StringBuilder err = new StringBuilder();
+        try {
+            IShizukuService svc = IShizukuService.Stub.asInterface(Shizuku.getBinder());
+            if (svc == null) return "{\"ok\":false,\"error\":\"Shizuku binder 为空\"}";
+            final IRemoteProcess p = svc.newProcess(new String[]{"/system/bin/sh", "-c", command}, null, null);
+            if (p == null) return "{\"ok\":false,\"error\":\"Shizuku newProcess 返回空\"}";
+            Thread to = pumpStream(new android.os.ParcelFileDescriptor.AutoCloseInputStream(p.getInputStream()), out, "priv-out");
+            Thread te = pumpStream(new android.os.ParcelFileDescriptor.AutoCloseInputStream(p.getErrorStream()), err, "priv-err");
+            final int[] code = new int[]{-1};
+            Thread waiter = new Thread(new Runnable() {
+                @Override public void run() {
+                    try { code[0] = p.waitFor(); } catch (Throwable ignored) {}
+                }
+            }, "priv-wait");
+            waiter.start();
+            waiter.join(timeoutMs);
+            if (waiter.isAlive()) {
+                try { p.destroy(); } catch (Throwable ignored) {}
+                waiter.join(1500);
+                joinQuietly(to); joinQuietly(te);
+                return "{\"ok\":false,\"exit_code\":-1,\"stdout\":\"" + jesc(clip(out))
+                        + "\",\"stderr\":\"" + jesc(clip(err))
+                        + "\",\"error\":\"命令超时（" + timeoutMs + "ms）已终止\"}";
+            }
+            joinQuietly(to); joinQuietly(te);
+            return "{\"ok\":" + (code[0] == 0) + ",\"exit_code\":" + code[0]
+                    + ",\"stdout\":\"" + jesc(clip(out)) + "\",\"stderr\":\"" + jesc(clip(err)) + "\"}";
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"exit_code\":-1,\"stdout\":\"" + jesc(clip(out))
+                    + "\",\"stderr\":\"" + jesc(clip(err))
+                    + "\",\"error\":\"Shizuku 执行失败：" + jesc(String.valueOf(t.getMessage())) + "\"}";
+        }
+    }
+
+    /** 后台把一条流读到 EOF。 */
+    private Thread pumpStream(final InputStream in, final StringBuilder sb, String name) {
+        Thread t = new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    byte[] buf = new byte[4096];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        if (sb.length() < 65536) sb.append(new String(buf, 0, n, "UTF-8"));
+                    }
+                } catch (Throwable ignored) {
+                } finally {
+                    try { in.close(); } catch (Throwable ignored) {}
+                }
+            }
+        }, name);
+        t.setDaemon(true);
+        t.start();
+        return t;
+    }
+
+    private static void joinQuietly(Thread t) {
+        try { if (t != null) t.join(800); } catch (Throwable ignored) {}
+    }
+
+    private static String clip(StringBuilder sb) {
+        String s = sb.toString();
+        return s.length() > 8000 ? s.substring(0, 8000) : s;
+    }
+
+    /** 最小 JSON 字符串转义。 */
+    private static String jesc(String s) {
+        if (s == null) return "";
+        StringBuilder b = new StringBuilder(s.length() + 16);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': b.append("\\\""); break;
+                case '\\': b.append("\\\\"); break;
+                case '\n': b.append("\\n"); break;
+                case '\r': b.append("\\r"); break;
+                case '\t': b.append("\\t"); break;
+                default: b.append(c < 0x20 ? ' ' : c);
+            }
+        }
+        return b.toString();
+    }
+
+    /**
+     * 本地特权路由的鉴权令牌：持久化在 dsh_prefs（App 私有），随 env 交给引擎。
+     * 用 prefs 而不是内存字段，是为了「App 重启但引擎还活着」时令牌不变、插件调用不失效。
+     */
+    private String localToken() {
+        try {
+            SharedPreferences p = getSharedPreferences("dsh_prefs", MODE_PRIVATE);
+            String t = p.getString("local_token", "");
+            if (t == null || t.length() < 16) {
+                byte[] b = new byte[16];
+                new java.security.SecureRandom().nextBytes(b);
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < b.length; i++) sb.append(String.format("%02x", b[i]));
+                t = sb.toString();
+                p.edit().putString("local_token", t).apply();
+            }
+            return t;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    // ===== v1.22-lan：局域网访问 Web GUI（默认关）=====
+    // 契约见 selfbuild/notes/lan-contract.md。要点：默认 127.0.0.1；开启后引擎绑 0.0.0.0
+    // （dsh-web-app 会把非 loopback IPv4 自动加进 trustedHosts），无令牌只能拿到 401/403。
+    // 三个本地桥 3181 / 8999 / 3081 的绑定不受本开关影响。
+
+    // ============ v1.35：应用更新日志（CHANGELOG）============
+    // 随包分发：payload 里带 dshroot/CHANGELOG.md（白名单强制覆盖，重装/重解压都不丢），
+    // 同时也放一份到 dsh-web-frontend/dist/ → 界面里可直接打开 /CHANGELOG.md（仍需 cookie 鉴权）。
+    // 应用侧：GET :3081/changelog 读全文；每次构建的版本标题变化时提示一次通知。
+
+    /** 更新日志文件：优先包内随包分发的那份，退回 DSH_HOME 下的。 */
+    private File changelogFile() {
+        try {
+            File a = new File(payloadDir(), "dshroot/CHANGELOG.md");
+            if (a.isFile()) return a;
+            File b = new File(payloadDir(), "dshhome/CHANGELOG.md");
+            if (b.isFile()) return b;
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    /** 更新日志里的最新版本标题（形如 "v1.34"）；没有返回 ""。 */
+    private String changelogVersion() {
+        try {
+            File f = changelogFile();
+            if (f == null) return "";
+            BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"));
+            try {
+                String line; int n = 0;
+                while ((line = r.readLine()) != null && n++ < 400) {
+                    String t = line.trim();
+                    if (t.startsWith("## v")) {
+                        // 标题形如 "## v1.34 —— 应用内可以现场编译原生扩展" → 只取版本号
+                        String s = t.substring(3).trim();
+                        int cut = s.indexOf("——");
+                        if (cut > 0) s = s.substring(0, cut).trim();
+                        int sp = s.indexOf(' ');
+                        if (sp > 0) s = s.substring(0, sp);
+                        return s;
+                    }
+                }
+            } finally { r.close(); }
+        } catch (Throwable ignored) {}
+        return "";
+    }
+
+    /** 最新版本下的第一条要点（通知正文用一行话）。 */
+    private String changelogSummary() {
+        try {
+            File f = changelogFile();
+            if (f == null) return "";
+            BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"));
+            try {
+                String line; boolean inSection = false; int n = 0;
+                while ((line = r.readLine()) != null && n++ < 400) {
+                    String t = line.trim();
+                    if (t.startsWith("## v")) { if (inSection) break; inSection = true; continue; }
+                    if (!inSection) continue;
+                    if (t.startsWith("---")) break;
+                    if (t.startsWith("**") || t.isEmpty()) continue;
+                    if (t.startsWith("- ")) return t.substring(2).trim();
+                }
+            } finally { r.close(); }
+        } catch (Throwable ignored) {}
+        return "";
+    }
+
+    /** GET /changelog → {"ok":true,"version":"v1.34","path":"…","text":"<全文>"}。 */
+    private String handleChangelogRequest() {
+        try {
+            File f = changelogFile();
+            if (f == null) return "{\"ok\":false,\"error\":\"找不到 CHANGELOG.md（既不在 dshroot 也不在 dshhome）\"}";
+            StringBuilder sb = new StringBuilder();
+            BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"));
+            try {
+                String line; int n = 0;
+                while ((line = r.readLine()) != null && n++ < 3000) sb.append(line).append('\n');
+            } finally { r.close(); }
+            return "{\"ok\":true,\"version\":\"" + jesc(changelogVersion()) + "\",\"path\":\""
+                    + jesc(f.getAbsolutePath()) + "\",\"text\":\"" + jesc(sb.toString()) + "\"}";
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":\"读取失败：" + jesc(String.valueOf(t.getMessage())) + "\"}";
+        }
+    }
+
+    /** 本次构建若带来新的更新日志版本 → 提示一次（同版本只提示一次；首次安装静默记录）。 */
+    private void maybeNotifyChangelog() {
+        try {
+            final String v = changelogVersion();
+            if (v.isEmpty()) return;
+            String seen = getSharedPreferences("dsh_prefs", MODE_PRIVATE).getString("changelog_seen", "");
+            if (v.equals(seen)) return;
+            getSharedPreferences("dsh_prefs", MODE_PRIVATE).edit().putString("changelog_seen", v).apply();
+            if (seen.isEmpty()) return;      // 首次安装：不打扰
+            final String sum = changelogSummary();
+            // 延迟 12 秒再发：引擎刚启动时系统正忙，太早发会与保活/解压通知挤在一起，
+            // 而且无障碍的通知捕获可能还没订阅上（我们要能观测到它）。
+            try {
+                new Thread(new Runnable() { public void run() {
+                    try { Thread.sleep(12000); } catch (Throwable ignored) {}
+                    postNotification("应用已更新 " + v, sum.isEmpty() ? "查看完整更新日志：GET http://127.0.0.1:3081/changelog" : sum);
+                } }, "changelog-notify").start();
+            } catch (Throwable ignored) {}
+            Log.i(TAG, "changelog notify scheduled: " + v);
+        } catch (Throwable ignored) {}
+    }
+
+    /** lan_access pref（boolean，默认 false）：下次引擎启动是否绑 0.0.0.0。 */
+    private boolean lanAccess() {
+        try {
+            return getSharedPreferences("dsh_prefs", MODE_PRIVATE).getBoolean("lan_access", false);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 本次引擎启动实际写入的绑定地址（engine_host_active；没写过按 127.0.0.1 算）。 */
+    private String engineHostActive() {
+        try {
+            String h = getSharedPreferences("dsh_prefs", MODE_PRIVATE).getString("engine_host_active", "");
+            if (h == null || h.isEmpty()) return "127.0.0.1";
+            return h;
+        } catch (Throwable t) {
+            return "127.0.0.1";
+        }
+    }
+
+    /**
+     * v1.39.1：从一段日志文本里取**最后一条** {@code http://…?token=…}。
+     * 不写死 host —— 局域网模式下引擎打印 {@code http://0.0.0.0:3080/?token=…}，
+     * 只认 127.0.0.1 会一条都捞不到。顺手把绑定地址归一化成 127.0.0.1
+     * （0.0.0.0 / :: 只是监听地址，本机访问仍走回环），令牌不变。
+     */
+    private String tokenUrlIn(String text) {
+        if (text == null) return null;
+        try {
+            int tk = text.lastIndexOf("?token=");
+            if (tk < 0) return null;
+            int at = text.lastIndexOf("http://", tk);
+            if (at < 0) return null;
+            int end = tk + 7;
+            while (end < text.length() && " \r\n\t\"'<>".indexOf(text.charAt(end)) < 0) end++;
+            if (end <= tk + 7) return null;
+            int slash = text.indexOf('/', at + 7);          // host 结束（端口之后）
+            if (slash < 0 || slash > tk) return null;
+            String hostPort = text.substring(at + 7, slash);   // 例：0.0.0.0:3080
+            String addr = hostPort;
+            String port = "";
+            int colon = hostPort.lastIndexOf(':');
+            if (colon > 0) {
+                addr = hostPort.substring(0, colon);
+                port = hostPort.substring(colon);              // 含冒号，例如 ":3080"
+            }
+            if (addr.equals("0.0.0.0") || addr.equals("[::]") || addr.equals("::")) addr = "127.0.0.1";
+            if (port.isEmpty()) port = ":" + enginePort;       // 丢了端口会落到 80 → 白屏
+            return "http://" + addr + port + text.substring(slash, end);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 当前引擎的带令牌 URL：内存里没有就去日志尾部捞（引擎重启后内存值是空的）。 */
+    private String currentEngineTokenUrl() {
+        String u = engineTokenUrl;
+        if (u != null && !u.isEmpty()) return u;
+        String fromLog = conTokenFromLog();
+        if (fromLog != null && !fromLog.isEmpty()) {
+            engineTokenUrl = fromLog;
+            return fromLog;
+        }
+        return null;
+    }
+
+    /** 401 之后强制丢弃内存里的旧令牌，重新从日志尾部捞一条。旧令牌用过即废，复用只会一路 401。 */
+    private String reloadTokenFromLog() {
+        engineTokenUrl = null;
+        String u = conTokenFromLog();
+        if (u != null && !u.isEmpty()) { engineTokenUrl = u; return u; }
+        return null;
+    }
+
+    /** 从引擎打印的带令牌 URL（engineTokenUrl）里取出 token 值；没有则返回 ""。 */
+    private String engineTokenValue() {
+        try {
+            String u = currentEngineTokenUrl();
+            if (u == null) return "";
+            int i = u.indexOf("token=");
+            if (i < 0) return "";
+            String t = u.substring(i + 6);
+            int amp = t.indexOf('&');
+            if (amp >= 0) t = t.substring(0, amp);
+            return t;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** 本机全部非 loopback 的 IPv4 地址（去重，保持枚举顺序）。 */
+    private java.util.List<String> localLanIps() {
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> nis = java.net.NetworkInterface.getNetworkInterfaces();
+            if (nis == null) return out;
+            while (nis.hasMoreElements()) {
+                java.net.NetworkInterface ni = nis.nextElement();
+                if (ni == null || !ni.isUp()) continue;
+                java.util.Enumeration<java.net.InetAddress> as = ni.getInetAddresses();
+                while (as != null && as.hasMoreElements()) {
+                    java.net.InetAddress a = as.nextElement();
+                    if (a == null || a.isLoopbackAddress()) continue;
+                    if (!(a instanceof java.net.Inet4Address)) continue;
+                    String ip = a.getHostAddress();
+                    if (ip == null || ip.isEmpty() || out.contains(ip)) continue;
+                    out.add(ip);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return out;
+    }
+
+    /** 取 JSON 布尔字段字面量（"true"/"false"，也接受带引号的字符串形式）；找不到返回 ""。 */
+    private static String jsonBoolRaw(String json, String key) {
+        try {
+            if (json == null) return "";
+            String k = "\"" + key + "\"";
+            int i = json.indexOf(k);
+            if (i < 0) return "";
+            int c = json.indexOf(':', i + k.length());
+            if (c < 0) return "";
+            int p = c + 1;
+            while (p < json.length() && Character.isWhitespace(json.charAt(p))) p++;
+            if (p >= json.length()) return "";
+            if (json.startsWith("true", p)) return "true";
+            if (json.startsWith("false", p)) return "false";
+            if (json.charAt(p) == '"') {
+                int e = json.indexOf('"', p + 1);
+                if (e < 0) return "";
+                String v = json.substring(p + 1, e).trim();
+                if ("true".equals(v)) return "true";
+                if ("false".equals(v)) return "false";
+            }
+            return "";
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** /lan 状态对象（GET /lan 与 POST /lan 同一形状，见 lan-contract.md 二）。 */
+    private String lanStatusJson() {
+        boolean enabled = lanAccess();
+        String host = engineHostActive();
+        boolean active = "0.0.0.0".equals(host) || "::".equals(host);   // v1.32：:: 表示全接口绑定
+        String tok = engineTokenValue();
+        boolean tokenReady = !tok.isEmpty();
+        StringBuilder sb = new StringBuilder("{\"ok\":true");
+        sb.append(",\"enabled\":").append(enabled);
+        sb.append(",\"active\":").append(active);
+        sb.append(",\"host\":\"").append(jesc(host)).append('"');
+        sb.append(",\"port\":").append(enginePort);
+        sb.append(",\"tokenReady\":").append(tokenReady);
+        sb.append(",\"needsRestart\":").append(enabled != active);
+        sb.append(",\"urls\":[");
+        if (enabled && tokenReady) {
+            java.util.List<String> ips = localLanIps();
+            for (int i = 0; i < ips.size(); i++) {
+                if (i > 0) sb.append(',');
+                sb.append('"').append(jesc("http://" + ips.get(i) + ":" + enginePort + "/?token=" + tok)).append('"');
+            }
+        }
+        sb.append(']');
+        sb.append(",\"supported\":true");
+        sb.append(",\"warning\":\"")
+          .append(jesc(active
+              ? "局域网访问已开启：令牌走明文 HTTP，同网段可被嗅探 —— 只在可信网络使用；用完请 POST /lan {\"enabled\":false} 关闭。"
+              : "局域网访问默认关闭。开启方式：POST /lan {\"enabled\":true,\"token\":\"<local_token>\"}，然后重启引擎（重启 App）。前置条件已满足：三处无鉴权读面均已关闭（无 cookie 一律 401）。"))
+          .append("\"}");
+        return sb.toString();
+    }
+
+    /**
+     * /lan 路由：GET 读状态（不需要令牌）；POST {"enabled":true|false,"token":"…"} 写 lan_access。
+     * 写操作必须校验 body 里的 token 与本地 localToken() 一致（与 /shell 同款）。
+     * 改完不会立刻生效，必须重启 App（响应里 needsRestart 说明）。
+     */
+    private String handleLanRequest(String head, String raw) {
+        try {
+            String method = "";
+            if (head != null) {
+                int sp = head.indexOf(' ');
+                if (sp > 0) method = head.substring(0, sp).trim().toUpperCase();
+            }
+            String wanted = jsonBoolRaw(raw, "enabled");
+            boolean isWrite = "POST".equals(method) || !wanted.isEmpty();
+            if (isWrite) {
+                String token = jsonField(raw, "token");
+                String mine = localToken();
+                if (mine.isEmpty() || !mine.equals(token)) {
+                    return "{\"ok\":false,\"error\":\"token 校验失败（该接口仅限本应用引擎调用）\"}";
+                }
+                if (wanted.isEmpty()) {
+                    return "{\"ok\":false,\"error\":\"缺少 enabled 参数\"}";
+                }
+                // v1.32：允许「开启」。做法是给上游对 0.0.0.0 的拒绝加一个**显式开关**
+                // （payload 补丁：仅当 DSH_ALLOW_LAN=1 才放行，见 selfbuild/scripts/patch-lan-optin.js）。
+                // 前置条件已具备：v1.24~v1.31 把三处无鉴权读面全部关闭（无 cookie 一律 401）。
+                // 残留风险：令牌走明文 HTTP，同网段可嗅探 → 只在可信网络开启。
+                if ("true".equals(wanted)) {
+                    getSharedPreferences("dsh_prefs", MODE_PRIVATE).edit().putBoolean("lan_access", true).apply();
+                    Log.i(TAG, "lan_access -> true（下次引擎启动绑 0.0.0.0 + DSH_ALLOW_LAN=1）");
+                    // 立刻重启引擎让新绑定生效：看门狗几秒内会用新参数把它拉起来。
+                    // （不这么做要等用户手动重启 App，容易以为"开了没用"。）
+                    try {
+                        new Thread(new Runnable() { public void run() {
+                            try { Thread.sleep(600); } catch (Throwable ignored) {}
+                            killEngineNow();
+                        } }, "lan-enable-restart").start();
+                    } catch (Throwable ignored) {}
+                    return "{\"ok\":true,\"lan_access\":true,\"needsRestart\":true,\"note\":\"已开启，引擎正在重启；几秒后 GET /lan 看 urls。\"}";
+                }
+                getSharedPreferences("dsh_prefs", MODE_PRIVATE).edit().putBoolean("lan_access", false).apply();
+                Log.i(TAG, "lan_access -> false (局域网访问保持关闭)");
+            }
+            return lanStatusJson();
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":\"lan 路由异常：" + jesc(String.valueOf(t.getMessage())) + "\"}";
+        }
+    }
+
+    /** 处理 /overlay：控制小鲸鱼悬浮窗。action=show|hide|toggle|status。 */
+    private String handleOverlayRequest(String path, String raw) {
+        try {
+            String action = jsonField(raw, "action");
+            if (action.isEmpty()) action = queryField(path, "action");
+            if (action.isEmpty()) action = "status";
+            if (action.equals("status")) {
+                // v1.38/1.39：补 visible/appForeground/debug —— "服务在跑但小鲸鱼没露脸"是真实报障，
+                // 以前只能 dumpsys 猜，现在一个 GET 就能分清是"没显示"还是"显示了但被挡"。
+                return "{\"ok\":true,\"running\":" + OverlayService.isRunning
+                        + ",\"engineUp\":" + OverlayService.engineUp
+                        + ",\"visible\":" + OverlayService.visible
+                        + ",\"appForeground\":" + overlayForeground
+                        // v1.41：设置页「桌宠」页的三个开关读这里。
+                        + ",\"fluid\":" + (OverlayService.isRunning
+                            ? OverlayService.fluidOn()
+                            : getSharedPreferences("dsh_prefs", MODE_PRIVATE).getBoolean("ovl_fluid", true))
+                        + ",\"vscreen\":" + OverlayService.vscreenOn()
+                        + ",\"debug\":" + OverlayService.debugState()
+                        + ",\"granted\":" + (Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this)) + "}";
+            }
+            // v1.41：设置页「桌宠」里的流体云 / 悬浮屏预览开关（不依赖长按菜单或面板按钮）。
+            if (action.equals("fluid") || action.equals("vscreen")) {
+                // v2.12：这三句原来有两个坑 ——
+                // ① 设置页发 JSON 布尔 "on":false，jsonField 只认带引号的字符串 → 取不到 → 默认 true；
+                // ② query 那条又把 "action=" 里的 "on=" 当字段 → 取到 "fluid" → 还是 true。
+                // 两个开关于是只能开、不能关。改用 boolParam（认布尔字面量 + 边界匹配）。
+                boolean on = boolParam(raw, path, "on", true);
+                if (!OverlayService.isRunning) {
+                    // 服务没跑时开关没有落点：明说，别让页面显示"开了"其实什么都没发生。
+                    return "{\"ok\":false,\"error\":\"悬浮球没开，先打开「显示桌宠」\"}";
+                }
+                boolean after = action.equals("fluid")
+                        ? OverlayService.setFluidFromBridge(on)
+                        : OverlayService.setVscreenFromBridge(on);
+                return "{\"ok\":true,\"action\":\"" + action + "\",\"on\":" + after + "}";
+            }
+            if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
+                return "{\"ok\":false,\"error\":\"未授予悬浮窗权限，请在权限引导页/系统设置里开启\"}";
+            }
+            // v1.54：/overlay?action=panel&show=1|0 —— 直接开关小鲸鱼面板，**不依赖悬浮窗触摸**。
+            // 触摸回归修好之前，这是用户/AI 都能用的可靠入口（也能被 android_input 之外的路径触发）。
+            if (action.equals("panel")) {
+                String sv = jsonField(raw, "show");
+                if (sv.isEmpty()) sv = queryField(path, "show");
+                if (sv.isEmpty()) sv = "1";
+                boolean show = !("0".equals(sv) || "false".equalsIgnoreCase(sv));
+                String rf = jsonField(raw, "refresh");
+                if (rf.isEmpty()) rf = queryField(path, "refresh");
+                boolean refresh = !("0".equals(rf) || "false".equalsIgnoreCase(rf));
+                if (!OverlayService.isRunning) startOverlayService();
+                setOverlayWanted(true);   // v1.66：显式开面板 = 想要悬浮球，下次启动自动恢复
+                // v2.04：面板是用户现在就要看的 —— 先把它叫到前台并取消贴边半藏，
+                // 否则 App 在前台时 applyVisibleNow() 仍按 foregroundWantsHidden 把整窗藏掉。
+                OverlayService.reshowFromBridge();
+                return OverlayService.togglePanelFromBridge(show, refresh);
+            }
+            if (action.equals("show") || action.equals("toggle")) {
+                if (OverlayService.isRunning) {
+                    if (action.equals("toggle")) {
+                        stopOverlayService();
+                        setOverlayWanted(false);
+                        return "{\"ok\":true,\"running\":false}";
+                    }
+                    setOverlayWanted(true);
+                    // v2.04：「召回桌宠」= 现在露脸。服务活着时也要取消贴边半藏、
+                    // 清掉 App 前台隐藏，并把整只鲸鱼重新摆正 —— 只回一句"已在运行"等于没反应。
+                    return "{\"ok\":true,\"running\":true,\"revealed\":true,\"reshow\":"
+                            + OverlayService.reshowFromBridge() + "}";
+                }
+                setOverlayWanted(true);
+                startOverlayService();
+                OverlayService.reshowFromBridge();   // 服务还没建好：记下 pendingReveal，onCreate 后整只露出
+                return "{\"ok\":true,\"running\":true,\"starting\":true}";
+            }
+            if (action.equals("hide")) {
+                setOverlayWanted(false);
+                stopOverlayService();
+                return "{\"ok\":true,\"running\":false}";
+            }
+            return "{\"ok\":false,\"error\":\"未知 action（show/hide/toggle/status）\"}";
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}";
+        }
+    }
+
+    /** 处理 /voice：控制语音识别 (STT)、热词唤醒与状态查询。
+     *  action=start|stop|cancel|status|trigger|hotword_on|hotword_off
+     */
+    private String handleVoiceRequest(String path, String raw) {
+        try {
+            String action = jsonField(raw, "action");
+            if (action.isEmpty()) action = queryField(path, "action");
+            if (action.isEmpty()) action = "status";
+
+            VoiceManager vm = VoiceManager.get(this);
+            if ("start".equals(action)) {
+                vm.startListening();
+                return vm.getStatusJson();
+            } else if ("stop".equals(action)) {
+                vm.stopListening();
+                return vm.getStatusJson();
+            } else if ("cancel".equals(action)) {
+                vm.cancelListening();
+                return vm.getStatusJson();
+            } else if ("trigger".equals(action)) {
+                vm.triggerVoiceInteraction();
+                return vm.getStatusJson();
+            } else if ("hotword_on".equals(action)) {
+                vm.setHotwordEnabled(true);
+                return vm.getStatusJson();
+            } else if ("hotword_off".equals(action)) {
+                vm.setHotwordEnabled(false);
+                return vm.getStatusJson();
+            } else if ("status".equals(action)) {
+                return vm.getStatusJson();
+            }
+            return "{\"ok\":false,\"error\":\"未知 action（start/stop/cancel/trigger/hotword_on/hotword_off/status）\"}";
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}";
+        }
+    }
+
+    /** 处理 /tts：控制系统语音朗读 (TTS)。
+     *  action=speak|stop|status, text=要朗读的文本, queue=0|1
+     */
+    private String handleTtsRequest(String path, String raw) {
+        try {
+            String action = jsonField(raw, "action");
+            if (action.isEmpty()) action = queryField(path, "action");
+            if (action.isEmpty()) action = "status";
+
+            VoiceManager vm = VoiceManager.get(this);
+            if ("speak".equals(action)) {
+                String text = jsonField(raw, "text");
+                if (text.isEmpty()) text = queryField(path, "text");
+                String queueStr = jsonField(raw, "queue");
+                if (queueStr.isEmpty()) queueStr = queryField(path, "queue");
+                boolean queue = "1".equals(queueStr) || "true".equalsIgnoreCase(queueStr);
+
+                if (text.isEmpty()) {
+                    return "{\"ok\":false,\"error\":\"text 字段不能为空\"}";
+                }
+                vm.speak(text, queue);
+                return "{\"ok\":true,\"speaking\":true}";
+            } else if ("stop".equals(action)) {
+                vm.stopSpeaking();
+                return "{\"ok\":true,\"speaking\":false}";
+            } else if ("status".equals(action)) {
+                return "{\"ok\":true,\"isSpeaking\":" + vm.isSpeaking() + "}";
+            }
+            return "{\"ok\":false,\"error\":\"未知 action（speak/stop/status）\"}";
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}";
+        }
+    }
+
+    /**
+     * v1.66：记住"用户是否想要悬浮球"，供下次启动自动恢复（读的地方见 startEngine）。
+     * 只由 /overlay 桥的显式开/关调用；App 正常退出、服务被系统杀都不算"用户不想要"。
+     */
+    private void setOverlayWanted(boolean wanted) {
+        try {
+            getSharedPreferences("dsh_prefs", MODE_PRIVATE)
+                    .edit().putBoolean("overlay_wanted", wanted).apply();
+        } catch (Throwable ignored) {}
+    }
+
+    /** 启动小鲸鱼悬浮窗（需已授予悬浮窗权限；权限引导页里会调用）。 */
+    private void startOverlayService() {
+        try {
+            Intent i = new Intent(this, OverlayService.class);
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(i);
+            } else {
+                startService(i);
+            }
+            Log.i(TAG, "overlay service starting");
+        } catch (Throwable t) {
+            Log.w(TAG, "overlay start failed", t);
+        }
+    }
+
+    /** 停止小鲸鱼悬浮窗。 */
+    private void stopOverlayService() {
+        try {
+            stopService(new Intent(this, OverlayService.class));
+        } catch (Throwable t) {
+            Log.w(TAG, "overlay stop failed", t);
+        }
+    }
+
+    /** 处理 /notify：发系统通知（仅需通知权限）。 */
+    private String handleNotifyRequest(String raw) {
+        String title = "", text = "";
+        int ti = raw.indexOf("\"title\"");
+        int tx = raw.indexOf("\"text\"");
+        if (ti >= 0 || tx >= 0) {
+            title = jsonField(raw, "title");
+            text = jsonField(raw, "text");
+        } else {
+            title = queryField(raw, "title");
+            text = queryField(raw, "text");
+        }
+        // 如果 title 和 text 都为空，直接返回不发通知
+        if (title.isEmpty() && text.isEmpty()) {
+            return "{\"ok\":true,\"skipped\":true,\"reason\":\"title 和 text 均为空，已跳过通知\"}";
+        }
+        if (title.isEmpty()) title = "DeepSeek Harness";
+        if (text.isEmpty()) text = " ";  // 至少给一个空格，避免显示"(空消息)"
+        // open:"app" ⇒ 点击通知只把 App 拉到前台看会话，不弹「通知卡片」。
+        boolean showCard = !"app".equals(jsonField(raw, "open"));
+        boolean granted = checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                == PackageManager.PERMISSION_GRANTED;
+        if (granted) {
+            postNotification(title, text, showCard);
+            return "{\"ok\":true}";
+        }
+        return "{\"ok\":false,\"error\":\"通知权限未授予，无法发送通知\"}";
+    }
+
+    /**
+     * v1.42：处理 /open —— 把共享存储里的文件交给系统（打开 / 定位 / 分享）。
+     *
+     * 为什么要在 App 里做：内核 @deepseek-ai/dsh-host-open-in-app 的 OPEN_IN_APP_CATALOG
+     * 只声明了 darwin / win32 / linux 三套平台，**没有 android** —— 文件预览上的
+     * 「显示文件位置」在手机上结构性不可用（点了永远失败，不是配置问题）。
+     * WebView 侧也只有 ctlState / ctlAct 两个窄接口，且 ctlAct 的动作表里只有
+     * open.url（只收 http/https）。所以安卓的文件动作原本无路可走，只能由壳补。
+     *
+     * 实现取巧处：不新建 FileProvider、不动 Manifest —— 直接用系统自带的
+     * com.android.externalstorage.documents 这个 DocumentsProvider 构造 content:// URI，
+     * 配 FLAG_GRANT_READ_URI_PERMISSION 交给目标应用，读权限是临时授予的。
+     *
+     * 参数：{"path":"/sdcard/Download/x.apk", "action":"view|reveal|share"}（也接受 query 串）
+     *   view   = 用系统默认应用打开（apk → 安装器，视频 → 播放器）
+     *   reveal = 打开文件所在的文件夹（DocumentsUI）
+     *   share  = 抛系统分享面板
+     */
+    private String handleOpenRequest(String raw) {
+        String path = jsonField(raw, "path");
+        String action = jsonField(raw, "action");
+        if (path.isEmpty()) {
+            path = queryField(raw, "path");
+            action = queryField(raw, "action");
+        }
+        if (action.isEmpty()) action = "view";
+        if (path.isEmpty()) return "{\"ok\":false,\"error\":\"缺少 path 参数\"}";
+        String full = normalizeSharedPath(path);
+        if (full == null) return "{\"ok\":false,\"error\":\"只支持共享存储 (/sdcard) 下的路径\"}";
+        File file = new File(full);
+        if (!file.exists()) return "{\"ok\":false,\"error\":\"文件不存在: " + jesc(full) + "\"}";
+
+        String root = Environment.getExternalStorageDirectory().getAbsolutePath();
+        String rel = full.equals(root) ? "" : full.substring(root.length() + 1);
+        String mime = mimeOf(rel);
+        String authority = "com.android.externalstorage.documents";
+        Intent intent = null;
+        String fallback = "";
+        try {
+            if ("reveal".equals(action)) {
+                int cut = rel.lastIndexOf('/');
+                String dirRel = cut > 0 ? rel.substring(0, cut) : "";
+                Uri dir = DocumentsContract.buildDocumentUri(authority, "primary:" + dirRel);
+                intent = new Intent(Intent.ACTION_VIEW);
+                intent.setDataAndType(dir, "vnd.android.document/directory");
+                fallback = "view";   // 有些 ROM 的文件管理器不认目录 URI，退回直接打开文件
+            } else if ("share".equals(action)) {
+                Uri doc = DocumentsContract.buildDocumentUri(authority, "primary:" + rel);
+                intent = new Intent(Intent.ACTION_SEND);
+                intent.setType(mime);
+                intent.putExtra(Intent.EXTRA_STREAM, doc);
+            } else {
+                Uri doc = DocumentsContract.buildDocumentUri(authority, "primary:" + rel);
+                intent = new Intent(Intent.ACTION_VIEW);
+                intent.setDataAndType(doc, mime);
+            }
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+            return "{\"ok\":true,\"action\":\"" + action + "\",\"path\":\"" + jesc(full)
+                    + "\",\"mime\":\"" + jesc(mime) + "\"}";
+        } catch (Throwable t) {
+            Log.w(TAG, "open " + action + " failed: " + full, t);
+            // reveal 失败时退回直接打开文件本身，至少比什么都不发生强。
+            if (!fallback.isEmpty()) {
+                try {
+                    Uri doc = DocumentsContract.buildDocumentUri(authority, "primary:" + rel);
+                    Intent again = new Intent(Intent.ACTION_VIEW);
+                    again.setDataAndType(doc, mime);
+                    again.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(again);
+                    return "{\"ok\":true,\"action\":\"view\",\"fallback\":true,\"path\":\"" + jesc(full) + "\"}";
+                } catch (Throwable ignored) {}
+            }
+            return "{\"ok\":false,\"error\":\"" + jesc(String.valueOf(t.getMessage())) + "\"}";
+        }
+    }
+
+    /** 把 /sdcard、/storage/self/primary、file:// 统一成 /storage/emulated/0/…；越界返回 null。 */
+    private String normalizeSharedPath(String raw) {
+        String p = raw == null ? "" : raw.trim();
+        if (p.isEmpty()) return null;
+        if (p.startsWith("file://")) {
+            try { p = Uri.parse(p).getPath(); } catch (Throwable ignored) {}
+            if (p == null) return null;
+        }
+        String root = Environment.getExternalStorageDirectory().getAbsolutePath();
+        if (p.equals("/sdcard")) p = root;
+        else if (p.startsWith("/sdcard/")) p = root + p.substring(7);
+        else if (p.equals("/storage/self/primary")) p = root;
+        else if (p.startsWith("/storage/self/primary/")) p = root + p.substring(21);
+        if (!p.equals(root) && !p.startsWith(root + "/")) return null;
+        // 拒绝 ".." 穿越（normalize 后仍含 ".." 说明是可疑构造）
+        if (p.contains("/../") || p.endsWith("/..")) return null;
+        return p;
+    }
+
+    /** 按后缀给系统一个像样的 MIME；给不准时退 * / * 让系统自己挑（比硬编码错的好）。 */
+    private String mimeOf(String name) {
+        String n = name == null ? "" : name.toLowerCase(java.util.Locale.US);
+        if (n.endsWith(".apk")) return "application/vnd.android.package-archive";
+        if (n.endsWith(".mp4") || n.endsWith(".m4v") || n.endsWith(".mkv") || n.endsWith(".mov")
+                || n.endsWith(".webm") || n.endsWith(".3gp") || n.endsWith(".avi")) return "video/*";
+        if (n.endsWith(".mp3") || n.endsWith(".m4a") || n.endsWith(".wav") || n.endsWith(".flac")
+                || n.endsWith(".ogg") || n.endsWith(".aac") || n.endsWith(".opus")) return "audio/*";
+        if (n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png") || n.endsWith(".gif")
+                || n.endsWith(".webp") || n.endsWith(".bmp") || n.endsWith(".heic")) return "image/*";
+        if (n.endsWith(".pdf")) return "application/pdf";
+        if (n.endsWith(".txt") || n.endsWith(".md") || n.endsWith(".log") || n.endsWith(".csv")) return "text/plain";
+        if (n.endsWith(".json")) return "application/json";
+        if (n.endsWith(".zip")) return "application/zip";
+        return "*/*";
+    }
+
+    /** 处理 /setting：改系统设置（⑤，走 App 的 WRITE_SETTINGS 权限，仅限 System 命名空间，免 Shizuku）。
+     *  音量类 key 必须走 AudioManager.setStreamVolume（Settings.System 的记录不生效）；
+     *  其余 System 项走 Settings.System.put。 */
+    private String handleSettingRequest(String raw) {
+        try {
+            String key = jsonField(raw, "key");
+            String value = jsonField(raw, "value");
+            if (key.isEmpty()) {
+                key = queryField(raw, "key");
+                value = queryField(raw, "value");
+            }
+            if (key.isEmpty()) return "{\"ok\":false,\"error\":\"缺少 key 参数\"}";
+            // 音量：走 AudioManager（真实生效，无需 WRITE_SETTINGS）
+            if (key.startsWith("volume_")) {
+                return handleVolumeRequest(key, value);
+            }
+            // 其余 System 设置：需要 WRITE_SETTINGS 权限
+            if (Build.VERSION.SDK_INT < 23 || !Settings.System.canWrite(this)) {
+                return "{\"ok\":false,\"error\":\"未授予「修改系统设置」权限（WRITE_SETTINGS），无法修改；请先在权限引导页/系统设置里开启\"}";
+            }
+            boolean ok;
+            if (isNumeric(value)) {
+                ok = Settings.System.putInt(getContentResolver(), key, Integer.parseInt(value));
+            } else {
+                ok = Settings.System.putString(getContentResolver(), key, value);
+            }
+            return ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"写入失败（key 可能不存在或不允许修改）\"}";
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}";
+        }
+    }
+
+    /** 音量调节：走 AudioManager.setStreamVolume（真实改变音量）。 */
+    private String handleVolumeRequest(String key, String value) {
+        try {
+            android.media.AudioManager am = (android.media.AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (am == null) return "{\"ok\":false,\"error\":\"音频服务不可用\"}";
+            int stream;
+            switch (key) {
+                case "volume_music": stream = android.media.AudioManager.STREAM_MUSIC; break;
+                case "volume_ring": stream = android.media.AudioManager.STREAM_RING; break;
+                case "volume_alarm": stream = android.media.AudioManager.STREAM_ALARM; break;
+                case "volume_notification": stream = android.media.AudioManager.STREAM_NOTIFICATION; break;
+                case "volume_system": stream = android.media.AudioManager.STREAM_SYSTEM; break;
+                case "volume_voice_call": stream = android.media.AudioManager.STREAM_VOICE_CALL; break;
+                default: return "{\"ok\":false,\"error\":\"不支持的音量类型: " + key + "\"}";
+            }
+            int max = am.getStreamMaxVolume(stream);
+            int val;
+            if (value.endsWith("%")) {
+                // 支持百分比：如 "50%"
+                val = (int) Math.round(max * Integer.parseInt(value.replace("%", "").trim()) / 100.0);
+            } else {
+                val = Integer.parseInt(value.trim());
+            }
+            if (val < 0) val = 0;
+            if (val > max) val = max;
+            // flags=0：不显示音量条、不播放提示音（静默调整，避免打扰）
+            am.setStreamVolume(stream, val, 0);
+            return "{\"ok\":true,\"stream\":\"" + key + "\",\"level\":" + val + ",\"max\":" + max + "}";
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}";
+        }
+    }
+
+    /** 处理 /clipboard：读写剪贴板（⑦，无需任何特殊权限）。 */
+    private String handleClipboardRequest(String raw) {
+        try {
+            String action = jsonField(raw, "action");
+            if (action.isEmpty()) action = queryField(raw, "action");
+            if (action.isEmpty()) action = "read";
+            if (action.equals("write")) {
+                String content = jsonField(raw, "content");
+                if (content.isEmpty()) content = queryField(raw, "content");
+                if (content.isEmpty()) return "{\"ok\":false,\"error\":\"缺少 content 参数\"}";
+                android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("dsh", content));
+                return "{\"ok\":true}";
+            }
+            // read
+            android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm == null || !cm.hasPrimaryClip()) return "{\"ok\":true,\"content\":\"\"}";
+            CharSequence cs = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
+            String content = cs == null ? "" : cs.toString();
+            // JSON 转义
+            content = content.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
+            return "{\"ok\":true,\"content\":\"" + content + "\"}";
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}";
+        }
+    }
+
+    private boolean isNumeric(String s) {
+        if (s == null || s.isEmpty()) return false;
+        for (int i = 0; i < s.length(); i++) {
+            char ch = s.charAt(i);
+            if (ch < '0' || ch > '9') return false;
+        }
+        return true;
+    }
+
+    // ============ ⑥ 定时任务（半自动版）============
+    /** 处理 /schedule：AI 设置定时提醒 → AlarmManager 注册系统闹钟。
+     *  到点系统唤醒 AlarmReceiver（即使 App 被杀也能触发）→ 推送通知提醒。
+     *  若 App 仍在后台（保活生效），点通知可回 App 继续执行。 */
+    private String handleScheduleRequest(String fullPath, String raw) {
+        try {
+            String path = fullPath.split("\\?", 2)[0];
+            if ("/schedule/list".equals(path)) return ScheduleBridge.list(this).toString();
+            org.json.JSONObject input = new org.json.JSONObject();
+            if (raw.trim().startsWith("{")) input = new org.json.JSONObject(raw);
+            if ("/schedule/cancel".equals(path)) {
+                return ScheduleBridge.cancel(this, input.optString("source", "app"),
+                        input.optString("taskId", input.optString("id", ""))).toString();
+            }
+            if (!"/schedule".equals(path)) return "{\"ok\":false,\"error\":\"未知定时任务路径\"}";
+            String text = input.optString("text", "");
+            if (text.isEmpty()) text = queryField(raw, "text");
+            String when = input.optString("when", "");
+            if (when.isEmpty()) when = queryField(raw, "when");
+            // 重复模式（Kun 式调度）：once 一次性（默认）| daily 每天 | interval 每隔 N 分钟
+            String repeat = input.optString("repeat", "");
+            if (repeat.isEmpty()) repeat = queryField(raw, "repeat");
+            if (repeat.isEmpty()) repeat = "once";
+            int intervalMin = 0;
+            String im = input.optString("intervalMin", "");
+            if (im.isEmpty()) im = queryField(raw, "intervalMin");
+            if (!im.isEmpty()) intervalMin = Integer.parseInt(im.trim());
+            if (!repeat.equals("once") && !repeat.equals("daily") && !repeat.equals("interval")) {
+                return "{\"ok\":false,\"error\":\"repeat 仅支持 once/daily/interval\"}";
+            }
+            if (repeat.equals("interval") && intervalMin <= 0) {
+                return "{\"ok\":false,\"error\":\"interval 模式需要 intervalMin（分钟）参数\"}";
+            }
+            if (text.isEmpty()) return "{\"ok\":false,\"error\":\"缺少 text 参数\"}";
+            if (when.isEmpty()) {
+                // interval 模式允许省略 when（默认 1 分钟后首次触发）
+                if (repeat.equals("interval")) when = "60";
+                else return "{\"ok\":false,\"error\":\"缺少 when 参数（ISO 时间或相对秒数）\"}";
+            }
+
+            long triggerAt;
+            String lifeTaskId = input.optString("lifeTaskId", "");
+            int dailyHour = -1, dailyMinute = 0, dailySecond = 0;
+            // 支持两种格式：纯数字 = 相对秒数；否则按 ISO 时间解析
+            if (isNumeric(when)) {
+                long seconds = Long.parseLong(when);
+                if (seconds <= 0 || seconds > (Long.MAX_VALUE - System.currentTimeMillis()) / 1000L)
+                    throw new IllegalArgumentException("相对秒数必须是有效正整数");
+                triggerAt = System.currentTimeMillis() + seconds * 1000L;
+            } else {
+                // 兼容 "2026-08-21 08:00:00" / "2026-08-21T08:00:00" / "08:00"（今天）
+                String w = when.trim().replace("T", " ").replace("Z", "");
+                java.text.SimpleDateFormat fmt;
+                long at;
+                if (w.length() <= 5) {
+                    fmt = new java.text.SimpleDateFormat("HH:mm", Locale.US);
+                    fmt.setLenient(false);
+                    java.util.Date d = fmt.parse(w);
+                    dailyHour = d.getHours(); dailyMinute = d.getMinutes();
+                    java.util.Calendar cal = java.util.Calendar.getInstance();
+                    cal.set(java.util.Calendar.HOUR_OF_DAY, d.getHours());
+                    cal.set(java.util.Calendar.MINUTE, d.getMinutes());
+                    cal.set(java.util.Calendar.SECOND, 0);
+                    cal.set(java.util.Calendar.MILLISECOND, 0);
+                    at = cal.getTimeInMillis();
+                    if (at <= System.currentTimeMillis()) {
+                        cal.add(java.util.Calendar.DAY_OF_MONTH, 1);
+                        cal.set(java.util.Calendar.HOUR_OF_DAY, dailyHour);
+                        cal.set(java.util.Calendar.MINUTE, dailyMinute);
+                        at = cal.getTimeInMillis();
+                    }
+                } else if (w.length() <= 16) {
+                    fmt = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US);
+                    fmt.setLenient(false);
+                    at = fmt.parse(w).getTime();
+                    dailyHour = Integer.parseInt(w.substring(11, 13));
+                    dailyMinute = Integer.parseInt(w.substring(14, 16));
+                } else {
+                    fmt = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
+                    fmt.setLenient(false);
+                    at = fmt.parse(w).getTime();
+                    dailyHour = Integer.parseInt(w.substring(11, 13));
+                    dailyMinute = Integer.parseInt(w.substring(14, 16));
+                    dailySecond = Integer.parseInt(w.substring(17, 19));
+                }
+                triggerAt = at;
+            }
+            if (!lifeTaskId.isEmpty()) {
+                if (!"once".equals(repeat)) throw new IllegalArgumentException("生活助理唤醒仅支持 once");
+                triggerAt = input.optLong("lifeRunAt", triggerAt);
+            }
+            if (triggerAt <= System.currentTimeMillis()) {
+                // interval 模式：when 已过则从 1 分钟后起算（避免报错打断循环任务）
+                if (repeat.equals("interval")) {
+                    triggerAt = System.currentTimeMillis() + 60 * 1000L;
+                } else {
+                    return "{\"ok\":false,\"error\":\"触发时间已过，请设置未来的时间\"}";
+                }
+            }
+
+            String taskId = "task-" + java.util.UUID.randomUUID().toString();
+            ScheduledTaskStore.Task record = new ScheduledTaskStore.Task(taskId, triggerAt, repeat, intervalMin, text);
+            if (dailyHour >= 0 && "daily".equals(repeat)) record = record.withDailyTime(dailyHour, dailyMinute, dailySecond, 0);
+            if (!lifeTaskId.isEmpty()) record = record.withLifeTask(lifeTaskId);
+            synchronized (ScheduledTaskStore.LOCK) {
+                ScheduledTaskStore store = new ScheduledTaskStore(getFilesDir());
+                if (!lifeTaskId.isEmpty()) {
+                    if (!ScheduleBridge.lifeEnabled(this, lifeTaskId))
+                        throw new IllegalArgumentException("生活助理任务已禁用或不存在");
+                    for (ScheduledTaskStore.Task old : store.list())
+                        if (lifeTaskId.equals(old.lifeTaskId)) ScheduleAlarms.cancel(this, old.id);
+                }
+                store.put(record);
+                try { ScheduleAlarms.register(this, record); }
+                catch (RuntimeException e) { store.cancel(taskId); throw e; }
+            }
+            logSchedule("任务已设置 taskId=" + taskId + " text=" + text);
+            long secs = (triggerAt - System.currentTimeMillis()) / 1000;
+            String whenStr = secs >= 3600
+                    ? (secs / 3600) + "小时" + ((secs % 3600) / 60) + "分钟后"
+                    : (secs / 60) + "分钟后";
+            String repStr;
+            if (repeat.equals("daily")) repStr = "每天";
+            else if (repeat.equals("interval")) repStr = "每" + intervalMin + "分钟";
+            else repStr = "一次性";
+            return "{\"ok\":true,\"taskId\":\"" + taskId + "\",\"triggerAt\":" + triggerAt + ",\"at\":\"" + whenStr + "\",\"repeat\":\"" + repStr
+                    + "\",\"hint\":\"到点会自动拉起引擎执行任务（无需操作），完成后推送通知；重复任务到点后自动安排下一次；若 App 被杀，闹钟仍会触发并自动启动\"}";
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}";
+        }
+    }
+
+    // 定时任务登记统一由 ScheduledTaskStore 管理。
+    private void logSchedule(String msg) { ScheduleExecutor.log(this, msg); }
+
+    /**
+     * 从请求体里取一个字符串字段。
+     *
+     * v1.13.4：改成**认识转义**的解析。旧实现是“取第一个引号到下一个引号”，不认 `\"` `\\` `\n` 等，
+     * 于是命令里带引号/换行会被截断：例如 shizuku_shell 传
+     * `pm install -r "/sdcard/Download/my app.apk"` 会被解析成 `pm install -r \`，后半段全丢，
+     * 而工具还会“照跑”——表现为莫名其妙的失败。
+     */
+    private String jsonField(String json, String key) {
+        try {
+            String k = "\"" + key + "\"";
+            int i = json.indexOf(k);
+            if (i < 0) return "";
+            int c = json.indexOf(':', i + k.length());
+            if (c < 0) return "";
+            int q1 = json.indexOf('"', c + 1);
+            if (q1 < 0) return "";
+            StringBuilder sb = new StringBuilder();
+            for (int p = q1 + 1; p < json.length(); p++) {
+                char ch = json.charAt(p);
+                if (ch == '\\') {
+                    if (p + 1 >= json.length()) break;
+                    char n = json.charAt(p + 1);
+                    if (n == 'n') sb.append('\n');
+                    else if (n == 'r') sb.append('\r');
+                    else if (n == 't') sb.append('\t');
+                    else if (n == 'b') sb.append('\b');
+                    else if (n == 'f') sb.append('\f');
+                    else if (n == 'u') {
+                        if (p + 5 >= json.length()) break;
+                        try {
+                            sb.append((char) Integer.parseInt(json.substring(p + 2, p + 6), 16));
+                            p += 4;
+                        } catch (Exception ignored) {}
+                    } else {
+                        sb.append(n);      // \" \\ \/ 等：取字符本身
+                    }
+                    p++;
+                    continue;
+                }
+                if (ch == '"') break;
+                sb.append(ch);
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** 从 query 字符串里取字段值（title=..&text=..）。 */
+    private String queryField(String q, String key) {
+        try {
+            String k = key + "=";
+            int i = -1;
+            // v2.12：必须落在字段边界上（`?key=` 或 `&key=`）。
+            // 原来直接 indexOf(key+"=") —— "action=fluid&on=0" 里 "action=" 本身**就含 "on="**，
+            // 取 on 会取到 "fluid"，任何布尔解析都落到默认值 true：表现就是「开了就关不掉」
+            // （2026-10-21 用户报障，实测复现）。
+            int from = 0;
+            while (true) {
+                int p = q.indexOf(k, from);
+                if (p < 0) break;
+                if (p == 0 || q.charAt(p - 1) == '?' || q.charAt(p - 1) == '&') { i = p; break; }
+                from = p + k.length();
+            }
+            if (i < 0) return "";
+            int e = q.indexOf('&', i + k.length());
+            if (e < 0) e = q.length();
+            return q.substring(i + k.length(), e).replace("+", " ");
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /**
+     * v2.12：取布尔参数（JSON 主体和 query 串两处都认）。
+     *
+     * 为什么不能直接用 jsonField：它只解析**带引号的字符串值**（"on":"1"），
+     * 而设置页发来的是 JSON 布尔（"on": false）—— jsonField 找不到引号就返回空，
+     * 调用方于是落到"默认 true"，结果只能开、不能关。
+     * 这里先认 JSON 布尔字面量，再退回字符串/数字，最后退回 query 串。
+     */
+    private boolean boolParam(String raw, String query, String key, boolean fallback) {
+        try {
+            String k = "\"" + key + "\"";
+            int i = (raw == null) ? -1 : raw.indexOf(k);
+            if (i >= 0) {
+                int c = raw.indexOf(':', i + k.length());
+                if (c >= 0) {
+                    String rest = raw.substring(c + 1).trim();
+                    if (rest.startsWith("true")) return true;
+                    if (rest.startsWith("false")) return false;
+                    if (rest.startsWith("1")) return true;
+                    if (rest.startsWith("0")) return false;
+                    String sv = jsonField(raw, key);
+                    if (!sv.isEmpty()) return parseBool(sv, fallback);
+                }
+            }
+            if (query != null && !query.isEmpty()) {
+                String qv = queryField(query, key);
+                if (!qv.isEmpty()) return parseBool(qv, fallback);
+            }
+        } catch (Throwable ignored) {}
+        return fallback;
+    }
+
+    private boolean parseBool(String v, boolean fallback) {
+        if (v == null) return fallback;
+        String s = v.trim().toLowerCase();
+        if (s.equals("1") || s.equals("true") || s.equals("on") || s.equals("yes")) return true;
+        if (s.equals("0") || s.equals("false") || s.equals("off") || s.equals("no")) return false;
+        return fallback;
+    }
+
+    /**
+     * v1.25 开机自检：引擎起来 90s 后跑一次 selfbuild/selfcheck.sh --quiet，
+     * **只在有失败项时**发通知（正常时完全静默）。
+     * 目的：补丁漂移（历史上出现过：换基线重建时丢了 dsh-tool-android 的桥）能自己冒出来，
+     * 而不是等用户某天发现工具不好使。脚本不存在（没装源码树）就静默跳过。
+     */
+    private void scheduleBootSelfCheck() {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try { Thread.sleep(90000); } catch (Throwable ignored) { return; }
+                try {
+                    // 位置可覆盖：-Ddsh.selfcheck.script=<绝对路径>；默认用 App 公开目录下的副本。
+                    File script = new File(System.getProperty("dsh.selfcheck.script",
+                            new File(Environment.getExternalStorageDirectory(), "DeepSeekHarness/selfcheck.sh").getAbsolutePath()));
+                    if (!script.isFile()) return;
+                    ProcessBuilder pb = new ProcessBuilder("/system/bin/sh", script.getAbsolutePath(), "--quiet");
+                    // v1.45：**必须**给子进程 PATH / LD_LIBRARY_PATH。
+                    //   selfcheck.sh 里用的是裸命令（rg / curl / node），它们都在
+                    //   payload/runtime/bin 下；ProcessBuilder 继承的环境里没有这个 PATH，
+                    //   于是 7 项检查全部查不了 → 每次开机都误报「自检发现问题（7 项）」。
+                    //   复现与验证：模拟同样的空环境 → 7 项失败全出现；补上下面两行 → 0 失败。
+                    java.io.File rt = new java.io.File(getFilesDir(), "payload/runtime");
+                    java.util.Map<String, String> env = pb.environment();
+                    env.put("PATH", new java.io.File(rt, "bin").getAbsolutePath() + ":/system/bin:/system/xbin");
+                    env.put("LD_LIBRARY_PATH", new java.io.File(rt, "lib").getAbsolutePath());
+                    pb.redirectErrorStream(true);
+                    Process p = pb.start();
+                    java.io.BufferedReader r = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(p.getInputStream()));
+                    StringBuilder sb = new StringBuilder();
+                    String line; int n = 0;
+                    while ((line = r.readLine()) != null) { if (n++ < 20) sb.append(line).append('\n'); }
+                    int rc = p.waitFor();
+                    Log.i(TAG, "boot selfcheck rc=" + rc);
+                    if (rc != 0) {
+                        Log.w(TAG, "boot selfcheck found " + rc + " issues:\n" + sb.toString().trim());
+                        // 只在严重问题时才通知（超过 5 项失败）
+                        if (rc > 5) {
+                            postNotification("DSH 自检发现严重问题（" + rc + " 项）", 
+                                "建议重启 App 或查看日志。详情：\n" + sb.toString().trim());
+                        }
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "boot selfcheck failed", t);
+                }
+            }
+        }, "boot-selfcheck").start();
+    }
+
+    /** 发一条 AI 通知（仅需 POST_NOTIFICATIONS，无需 Shizuku/root）。默认点击后弹「通知卡片」。 */
+    private void postNotification(String title, String text) {
+        postNotification(title, text, true);
+    }
+
+    /**
+     * 发一条 AI 通知。
+     *
+     * @param showCard true = 点击通知弹「通知卡片」显示完整正文（长文本通知用这个）；
+     *                 false = 点击只把 App 拉到前台，直接看会话（AI 完成提醒走这个 ——
+     *                         用户原话「我从横幅进来不就是为了看主页面你的内容吗」，
+     *                         既然正文就在会话里，再弹一张只有文字+关闭按钮的卡片纯属多一步）。
+     */
+    private void postNotification(String title, String text, boolean showCard) {
+        if (text == null || text.trim().isEmpty()) return;
+        try {
+            NotificationArchive.save(getFilesDir(), title, text);
+        } catch (Exception e) {
+            Log.w(TAG, "notification archive failed", e);
+        }
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm == null) return;
+            if (Build.VERSION.SDK_INT >= 26) {
+                // ⚠ 通道重要性【创建后不可改】：老装机上用 IMPORTANCE_DEFAULT 建过 dsh_ai_notify，
+                //   升级后这里再传 IMPORTANCE_HIGH 会被系统【静默忽略】——
+                //   于是"改了代码却永远不弹横幅"，v1.46/v1.37 那次修复就是这么白做的（真机实测：
+                //   通道 mOriginalImp 一直是 3，有效重要性靠用户在系统设置里手动打开横幅才变成 4）。
+                //   唯一解法 = 删掉旧通道重建，且只做一次（免得和用户手动选择的重要性打架）。
+                migrateNotifyChannelIfStale(nm);
+                NotificationChannel ch = new NotificationChannel(NOTIFY_CHANNEL_ID, NOTIFY_CHANNEL_NAME,
+                        NotificationManager.IMPORTANCE_HIGH);  // HIGH 才会弹横幅
+                ch.setDescription("AI 任务完成/需要你关注时推送");
+                ch.enableVibration(true);  // 启用震动
+                ch.setShowBadge(true);     // 显示角标
+                nm.createNotificationChannel(ch);
+            }
+            Intent i = new Intent(this, MainActivity.class);
+            i.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            if (showCard) {
+                // 冷启动/热启动统一查看完整通知，不触发模型。
+                i.putExtra("notification_title", title == null ? "通知" : title.substring(0, Math.min(title.length(), 1024)));
+                i.putExtra("notification_content", text.substring(0, Math.min(text.length(), 65536)));
+            }
+            android.app.PendingIntent pi = android.app.PendingIntent.getActivity(this, 
+                    (int)(System.currentTimeMillis() & 0x7fffffff), i,  // 使用唯一 requestCode
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
+            Notification.Builder b;
+            if (Build.VERSION.SDK_INT >= 26) {
+                b = new Notification.Builder(this, NOTIFY_CHANNEL_ID);
+            } else {
+                b = new Notification.Builder(this);
+            }
+            Notification n = b.setContentTitle(title)
+                    .setContentText(text)
+                    .setStyle(new Notification.BigTextStyle().bigText(text))
+                    .setSmallIcon(R.drawable.ic_whale_black)
+                    .setContentIntent(pi)
+                    .setAutoCancel(true)
+                    .build();
+            int id = (int) (System.currentTimeMillis() & 0x7fffffff);
+            nm.notify(id, n);
+            Log.i(TAG, "AI notification sent: " + title);
+        } catch (Throwable t) {
+            Log.w(TAG, "post notification failed", t);
+        }
+    }
+
+    /**
+     * 一次性把"卡在低重要性"的通知通道删掉重建。
+     *
+     * 背景：Android 8+ 的 NotificationChannel 一旦创建，**重要性就不可被 App 修改**
+     * （只有用户能在系统设置里改）。老版本用 IMPORTANCE_DEFAULT 建过 dsh_ai_notify，
+     * 之后无论代码怎么改成 IMPORTANCE_HIGH 都不会弹横幅 —— 只能 delete + 重新 create。
+     *
+     * 只做一次（dsh_prefs 打标记），避免覆盖用户后来在系统设置里自己做的重要性选择。
+     */
+    private void migrateNotifyChannelIfStale(NotificationManager nm) {
+        try {
+            android.content.SharedPreferences sp = getSharedPreferences("dsh_prefs", MODE_PRIVATE);
+            if (sp.getBoolean("notif_channel_high_migrated", false)) return;
+            NotificationChannel old = nm.getNotificationChannel(NOTIFY_CHANNEL_ID);
+            if (old != null && old.getImportance() < NotificationManager.IMPORTANCE_HIGH) {
+                nm.deleteNotificationChannel(NOTIFY_CHANNEL_ID);
+                Log.i(TAG, "stale notify channel deleted, old importance=" + old.getImportance());
+            }
+            sp.edit().putBoolean("notif_channel_high_migrated", true).apply();
+        } catch (Throwable t) {
+            Log.w(TAG, "notify channel migration failed", t);
+        }
+    }
+
+    // 探测外部公共目录是否可写（不需要"所有文件访问"时也能降级内部）
+    private boolean externalDshrootWritable(File externalRoot) {
+        try {
+            if (!externalRoot.exists() && !externalRoot.mkdirs()) return false;
+            File probe = new File(externalRoot, ".probe");
+            if (!probe.createNewFile()) return false;
+            probe.delete();
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "external dshroot not writable, fallback to internal", t);
+            return false;
+        }
+    }
+
+    private String readAssetText(String asset) throws IOException {
+        InputStream in = getAssets().open(asset);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] b = new byte[4096];
+        int n;
+        while ((n = in.read(b)) > 0) out.write(b, 0, n);
+        in.close();
+        return new String(out.toByteArray(), "UTF-8");
+    }
+
+    private String readFileText(File f) throws IOException {
+        FileInputStream in = new FileInputStream(f);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] b = new byte[4096];
+        int n;
+        while ((n = in.read(b)) > 0) out.write(b, 0, n);
+        in.close();
+        return new String(out.toByteArray(), "UTF-8");
+    }
+
+    private String builtinDshrootRevision() {
+        try {
+            return readAssetText("dshroot_revision.txt").trim();
+        } catch (Throwable t) {
+            Log.w(TAG, "read dshroot revision failed", t);
+            return "";
+        }
+    }
+
+    // v1.5.3：dshroot 版本检查统一以「基目录」为单位——外部模式传 /sdcard/DeepSeekHarness，
+    // 内部模式传 files/payload（内部 dshroot 位于 payload/dshroot，路径拼接一致）。
+    private String dshrootRevisionAt(File dshrootBase) {
+        File revFile = new File(dshrootBase, "dshroot/REVISION");
+        try {
+            return revFile.exists() ? readFileText(revFile).trim() : "";
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private boolean dshrootRevisionChanged(File dshrootBase) {
+        String builtin = builtinDshrootRevision();
+        String external = dshrootRevisionAt(dshrootBase);
+        return !builtin.isEmpty() && !builtin.equals(external);
+    }
+
+    // dshroot 是否需要补齐：REVISION 不匹配（重装）或缺完成标记（解压被打断）。
+    private boolean dshrootNeedsSync(File dshrootBase) {
+        if (dshrootRevisionChanged(dshrootBase)) return true;
+        File complete = new File(dshrootBase, "dshroot/" + DSHROOT_COMPLETE);
+        return !complete.exists();
+    }
+
+    // v1.5.2 慢启动修复：是否必须走全量补齐（扫描 2 万+ 文件）。
+    // 仅两种情况需要：① .complete 缺失（上次解压被打断，缺文件）② 内核版本变化（新内核新增包文件）。
+    // 同内核升级（REVISION 变化但内容几乎不变）→ false → 走快速同步，避免真机外部存储 FUSE 上
+    // 2 万+ 次 stat 造成的 50-60s 慢启动（模拟器宿主机磁盘快，测不出）。
+    // v1.13.12：布局标记变化也不再触发全量 —— 老版本升上来（.complete 里没有/是别的布局标记）
+    // 会被判"布局变了"而整棵重写 2.5 万文件；改由 startEngine 走「dshroot-add」增量补齐
+    //（只写缺失文件 + 白名单覆盖 + 清理多余顶层插件包），更新安装不再出现"又解压一遍"。
+    private boolean dshrootNeedsFullSync(File dshrootBase) {
+        File complete = new File(dshrootBase, "dshroot/" + DSHROOT_COMPLETE);
+        if (!complete.exists()) return true;
+        if (dshKernelChanged(dshrootBase)) return true;
+        // v1.19：布局变更同样视为结构变更 → 全量清空重建。
+        // 旧逻辑把布局变更走 dshroot-add 增量，跨内核升级会留下旧内核残留文件（新旧混装 → 引擎崩溃）。
+        return dshrootLayoutChanged(dshrootBase);
+    }
+
+    // 内核树布局标记（build.sh 写入 assets/dshroot_layout.txt）：布局变更时必须全量重推，
+    // 否则 fast 同步只覆盖白名单文件，整棵树留着旧结构（补丁包/依赖树换过就再也更新不到）。
+    private String builtinDshrootLayout() {
+        try {
+            return readAssetText("dshroot_layout.txt").trim();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private boolean dshrootLayoutChanged(File dshrootBase) {
+        String builtin = builtinDshrootLayout();
+        if (builtin.isEmpty()) return false; // 旧 APK 无标记 → 不额外触发
+        File complete = new File(dshrootBase, "dshroot/" + DSHROOT_COMPLETE);
+        try {
+            String stored = readFileText(complete).trim();
+            int bar = stored.lastIndexOf('|');
+            String storedLayout = bar < 0 ? "" : stored.substring(bar + 1);
+            return !builtin.equals(storedLayout);
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    // 对比 dshroot 的 DSH 内核版本与 APK 内置版本（build.sh 写入 dshroot_kernel_version.txt）。
+    // 版本不同 → 内核升级（如 rc.6 → rc.2）→ 新增包文件必须补齐，否则引擎起不来。
+    private boolean dshKernelChanged(File dshrootBase) {
+        try {
+            String builtin = readAssetText("dshroot_kernel_version.txt").trim();
+            if (builtin.isEmpty()) return true; // 无版本标记（旧 APK）→ 保守走全量
+            File pkg = new File(dshrootBase, "dshroot/lib/node_modules/@deepseek-ai/dsh/package.json");
+            if (!pkg.exists()) return true;
+            // ⚠ 必须真解析 JSON，不能用 contains("\"version\":\""+builtin+"\"")：
+            // dsh/package.json 是带空格的 pretty-print（  "version": "0.1.5-rc.1",  ），
+            // 严格拼接的字符串永远匹配不上 → 每次都被判"内核版本变了" →
+            // dshrootNeedsFullSync 恒为真 → dshroot-add / dshroot-fast 永远不触发，
+            // 每次升级都全量重写 2.5 万文件（"更新后又要解压一遍"的真根因）。
+            String v = new org.json.JSONObject(readFileText(pkg)).optString("version", "");
+            return !builtin.equals(v);
+        } catch (Throwable t) {
+            return true; // 读不到 → 保守全量
+        }
+    }
+
+    /** 安装包身份戳：versionCode@lastUpdateTime。覆盖安装/更新后 lastUpdateTime 必变。 */
+    private String payloadStamp() {
+        try {
+            android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return "v" + pi.versionCode + "@" + pi.lastUpdateTime;
+        } catch (Throwable t) {
+            Log.w(TAG, "payloadStamp 读取失败", t);
+            return "unknown";
+        }
+    }
+
+    private static String readStampFile(File f) {
+        try {
+            if (f == null || !f.isFile() || f.length() == 0) return "";
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            try {
+                byte[] b = new byte[128];
+                int n = in.read(b);
+                return n <= 0 ? "" : new String(b, 0, n, "UTF-8").trim();
+            } finally {
+                try { in.close(); } catch (Throwable ignored) {}
+            }
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private static void writeStampFile(File f, String stamp) {
+        try {
+            java.io.FileOutputStream fos = new java.io.FileOutputStream(f);
+            try { fos.write((stamp == null ? "" : stamp).getBytes("UTF-8")); }
+            finally { try { fos.close(); } catch (Throwable ignored) {} }
+        } catch (Throwable t) {
+            Log.w("DSH", "write stamp failed: " + t);
+        }
+    }
+
+    private void writeDshrootComplete(File dshrootBase) {
+        File complete = new File(dshrootBase, "dshroot/" + DSHROOT_COMPLETE);
+        try {
+            FileOutputStream fos = new FileOutputStream(complete);
+            // 记录 <构建时间戳>|<布局标记>：布局标记用于判断是否需要全量重推（见 dshrootLayoutChanged）。
+            String layout = builtinDshrootLayout();
+            String marker = layout.isEmpty() ? builtinDshrootRevision() : builtinDshrootRevision() + "|" + layout;
+            fos.write(marker.getBytes("UTF-8"));
+            fos.close();
+        } catch (Throwable t) {
+            Log.w(TAG, "write dshroot complete marker failed", t);
+        }
+    }
+
+    private void extractPayload(File destInternal, File externalRoot, String mode) throws IOException {
+        // mode: "internal" = 只解压内部条目（runtime/bin/dshhome/rish，不含 dshroot）；
+        //       "dshroot"  = 只解压 dshroot 条目（外部优先，回退内部）；
+        //       "dshroot-fast" = 快速同步：只更新 REVISION + 官方白名单文件，不 stat 已有文件
+        //                        （同内核升级用，避免真机 FUSE 2 万+ 次 stat 造成慢启动）；
+        //       "dshroot-add"  = 增量补齐（v1.13.12）：缺失文件才写入 + REVISION/白名单总是覆盖，
+        //                        结束后清理新树里已不存在的顶层插件包。升级安装不再整棵重写。
+        final boolean fast = "dshroot-fast".equals(mode);
+        final boolean additive = "dshroot-add".equals(mode);
+        final boolean internalPatch = "internal-patch".equals(mode);
+        final boolean internalOnly = "internal".equals(mode) || internalPatch;
+        final boolean dshrootOnly = "dshroot".equals(mode) || fast || additive;
+        if (!destInternal.exists() && !destInternal.mkdirs()) throw new IOException("mkdir failed: " + destInternal);
+        // 进度文案按实际动作说：首次解压才叫"解压"，升级同步叫"同步"，别让用户以为又在重装
+        final String progressLabel = extractProgressLabel(mode);
+        lastExtractLabel = progressLabel;
+        final int total = fast ? 0 : countPayloadEntries(mode); // 快速同步无进度条（更新极少文件）
+        if (total > 0) setProgress(0, progressLabel + " 0/" + total + " 个文件…");
+        // 增量补齐时记录新树包含的顶层插件包（dshroot/lib/node_modules/@deepseek-ai/<pkg>），
+        // 结束后把已存在的同名层级里多余的包删掉 —— 这是旧实现"布局变了就整棵重推"要防的
+        // 「旧嵌套副本被 Node 优先解析」，现在只清插件层这一小块，不再动整棵树。
+        java.util.HashSet<String> addPkgs = additive ? new java.util.HashSet<String>() : null;
+        byte[] buf = new byte[128 * 1024];
+        InputStream in = getAssets().open("payload.zip");
+        ZipInputStream zis = new ZipInputStream(in);
+        ZipEntry e;
+        int processed = 0;
+        int written = 0;
+        int failed = 0;
+        String firstFail = null;
+        while ((e = zis.getNextEntry()) != null) {
+            String name = e.getName();
+            if (e.isDirectory() || name.startsWith("__MACOSX/") || name.startsWith("META-INF/")) { zis.closeEntry(); continue; }
+            boolean isDshroot = name.startsWith("dshroot/");
+            if (dshrootOnly && !isDshroot) { zis.closeEntry(); continue; }
+            if (internalOnly && isDshroot) { zis.closeEntry(); continue; }
+            processed++;
+
+            File target;
+            boolean skipIfExists = false;
+            if (additive && isDshroot) {
+                // 记录新树里的插件包名。⚠ 真实布局是**嵌套**的：
+                //     dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/<pkg>/...
+                // 顶层 dshroot/lib/node_modules/@deepseek-ai/ 下只有 dsh 本身 ——
+                // 只认顶层前缀会得到 rest="dsh/node_modules/..."，取出来的"包名"是 dsh，
+                // 于是 addPkgs 恒为 {"dsh"}，下面的清理变成空转。
+                final String NESTED = "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/";
+                final String FLAT = "dshroot/lib/node_modules/@deepseek-ai/";
+                String rest = null;
+                if (name.startsWith(NESTED)) rest = name.substring(NESTED.length());
+                else if (name.startsWith(FLAT)) rest = name.substring(FLAT.length());
+                if (rest != null) {
+                    int slash = rest.indexOf('/');
+                    if (slash > 0) addPkgs.add(rest.substring(0, slash));
+                }
+            }
+            if (isDshroot && externalRoot != null) {
+                target = new File(externalRoot, name);
+                // 外部 dshroot：REVISION 与官方白名单路径总是覆盖；其他已有文件跳过（保留 AI 运行时修改）。
+                if (fast) {
+                    // 快速同步（内外通用）：只处理 REVISION + 白名单文件，其余条目直接跳过（不做 exists() stat）
+                    if (!name.equals("dshroot/REVISION") && !isForceOverwrite(name)) { zis.closeEntry(); continue; }
+                    skipIfExists = false;
+                } else if (additive) {
+                    // 增量补齐：已有文件一律保留（保留 AI 运行时修改），缺失文件才落地
+                    skipIfExists = !name.equals("dshroot/REVISION") && !isForceOverwrite(name) && target.exists();
+                } else {
+                    skipIfExists = !name.equals("dshroot/REVISION") && !isForceOverwrite(name) && target.exists();
+                }
+            } else {
+                target = new File(destInternal, name);
+                if (fast) {
+                    // 快速同步：内部 dshroot 也只更新 REVISION + 白名单文件（同内核升级，避免全量重写）
+                    if (!name.equals("dshroot/REVISION") && !isForceOverwrite(name)) { zis.closeEntry(); continue; }
+                    skipIfExists = false;
+                } else if (additive) {
+                    // 增量补齐（内部树同理）：只写缺失文件，REVISION/白名单总是覆盖
+                    skipIfExists = !name.equals("dshroot/REVISION") && !isForceOverwrite(name) && target.exists();
+                } else if (internalPatch) {
+                    // 覆盖升级补齐：内部运行时只写缺失文件（新增文件如 runtime/bin/rg），白名单路径总是覆盖
+                    skipIfExists = !isForceOverwrite(name) && target.exists();
+                }
+            }
+
+            // v1.13.11：用户文件（settings.yaml / .credentials.yaml）任何模式都只在缺失时写入。
+            // 「重新解压」走的是 mode="internal"（无 skipIfExists 保护）→ 会把模型配置覆盖回内置模板，
+            // 这就是「每次重新解压丢配置」的直接原因。
+            if (!skipIfExists && isDshhomeUserFile(name) && target.exists()) skipIfExists = true;
+
+            if (skipIfExists) {
+                zis.closeEntry();
+                updateProgress(processed, total, written);
+                continue;
+            }
+
+            // v1.15.8：profile 清单是插件注册表，覆盖会抹掉已装插件（见 writeMergedProfileManifest）
+            if (PROFILE_MANIFEST_PATH.equals(name)) {
+                prepareTarget(target);
+                writeMergedProfileManifest(target, new String(readZipEntry(zis), "UTF-8"));
+                zis.closeEntry();
+                written++;
+                updateProgress(processed, total, written);
+                continue;
+            }
+            File parent = target.getParentFile();
+            if (parent != null && !parent.exists() && !parent.mkdirs()) throw new IOException("mkdir failed: " + parent);
+            prepareTarget(target);
+            // 2026-11-08：写临时文件再 rename。直接 FileOutputStream(target) 覆盖**正在被执行**
+            // 的二进制会拿到 ETXTBSY（Text file busy），典型是 payload/python/bin/python3.14：
+            // 旧引擎进程还握着它，整轮解压挂在这一条上，引擎直接起不来。rename 覆盖运行中的
+            // 文件是合法操作——旧进程继续持有旧 inode，新文件按新名字落地；临时文件放同一
+            // 目录保证同一文件系统，rename 不会退化成跨设备拷贝。
+            File tmp = new File(parent, target.getName() + ".tmp-" + System.nanoTime());
+            try {
+                // 可执行位必须自己带过去：rename 保留的是 tmp 的权限（默认 0644），
+                // payload 里的 python/node/bash 全靠这一位才能跑。
+                boolean wasExecutable = target.exists() && target.canExecute();
+                FileOutputStream fos = new FileOutputStream(tmp);
+                int n;
+                while ((n = zis.read(buf)) > 0) fos.write(buf, 0, n);
+                fos.close();
+                if (wasExecutable) tmp.setExecutable(true, true);
+                if (!tmp.renameTo(target)) throw new IOException("rename failed: " + target);
+                // v1.13.5：dex 必须**不可写**——Android 14+ 的 ART 拒绝加载可写 dex
+                // （logcat: SecurityException: Writable dex file '…' is not allowed → 进程直接
+                //  SIGABRT/exit 134，终端上只看到一个 "Aborted"）。payload.zip 内所有条目都不带
+                // unix 权限（external_attr=0），文件权限完全由本函数决定，所以这里对 *.dex 收成 0444。
+                if (name.endsWith(".dex")) secureDexPermissions(target);
+                written++;
+            } catch (IOException ioe) {
+                if (tmp.exists()) tmp.delete();
+                // 单个条目失败不中断整体（否则一次 EACCES 就能让整轮解压白干），最后汇总报错
+                failed++;
+                if (firstFail == null) firstFail = name + "（" + ioe.getMessage() + "）";
+                Log.w(TAG, "extract entry failed: " + name, ioe);
+            }
+            zis.closeEntry();
+            updateProgress(processed, total, written);
+        }
+        zis.close();
+        // 增量补齐收尾：清理"新树里已不存在"的顶层插件包，防止旧副本被 Node 优先解析。
+        // 只清 @deepseek-ai 插件层（包管理范畴，AI 不会改），不动整棵树。
+        if (additive && addPkgs != null && !addPkgs.isEmpty()) {
+            // ⚠ 必须同时覆盖**嵌套层**：插件包实际都在
+            //   dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/
+            // 只扫顶层（里面只有 dsh 自己）等于什么都不清。
+            final String NESTED_DIR = "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai";
+            File[] scope = {
+                    new File(destInternal, NESTED_DIR),
+                    new File(destInternal, "dshroot/lib/node_modules/@deepseek-ai") };
+            if (externalRoot != null) scope = new File[]{
+                    new File(destInternal, NESTED_DIR),
+                    new File(destInternal, "dshroot/lib/node_modules/@deepseek-ai"),
+                    new File(externalRoot, NESTED_DIR),
+                    new File(externalRoot, "dshroot/lib/node_modules/@deepseek-ai") };
+            for (File dir : scope) {
+                File[] kids = dir.listFiles();
+                if (kids == null) continue;
+                for (File kid : kids) {
+                    if (addPkgs.contains(kid.getName())) continue;
+                    Log.i(TAG, "prune stale kernel pkg: " + kid.getName());
+                    deleteRecursive(kid);
+                }
+            }
+        }
+        Log.i(TAG, "extracted " + written + " entries (external=" + (externalRoot != null) + ", mode=" + mode + ")");
+        if (failed > 0) throw new IOException("有 " + failed + " 个文件写不进去，首个：" + firstFail);
+        // 写成功不等于树完整：payload 本身缺文件时这里一条都不会失败，残缺的树照样起引擎，
+        // 然后在下游以 ENOENT（/bin/bash）、"xxx: never started"（模块不在，Loader 不建 fiber）
+        // 这类看不懂的形式乱报。只验本 mode 必须落地的几个关键路径，缺了就当场说清楚。
+        final File mustRoot;
+        final String[] mustHave;
+        if (internalOnly) {
+            mustRoot = destInternal;
+            mustHave = new String[]{"bin/bash"};
+        } else if (dshrootOnly && !fast) {
+            mustRoot = (externalRoot != null) ? externalRoot : destInternal;
+            mustHave = new String[]{
+                    "dshroot/REVISION",
+                    "dshroot/lib/node_modules/@deepseek-ai/dsh/package.json",
+                    "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-subagent-control/package.json"};
+        } else {
+            mustRoot = null;
+            mustHave = null;
+        }
+        if (mustRoot != null) {
+            for (String rel : mustHave) {
+                if (!new File(mustRoot, rel).exists()) {
+                    throw new IOException("payload 不完整，缺少 " + rel
+                            + "（空间不足或安装包损坏，请重装；已解压的文件会保留）");
+                }
+            }
+        }
+    }
+
+    /**
+     * 写入前把目标清干净。覆盖安装时旧版本（v1.10 那棵老树）可能留下**只读文件 / 扭结软链 /
+     * 同名目录**，直接 FileOutputStream 会报 EACCES（用户实测：payload/rish/rish_shizuku.dex）；
+     * 父目录不可写也要先提权，否则同样是 EACCES。
+     */
+    private void prepareTarget(File target) {
+        try {
+            File parent = target.getParentFile();
+            if (parent != null && parent.exists() && !parent.canWrite()) parent.setWritable(true, true);
+            try {
+                android.system.StructStat stat = Os.lstat(target.getAbsolutePath());
+                if ((stat.st_mode & android.system.OsConstants.S_IFMT) == android.system.OsConstants.S_IFLNK) {
+                    if (!target.delete()) throw new IOException("Cannot unlink payload target");
+                    return;
+                }
+            } catch (android.system.ErrnoException absent) {
+                if (absent.errno != android.system.OsConstants.ENOENT) throw absent;
+            }
+            if (target.isDirectory()) { deleteRecursive(target); return; }
+            if (target.exists()) {
+                if (target.canWrite()) return;
+                // 注意：这里用 owner-only（true）——setWritable(true, false) 会把 group/other 的写位也加上，
+                // 0444 的 dex 会因此变成 0666（真机实测的 “Writable dex” 就是这么来的）。
+                target.setWritable(true, true);
+                if (target.canWrite()) return;
+                if (!target.delete()) {
+                    // 删不掉就改名避让（改名只需父目录写权限），旧文件内容不再被引用
+                    File bak = new File(target.getParentFile(),
+                            target.getName() + ".old-" + System.currentTimeMillis());
+                    if (target.renameTo(bak)) deleteRecursive(bak);
+                }
+            } else {
+                // File.exists() 对悬空符号链接返回 false，但创建仍会失败 → 用 lstat 判一下再删
+                try { if (Os.lstat(target.getAbsolutePath()) != null) target.delete(); } catch (Throwable ignored) {}
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "prepareTarget failed: " + target, t);
+        }
+    }
+
+    // 判断某条目是否属于官方强制覆盖白名单（外部 dshroot 也随 APK 更新）。
+    // 2026-10-17：overlay 改过的内核文件清单（构建时写进 assets/dshroot_forced.txt）。
+    // 起因：同内核重出包时 ① REVISION 与设备上一致 → dshroot 同步不跑；② 就算跑了，
+    // fast/add 也只写 REVISION + 免检前缀 → overlay 改过的旧文件永远不更新。
+    // 实测代价：v1.41 新加的 dsh-host-webserver 补丁没落到设备，用户一开局域网引擎就死。
+    private java.util.HashSet<String> forcedAssetPaths;
+
+    private java.util.HashSet<String> forcedAssetPaths() {
+        if (forcedAssetPaths != null) return forcedAssetPaths;
+        java.util.HashSet<String> set = new java.util.HashSet<String>();
+        try {
+            for (String line : readAssetText("dshroot_forced.txt").split("\n")) {
+                String t = line.trim();
+                if (!t.isEmpty() && !t.startsWith("#")) set.add(t);
+            }
+            Log.i(TAG, "overlay 强制覆盖清单：" + set.size() + " 条");
+        } catch (Throwable t) {
+            Log.i(TAG, "包内无 dshroot_forced.txt（旧包），按旧策略");
+        }
+        forcedAssetPaths = set;
+        return set;
+    }
+
+    private boolean isForceOverwrite(String name) {
+        if (forcedAssetPaths().contains(name)) return true;
+        for (String p : FORCE_OVERWRITE_PREFIXES) {
+            if (name.startsWith(p)) return true;
+        }
+        return false;
+    }
+
+    // dshhome 里随 APK 更新的官方配置文件（凭证 .credentials.yaml、会话数据 storages/ 等不在内）。
+    // ⚠ settings.yaml **不在此列**：它存的是用户自己填的模型/供应商配置
+    //   （llm-pi-ai.providers.*、agent-default-model 等），属用户数据。
+    //   曾被列在这里 → 每次「重新解压」/覆盖安装都被 APK 里的内置模板覆盖掉，
+    //   表现为「模型配置莫名为空、要重填」（用户反馈）。
+    private static final String[] DSHHOME_CONFIG_PATHS = {
+        "dshhome/cordis.patch.yml",
+        // ⚠ 0.1.7 起 profiles/<name>/cordis.patch.yml 不再是空壳模板，而是**用户配置文档**：
+        //   内核的 dsh-config-editor 把它的 documentPath 指向 profileContext.patchPath，
+        //   设置页（模型/供应商等）的保存全部写在这个文件里。
+        //   它已改列入 DSHHOME_USER_PATHS，此处不再强制覆盖（否则 issue #20 会以新形式复发）。
+        "dshhome/profiles/web/cordis.yml",
+        "dshhome/profiles/web/package.json",
+        "dshhome/profiles/web/pnpm-workspace.yaml"
+    };
+
+    // dshhome 里属于**用户**的文件：只在「不存在」时写入，任何解压模式都不得覆盖。
+    // 双保险：extractPayload（写盘）与 refreshInternalConfig（配置刷新）两处都拦。
+    private static final String[] DSHHOME_USER_PATHS = {
+        "dshhome/settings.yaml",
+        "dshhome/.credentials.yaml",
+        // 0.1.7：用户配置从此文件读取/写入（见上）。
+        "dshhome/profiles/web/cordis.patch.yml"
+    };
+
+    private boolean isDshhomeUserFile(String name) {
+        for (String p : DSHHOME_USER_PATHS) {
+            if (p.equals(name)) return true;
+        }
+        return false;
+    }
+
+    // 重装后把 dshhome 的官方配置文件从 payload.zip 覆盖到内部（凭证/会话保留）。
+    private void refreshInternalConfig(File payload) throws IOException {
+        byte[] buf = new byte[128 * 1024];
+        InputStream in = getAssets().open("payload.zip");
+        ZipInputStream zis = new ZipInputStream(in);
+        ZipEntry e;
+        int updated = 0;
+        while ((e = zis.getNextEntry()) != null) {
+            String name = e.getName();
+            boolean isConfig = false;
+            for (String p : DSHHOME_CONFIG_PATHS) {
+                if (name.equals(p)) { isConfig = true; break; }
+            }
+            if (!isConfig) { zis.closeEntry(); continue; }
+            // 用户文件永不覆盖（settings.yaml 等）：只补官方配置文件
+            if (isDshhomeUserFile(name)) { zis.closeEntry(); continue; }
+            File target = new File(payload, name);
+            File parent = target.getParentFile();
+            if (parent != null && !parent.exists() && !parent.mkdirs()) throw new IOException("mkdir failed: " + parent);
+            // v1.15.8：同上——这里是第二条覆盖路径（内核 revision 变化 / 补丁自检失败时触发）
+            if (PROFILE_MANIFEST_PATH.equals(name)) {
+                writeMergedProfileManifest(target, new String(readZipEntry(zis), "UTF-8"));
+                zis.closeEntry();
+                updated++;
+                continue;
+            }
+            FileOutputStream fos = new FileOutputStream(target);
+            int n;
+            while ((n = zis.read(buf)) > 0) fos.write(buf, 0, n);
+            fos.close();
+            zis.closeEntry();
+            updated++;
+        }
+        zis.close();
+        Log.i(TAG, "refreshed " + updated + " dshhome config files");
+    }
+
+    // 预扫 payload.zip 统计要处理的条目数（只读 entry 头，不写盘），供进度条使用。
+    private int countPayloadEntries(String mode) throws IOException {
+        final boolean internalOnly = "internal".equals(mode) || "internal-patch".equals(mode);
+        final boolean dshrootOnly = "dshroot".equals(mode) || "dshroot-add".equals(mode);
+        InputStream in = getAssets().open("payload.zip");
+        ZipInputStream zis = new ZipInputStream(in);
+        ZipEntry e;
+        int n = 0;
+        while ((e = zis.getNextEntry()) != null) {
+            String name = e.getName();
+            if (e.isDirectory() || name.startsWith("__MACOSX/") || name.startsWith("META-INF/")) { zis.closeEntry(); continue; }
+            boolean isDshroot = name.startsWith("dshroot/");
+            if (dshrootOnly && !isDshroot) { zis.closeEntry(); continue; }
+            if (internalOnly && isDshroot) { zis.closeEntry(); continue; }
+            n++;
+            zis.closeEntry();
+        }
+        zis.close();
+        return n;
+    }
+
+    /** 当前解压动作的进度文案前缀（updateProgress 用；extractPayload 每次进入时刷新）。 */
+    private volatile String lastExtractLabel = "首次启动 · 正在解压运行时";
+
+    private String extractProgressLabel(String mode) {
+        if ("internal-patch".equals(mode)) return "正在同步运行时文件";
+        if ("dshroot-add".equals(mode)) return "正在同步内核文件（增量）";
+        return "首次启动 · 正在解压运行时";
+    }
+
+    private void updateProgress(int processed, int total, int written) {
+        if (total <= 0) return;
+        if (processed != total && processed % 200 != 0) return;
+        int pct = (int)(processed * 100L / total);
+        setProgress(pct, lastExtractLabel + " " + processed + "/" + total + " 个文件…");
+    }
+
+    private void applyLinks(File payload) throws IOException {
+        File lib = new File(payload, "runtime/lib");
+        File linksFile = new File(lib, "LINKS.txt");
+        if (!linksFile.exists()) return;
+        BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(linksFile), "UTF-8"));
+        String line;
+        int n = 0;
+        while ((line = r.readLine()) != null) {
+            line = line.trim();
+            if (line.isEmpty() || line.startsWith("#")) continue;
+            String[] parts = line.split("\\t+");
+            if (parts.length < 2) continue;
+            String linkName = parts[0].trim();
+            String target = parts[1].trim();
+            File link = new File(lib, linkName);
+            File src = new File(lib, target);
+            if (!link.exists() && src.exists()) {
+                try {
+                    Os.link(src.getAbsolutePath(), link.getAbsolutePath());
+                    n++;
+                } catch (ErrnoException e1) {
+                    try {
+                        Os.symlink(target, link.getAbsolutePath());
+                        n++;
+                    } catch (ErrnoException e2) {
+                        try { copyFile(src, link); n++; } catch (IOException e3) {
+                            Log.w(TAG, "link failed " + linkName, e3);
+                        }
+                    }
+                }
+            }
+        }
+        r.close();
+    }
+
+    private void copyFile(File src, File dst) throws IOException {
+        FileInputStream in = new FileInputStream(src);
+        FileOutputStream out = new FileOutputStream(dst);
+        byte[] b = new byte[128 * 1024];
+        int n;
+        while ((n = in.read(b)) > 0) out.write(b, 0, n);
+        out.close();
+        in.close();
+    }
+
+    private void setExecutables(File payload) {
+        String[] execs = {"runtime/bin/node", "bin/bash", "runtime/bin/rg", "runtime/bin/curl",
+                // v1.15.3 内置 pnpm 的 wrapper：插件管理「添加插件」靠它解析 pnpm；
+                // 解压不保留执行位，必须每次启动 chmod，否则子进程报「找不到命令」(127)
+                "bin/pnpm",
+                // v1.15.5 内置 git：插件管理「添加 GitHub 地址」要先 git ls-remote 探活；
+                // 解压同样不保留执行位，不加就没有 x 位 → 子进程报「找不到命令」
+                "bin/git",
+                // v1.15.8 内置 git 的远程助手：与 bin/git 同因（zip 不保留执行位）。
+                // 缺了它 → git 能找到 exec-path 却执行不了助手，报
+                // "git: 'remote-https' is not a git command"（真机 A/B 实测复现）。
+                "git/libexec/git-core/git-remote-https",
+                "git/libexec/git-core/git-remote-http",
+                // v1.16.0 内置 python / npm：与 pnpm、git 同因（解压不保留执行位，不加就 127）。
+                // python 的两个 wrapper 是 sh 脚本，真正要可执行的是 python/bin/python3.14（ELF）。
+                "bin/python3",
+                "bin/python",
+                "python/bin/python3.14",
+                // v1.16.0 内置 npm / npx：node 本体早在 payload 里（引擎就跑在它上面），
+                // 缺的只是这两个 JS 入口 —— 不加 x 位则 AI 的 `npm install` 报 127。
+                "bin/npm",
+                "bin/npx",
+                // v1.16.1 内置 pip：python 自带的 ensurepip 在 Termux deb 里没带 wheel，
+                // 所以 pip 是**直接解进 site-packages** 的（同因：解压不保留执行位）。
+                "bin/pip",
+                "bin/pip3"};
+        for (String p : execs) {
+            File f = new File(payload, p);
+            if (f.exists()) f.setExecutable(true, false);
+        }
+    }
+
+    /**
+     * 把 payload 里已知的 dex 统一收成 0444（读取不报错，但任何 uid 都写不了）。
+     * 用于兜底：覆盖升级时旧树里的文件不会被重写，只能在解压后扫一遍。
+     */
+    private void secureDexFiles(File payload) {
+        String[] dexs = {"rish/rish_shizuku.dex", "vscreen/vscreen_shizuku.dex"};
+        for (String p : dexs) {
+            File f = new File(payload, p);
+            if (f.exists()) secureDexPermissions(f);
+        }
+    }
+
+    /**
+     * dex 文件强制不可写（0444）。
+     *
+     * 为什么必须这么做：Android 14+ 的 ART **拒绝加载可写 dex**，报
+     * `java.lang.SecurityException: Writable dex file '<path>' is not allowed`，
+     * 进程直接 SIGABRT（exit=134）——而终端上只看得到一句 “Aborted”，
+     * 极易被误判成 “Shizuku 没运行 / 未授权”，把排查方向带偏。
+     * payload.zip 内所有条目的 unix 权限都是 0（external_attr=0），权限完全由解压时决定，
+     * 而 Java 写文件在本机 umask 下默认就是 rw-rw-rw-（0666）→ 所以必须显式收权。
+     */
+    private void secureDexPermissions(File f) {
+        try { android.system.Os.chmod(f.getAbsolutePath(), 0444); } catch (Throwable ignored) {}
+        try { f.setWritable(false, false); } catch (Throwable ignored) {}   // chmod 失败（如 FUSE）时的兜底
+    }
+
+    /**
+     * v1.15.5：把 Android 系统 CA（/system/etc/security/cacerts/*.0，PEM）拼成一个 bundle 文件。
+     *
+     * 为什么必须自己做：内置 curl/git 依赖的 libcrypto 把 OPENSSLDIR 编译死指向 Termux 的
+     * /data/data/com.termux/files/usr/etc/tls/cert.pem，而本机通常没装 Termux → 一个 CA 都拿不到，
+     * 所有 HTTPS 请求失败（实测 curl 报 (77) error adding trust anchors from file，git 报同一句）。
+     *
+     * 为什么不直接指向系统目录：该目录本身是 c_rehash 哈希目录（OpenSSL 认这种格式），但对 CAfile
+     * OpenSSL 是「文件不存在即硬报错」，不会回退到目录 —— 实测只设 SSL_CERT_DIR 仍然失败。合成为一个
+     * 真实存在的文件最稳，顺带把用户自己装的证书也带上。
+     *
+     * 缓存：证书数 + 最新 mtime 未变时复用，避免每次启动重写 ~750KB。
+     */
+    /**
+     * v1.15.7：生成 git 的配置文件（ssh→https 改写 + git 用的 CA + 沿用用户自己的全局配置）。
+     *
+     * 为什么用文件而不是环境变量：内核给子进程的是「洗过的」父环境
+     * （dsh-subprocess 的 scrubbedParentEnv，SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i），
+     * 而 git 用环境变量传配置的键名是 GIT_CONFIG_KEY_<n> —— 含 "KEY"，会被洗掉，
+     * 于是 GIT_CONFIG_COUNT 还在、KEY 没了 → "error: missing config key GIT_CONFIG_KEY_0"。
+     * 配置文件完全不受这套清洗影响。
+     *
+     * GIT_CONFIG_GLOBAL 指向本文件（它会替换默认的 ~/.gitconfig，所以把用户那份 include 进来）。
+     */
+    private File ensureGitConfig(File payload, File caBundle) {
+        File out = new File(new File(payload, "runtime/etc"), "gitconfig");
+        try {
+            File parent = out.getParentFile();
+            if (parent != null) parent.mkdirs();
+            StringBuilder sb = new StringBuilder();
+            sb.append("# DSH 手机版自动生成。每次启动引擎都会重写，改这里会被覆盖。\n");
+            File userCfg = new File(getFilesDir(), ".gitconfig");
+            if (userCfg.isFile() && !userCfg.getAbsolutePath().equals(out.getAbsolutePath())) {
+                sb.append("[include]\n\tpath = ").append(userCfg.getAbsolutePath()).append("\n");
+            }
+            sb.append("[url \"https://github.com/\"]\n");
+            sb.append("\tinsteadOf = git+ssh://git@github.com/\n");
+            sb.append("\tinsteadOf = ssh://git@github.com/\n");
+            sb.append("\tinsteadOf = git@github.com:\n");
+            sb.append("[url \"https://gitee.com/\"]\n");
+            sb.append("\tinsteadOf = git+ssh://git@gitee.com/\n");
+            sb.append("\tinsteadOf = ssh://git@gitee.com/\n");
+            sb.append("\tinsteadOf = git@gitee.com:\n");
+            if (caBundle != null) {
+                sb.append("[http]\n\tsslCAInfo = ").append(caBundle.getAbsolutePath()).append("\n");
+            }
+            java.io.FileOutputStream os = new java.io.FileOutputStream(out);
+            try {
+                os.write(sb.toString().getBytes("UTF-8"));
+            } finally {
+                os.close();
+            }
+            Log.i(TAG, "git config -> " + out.getAbsolutePath());
+            return out;
+        } catch (Throwable t) {
+            Log.w(TAG, "git config generation failed: " + t);
+            return null;
+        }
+    }
+
+    // v1.15.8：profile 的插件注册表。dsh-plugin-manager 装插件时把依赖与 bundle 名写在这里
+    // （saveManifest → <profile>/package.json 的 dependencies + dsh.profile.bundles），
+    // 所以它**不是**可以整文件覆盖的官方配置，必须合并（见 writeMergedProfileManifest）。
+    private static final String PROFILE_MANIFEST_PATH = "dshhome/profiles/web/package.json";
+
+    /** 把一个 zip 条目整个读出来（用于需要「先读后合并」的条目）。 */
+    private static byte[] readZipEntry(java.util.zip.ZipInputStream zis) throws IOException {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        byte[] b = new byte[8192];
+        int n;
+        while ((n = zis.read(b)) > 0) bos.write(b, 0, n);
+        return bos.toByteArray();
+    }
+
+    /**
+     * 写 profile 清单：以 payload 那份为基准，**合并**已有文件里的用户/插件内容。
+     *
+     * 为什么不能直接覆盖：这个文件是插件注册表 —— dsh-plugin-manager 把已装插件写进它的
+     * dependencies 与 dsh.profile.bundles。整文件覆盖会让「装完插件→重启引擎→插件消失」
+     * （真机实测报障）。合并后：内置 bundle 仍随 APK 更新，用户装的插件保留。
+     * 解析失败时退回「直接写 payload 默认值」，不因为一个坏文件卡住整轮解压。
+     */
+    private void writeMergedProfileManifest(File target, String shipJson) throws IOException {
+        String out = shipJson;
+        try {
+            if (target.isFile()) {
+                String mineJson = readFileText(target);
+                if (mineJson != null && mineJson.trim().length() > 0) {
+                    org.json.JSONObject ship = new org.json.JSONObject(shipJson);
+                    org.json.JSONObject mine = new org.json.JSONObject(mineJson);
+
+                    // dependencies：ship 同名优先，用户的额外项保留
+                    org.json.JSONObject shipDeps = ship.optJSONObject("dependencies");
+                    org.json.JSONObject mineDeps = mine.optJSONObject("dependencies");
+                    if (mineDeps != null) {
+                        if (shipDeps == null) {
+                            shipDeps = new org.json.JSONObject();
+                            ship.put("dependencies", shipDeps);
+                        }
+                        java.util.Iterator<String> it = mineDeps.keys();
+                        while (it.hasNext()) {
+                            String k = it.next();
+                            if (!shipDeps.has(k)) shipDeps.put(k, mineDeps.get(k));
+                        }
+                    }
+
+                    // dsh.profile.bundles：并集（ship 的在前，顺序稳定）
+                    org.json.JSONObject shipDsh = ship.optJSONObject("dsh");
+                    org.json.JSONObject mineDsh = mine.optJSONObject("dsh");
+                    org.json.JSONObject shipProf = shipDsh == null ? null : shipDsh.optJSONObject("profile");
+                    org.json.JSONObject mineProf = mineDsh == null ? null : mineDsh.optJSONObject("profile");
+                    org.json.JSONArray shipB = shipProf == null ? null : shipProf.optJSONArray("bundles");
+                    org.json.JSONArray mineB = mineProf == null ? null : mineProf.optJSONArray("bundles");
+                    java.util.List<String> names = new java.util.ArrayList<>();
+                    if (shipB != null) for (int i = 0; i < shipB.length(); i++) {
+                        String v = shipB.optString(i, "");
+                        if (v.length() > 0) names.add(v);
+                    }
+                    if (mineB != null) for (int i = 0; i < mineB.length(); i++) {
+                        String v = mineB.optString(i, "");
+                        if (v.length() > 0 && !names.contains(v)) names.add(v);
+                    }
+                    if (!names.isEmpty()) {
+                        if (shipDsh == null) {
+                            shipDsh = new org.json.JSONObject();
+                            ship.put("dsh", shipDsh);
+                        }
+                        if (shipProf == null) {
+                            shipProf = new org.json.JSONObject();
+                            shipDsh.put("profile", shipProf);
+                        }
+                        org.json.JSONArray arr = new org.json.JSONArray();
+                        for (String v : names) arr.put(v);
+                        shipProf.put("bundles", arr);
+                    }
+                    out = ship.toString(2) + "\n";
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "profile manifest merge failed, writing payload default", t);
+            out = shipJson;
+        }
+        File parent = target.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) throw new IOException("mkdir failed: " + parent);
+        FileOutputStream fos = new FileOutputStream(target);
+        try {
+            fos.write(out.getBytes("UTF-8"));
+        } finally {
+            fos.close();
+        }
+    }
+
+    private File ensureSystemCaBundle(File payload) {
+        File out = new File(new File(payload, "runtime/etc"), "cacert.pem");
+        try {
+            File dir = new File("/system/etc/security/cacerts");
+            File[] certs = dir.listFiles();
+            if (certs == null || certs.length == 0) return out.isFile() ? out : null;
+            int count = 0;
+            long newest = 0L;
+            for (File c : certs) {
+                if (c.isFile() && c.length() > 0) {
+                    count++;
+                    if (c.lastModified() > newest) newest = c.lastModified();
+                }
+            }
+            if (count == 0) return out.isFile() ? out : null;
+            String stamp = count + ":" + newest;
+            android.content.SharedPreferences sp = getSharedPreferences("dsh_prefs", MODE_PRIVATE);
+            if (out.isFile() && out.length() > 1024L && stamp.equals(sp.getString("ca_bundle_stamp", ""))) {
+                return out;
+            }
+            File parent = out.getParentFile();
+            if (parent != null) parent.mkdirs();
+            java.io.FileOutputStream os = new java.io.FileOutputStream(out);
+            try {
+                byte[] buf = new byte[8192];
+                for (File c : certs) {
+                    if (!c.isFile()) continue;
+                    java.io.FileInputStream in = new java.io.FileInputStream(c);
+                    try {
+                        int n;
+                        while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                    } finally {
+                        in.close();
+                    }
+                    os.write('\n');
+                }
+            } finally {
+                os.close();
+            }
+            out.setReadable(true, false);
+            sp.edit().putString("ca_bundle_stamp", stamp).apply();
+            Log.i(TAG, "system CA bundle -> " + out.getName() + " (" + out.length() + " bytes, " + count + " certs)");
+            return out;
+        } catch (Throwable t) {
+            Log.w(TAG, "system CA bundle failed: " + t);
+            return out.isFile() ? out : null;
+        }
+    }
+
+    private void spawnNode(File payload) throws IOException {
+        // v1.50：起引擎前先清场 —— 杀掉上一次遗留、还占着引擎端口的 node 进程。
+        //
+        // 为什么要放在这里（而不是只放 launchEngine）：
+        // 启动超时兜底那一支（内核回退重起、快速同步后全量补齐重起）是直接调 spawnNode 的，
+        // 绕过了 launchEngine 里 portListening 那道防护。真机日志实证：同一个 3080 上，
+        // 前一个 node 已经打印 "dsh web: ...?token=A"，后起的那个崩在
+        // "listen EADDRINUSE: address already in use 127.0.0.1:3080"，而它崩之前
+        // 已经把自己的 token=B 打进 dsh-web.log。App 取 token 时若取到 B，
+        // WebView 连的是活着的 A → 401 → 界面能显示却发不出消息，只能另开工具杀残留才恢复。
+        //
+        // killEngineNow 就是为这个准备的（找 /proc 里的引擎 node → SIGTERM → 6 秒内没死再 SIGKILL），
+        // 这里没有遗留进程时它只是扫一次 /proc 就返回，开销可以忽略。
+        try {
+            int stale = findEnginePid();
+            if (stale > 0) {
+                Log.w(TAG, "reaping stale engine pid " + stale + " before spawn");
+                killEngineNow();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "reap before spawn failed: " + t);
+        }
+        File node = new File(payload, "runtime/bin/node");
+        File binjs = new File(dshrootDir, REL_BINJS);
+        File lib = new File(payload, "runtime/lib");
+        File home = new File(payload, "dshhome");
+        File bin = new File(payload, "bin");
+        File tmp = new File(getCacheDir(), "tmp");
+        if (!tmp.exists()) tmp.mkdirs();
+
+        if (!node.exists()) throw new IOException("node binary missing");
+        if (!binjs.exists()) throw new IOException("dsh bin.js missing");
+        if (!node.canExecute()) node.setExecutable(true, false);
+
+        // v1.13：起引擎前先自愈 cordis.patch.yml —— 旧版控制台关插件会把它写成非法 YAML，
+        // 引擎每次启动都崩在解析、App 反复重拉（表现：界面一直闪、一直计时）。
+        conHealPatchConfig();
+
+        // 注意：Android 兼容补丁（禁用 llm-pi-ai/sandbox/bash-sandbox 的 cordis.patch.yml）
+        // 位于 $DSH_HOME/cordis.patch.yml，由 dsh profile-boot 的 homePatches 自动加载，
+        // 无需 --patch 参数（重复传入会导致 duplicate loader entry 崩溃）。
+        // ⚠️ 历史注记（**已作废，别再照它判断**）：v1.24 曾在此写下"局域网访问暂不实现"。
+        // 那个结论的三个前提已在 v1.30 + v1.32 全部解决，**结论已不成立**：
+        //   ① 上游硬闸（startup.js:40 拒绝 --host 0.0.0.0）已由 payload 补丁 patch-lan-optin.js
+        //      改成"仅当 DSH_ALLOW_LAN=1 才放行"；
+        //   ② v1.30 已关掉当时那三处「无鉴权可读」的面（/plugins/<id>/client.js 与 .js.map、
+        //      /plugins/events 模块图、含用户个人图的非 index 静态资源），无 cookie 一律 401；
+        //   ③ 残余风险只剩"HTTP 明文、令牌在 URL 里" → 所以默认关、由用户显式开启、用完可关。
+        // → 现行为：默认仍绑 127.0.0.1；用户显式开启后才绑 0.0.0.0（见紧接下面的 v1.32 分支）。
+        // 详见 selfbuild/notes/lan-security.md。
+        // 3181（无障碍）/ 8999（虚拟屏）/ 3081（notify+特权）三个本地桥一如既往固定 127.0.0.1。
+        String bindHost = "127.0.0.1";
+        java.util.List<String> extraArgs = new java.util.ArrayList<String>();
+        boolean lanOn = false;
+        try { lanOn = lanAccess(); } catch (Throwable ignored) {}
+        if (lanOn) {
+            // v1.32：用户显式开启 → 绑 0.0.0.0（含回环，所以 App 自己的 WebView 127.0.0.1 不受影响）。
+            // 上游默认拒绝 0.0.0.0；payload 补丁改成"仅当 DSH_ALLOW_LAN=1 才放行"（见 patch-lan-optin.js）。
+            // 另传 --trusted-host：让 Host/Origin 围栏接受从局域网 IP 过来的访问（否则 PC 打开会被拒）。
+            bindHost = "0.0.0.0";
+            java.util.List<String> ips = localLanIps();
+            if (!ips.isEmpty()) { extraArgs.add("--trusted-host"); extraArgs.add(ips.get(0)); }
+            Log.i(TAG, "lan_access=on → 绑 " + bindHost + "（trustedHost=" + (ips.isEmpty() ? "-" : ips.get(0)) + "）");
+        }
+        try { getSharedPreferences("dsh_prefs", MODE_PRIVATE).edit().putString("engine_host_active", bindHost).apply(); } catch (Throwable ignored) {}
+        java.util.List<String> engineCmd = new java.util.ArrayList<String>();
+        engineCmd.add(node.getAbsolutePath());
+        engineCmd.add("--expose-internals");
+        engineCmd.add(binjs.getAbsolutePath());
+        engineCmd.add("web");
+        engineCmd.add("--host"); engineCmd.add(bindHost);
+        engineCmd.add("--port"); engineCmd.add(String.valueOf(enginePort));
+        engineCmd.addAll(extraArgs);
+        ProcessBuilder pb = new ProcessBuilder(engineCmd);
+        if (lanOn) pb.environment().put("DSH_ALLOW_LAN", "1");
+        java.util.Map<String, String> env = pb.environment();
+        env.put("LD_LIBRARY_PATH", lib.getAbsolutePath());
+        // 2026-10-07：交互式终端（右侧面板「新建终端」）起不来 —— 报
+        //   subprocess-local: command "/data/data/com.termux/files/usr/bin/bash" is not an executable file
+        // 根因：内核 dsh-subprocess-local 用 `process.env.SHELL || os.userInfo().shell` 定默认 shell，
+        //   而 Android 上 libuv 的 getpwuid 回退会把 **Termux 的** home/shell 直接填进来
+        //   （实测 userInfo() = {homedir:/data/data/com.termux/files/home,
+        //     shell:/data/data/com.termux/files/usr/bin/bash}，本机根本没装 Termux）。
+        //   壳这边一直没设 SHELL → 终端拿着一个不存在的路径去 exec，必失败。
+        // 修法：显式给引擎 SHELL=/system/bin/sh（Android 上必然存在）。mksh 认 PS1，
+        //   终端照样能就绪；只是拿不到 bash 专属的 PROMPT_COMMAND 标记，走空闲探测兜底。
+        env.put("SHELL", "/system/bin/sh");
+        // Termux 共存修复（v1.7.4）：内置 node 在 Termux 环境编译，OPENSSLDIR 被编译死为
+        // /data/data/com.termux/files/usr。装了 Termux 的设备读其 openssl.cnf 触发 EACCES，
+        // node 启动即崩；没装 Termux 时靠 ENOENT 静默才碰巧正常。注入 OPENSSL_CONF 指向
+        // payload 自带的可读 openssl.cnf（build.sh 生成），有无 Termux 都稳定。
+        File osslConf = new File(payload, "runtime/etc/openssl.cnf");
+        if (osslConf.exists()) env.put("OPENSSL_CONF", osslConf.getAbsolutePath());
+        // v1.15.5：内置 git 的 Android 适配（与 pnpm 同批；插件管理「GitHub 地址」输入要靠它）。
+        //  · GIT_EXEC_PATH / GIT_TEMPLATE_DIR：Termux 构建把这些路径写死为 /data/data/com.termux/files/usr，
+        //    必须改指 payload 内 —— 否则 git 找不到远程助手（实测报 "unable to find remote helper for 'https'"）。
+        //    注意 git 还要靠 PATH 里的 `git` 去拉起该助手，而 payload/bin 本来就在 PATH 上。
+        //  · GIT_PAGER=cat：payload 没带 less，避免 git 去拉分页器。
+        //  · 证书：内置 curl/git 依赖的 libcrypto 把 OPENSSLDIR 编译死指向 Termux 的
+        //    /data/data/com.termux/files/usr/etc/tls/cert.pem；本机没装 Termux → 一个 CA 都拿不到，
+        //    HTTPS 一律失败（实测 curl 报 (77) error adding trust anchors，git 报同一句）。
+        //    把系统 CA 合成一个 bundle，再用各自认的变量指过去：curl 认 SSL_CERT_FILE / CURL_CA_BUNDLE，
+        //    git 认 GIT_SSL_CAINFO（实测三者在真机上都生效）。
+        File gitDir = new File(payload, "git");
+        env.put("GIT_EXEC_PATH", new File(gitDir, "libexec/git-core").getAbsolutePath());
+        env.put("GIT_TEMPLATE_DIR", new File(gitDir, "templates").getAbsolutePath());
+        env.put("GIT_PAGER", "cat");
+        // v1.15.7：ssh 形式的 git URL 在 Android 上永远不可用 —— payload 没带 ssh 客户端、也没有密钥，
+        // 用户填 git@github.com:user/repo.git / git+ssh://… / ssh://… 时报
+        // "error: cannot run ssh: No such file or directory"（真机实测）。
+        //
+        // 做法：把 ssh 形式用 git 的 url.<base>.insteadOf 改写成 https —— 但**不能靠环境变量传**
+        // （v1.15.6 的错误做法）：内核给 pnpm 的是「洗过的父环境」（dsh-subprocess 的
+        // scrubbedParentEnv：SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i），而 git 用环境变量
+        // 传配置的键名恰好叫 **GIT_CONFIG_KEY_<n>** —— 含 "KEY" 被当凭据洗掉，GIT_CONFIG_COUNT 却活下来
+        // → 真机报 "error: missing config key GIT_CONFIG_KEY_0"。
+        // 改成写配置文件（见 ensureGitConfig），用 GIT_CONFIG_GLOBAL 指过去：该名字不含
+        // KEY/PASSWORD/SECRET/TOKEN，能活过清洗（已按该正则逐项自查）。
+        env.put("GIT_TERMINAL_PROMPT", "0");   // 需要凭据时立刻失败，别挂住等 tty 输入（AI 的 bash 没有 tty）
+        File caBundle = ensureSystemCaBundle(payload);
+        if (caBundle != null) {
+            env.put("SSL_CERT_FILE", caBundle.getAbsolutePath());
+            env.put("CURL_CA_BUNDLE", caBundle.getAbsolutePath());
+            env.put("GIT_SSL_CAINFO", caBundle.getAbsolutePath());
+        }
+        File gitCfg = ensureGitConfig(payload, caBundle);
+        if (gitCfg != null) env.put("GIT_CONFIG_GLOBAL", gitCfg.getAbsolutePath());
+        // v1.16.1：npm 全局安装落点（$HOME/.npm-global/bin）也要在 PATH 上。
+        // npm 的默认前缀是 <payload>/runtime（payload 内，升级会被覆盖），所以内置 npm 的 wrapper
+        // 把它改到 $HOME/.npm-global（HOME = filesDir，可写且跨版本升级保留，见下一行）；
+        // 但装出来的命令落在 <HOME>/.npm-global/bin，不显式加进 PATH 则 AI 找不到。
+        env.put("PATH", new File(getFilesDir(), "bin").getAbsolutePath() + ":" +
+                new File(getFilesDir(), ".local/bin").getAbsolutePath() + ":" +
+                bin.getAbsolutePath() + ":" +
+                new File(payload, "runtime/bin").getAbsolutePath() + ":" +
+                new File(getFilesDir(), ".npm-global/bin").getAbsolutePath() + ":/system/bin:/system/xbin");
+        env.put("HOME", getFilesDir().getAbsolutePath());
+        env.put("DSH_HOME", home.getAbsolutePath());
+        env.put("TMPDIR", tmp.getAbsolutePath());
+        env.put("TERM", "xterm");
+        env.put("SHIZUKU_DEX", rishDex != null ? rishDex.getAbsolutePath() : "");
+        // v1.9 虚拟屏 server dex：app_process 特权加载 VirtualScreenServer
+        env.put("VS_DEX", vscreenDex != null ? vscreenDex.getAbsolutePath() : "");
+        // v1.13 修正：这里原来**硬编码** "com.hubmobile.app.harness.beta"，而三版共用同一份源码 —— 正式版跑起来
+        // 也在自称 beta，而 rish 要拿这个 appId 去 Shizuku 要授权，Shizuku 比对实际调用者的包名/uid
+        // （正式版 uid ≠ beta uid）→ 门卫不认（用户回报：“SHIZUKU_APP_ID=…beta，但真正在跑的是 com.hubmobile.app.harness”）。
+        // 按实际包名派生，与 ScheduleExecutor 的 ctx.getPackageName() 一致；
+        // 并写回 dsh_prefs，供无障碍服务/调度器等其它组件复用（同样不能信旧值）。
+        final String selfAppId = getPackageName();
+        env.put("SHIZUKU_APP_ID", selfAppId);
+        try {
+            getSharedPreferences("dsh_prefs", MODE_PRIVATE).edit().putString("shizuku_app_id", selfAppId).apply();
+        } catch (Throwable ignored) {}
+        // 特权通道可用性：root(su) 或 Shizuku。两者都未授予时，DSH 插件不注册特权工具，
+        // AI 不会反复尝试系统操作；文件读写仍可用 DSH 自带的 fs/bash 工具（只需存储权限）。
+        env.put("SHIZUKU_AVAILABLE", shizukuAvailable() ? "1" : "0");
+        env.put("ROOT_AVAILABLE", rootAvailable() ? "1" : "0");
+        env.put("ROOT_SU", rootSuPath);
+        // v1.13.1：本地特权路由 /shell 的鉴权令牌——只经 env 交给本应用自己的引擎，本机其它应用猜不到，
+        // 避免任意应用通过 127.0.0.1:<notifyPort>/shell 拿到 shell 权限。
+        env.put("APP_LOCAL_TOKEN", localToken());
+        env.put("APP_NOTIFY_PORT", String.valueOf(notifyPort()));
+        // v1.7 无障碍服务端口（通知端口 + 100，三版本共存不冲突）：插件 dsh-tool-accessibility 经此端口
+        // 调用 App 的无障碍服务（读屏/点击/输入/截图）。端口同时写入 dsh_prefs，供无障碍服务读取。
+        final int a11yPort = notifyPort() + 100;
+        env.put("APP_A11Y_PORT", String.valueOf(a11yPort));
+        getSharedPreferences("dsh_prefs", MODE_PRIVATE).edit().putInt("a11y_port", a11yPort).apply();
+        // AI 工作区（可选）：用户选择的外部共享存储目录，作为 bash/文件工具的工作根目录
+        String ws = workspacePath();
+        if (ws != null && !ws.isEmpty()) env.put("DSH_WORKSPACE", ws);
+        pb.redirectErrorStream(true);
+
+        // 装包时系统直接把 App 杀掉，node 子进程不跟着退，会变成孤儿进程继续占着引擎端口。
+        // 重开后再起一个 node 就 listen EADDRINUSE，而前端拿的是新进程的 token，跟旧引擎对不上
+        // （401）→ 界面看着在、发不出消息，只能手动清。起之前先把孤儿收掉：同 uid 才发得了信号，
+        // 找的又正是自己的 node（bin.js web --port 本端口），不会误伤别的应用。
+        int stalePid = findEnginePid();
+        if (stalePid > 0) {
+            Log.w(TAG, "残留引擎进程 pid=" + stalePid + " 仍占着 " + enginePort + "，先停掉再起新引擎");
+            killEngineNow();
+        }
+
+        final Process proc = pb.start();
+        nodeProcess = proc;
+        final File logFile = new File(getFilesDir(), "dsh-web.log");
+        // v1.7.1：同时镜像一份引擎日志到外部目录（无需 root/adb 可读），
+        // 覆盖「node 反复崩溃但 waitForServer 未抛异常」时不产生 startup-diag.txt 的场景。
+        final File extLogFile = new File(android.os.Environment.getExternalStorageDirectory(),
+                (getPackageName().contains("beta") ? "DeepSeekHarnessLite"
+                        : getPackageName().contains("compat") ? "DeepSeekHarnessCompat" : "DeepSeekHarness")
+                        + "/dsh-web.log");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                FileOutputStream fos = null;
+                FileOutputStream extFos = null;
+                try {
+                    fos = new FileOutputStream(logFile, true);
+                    try {
+                        File extParent = extLogFile.getParentFile();
+                        if (extParent != null && !extParent.exists()) extParent.mkdirs();
+                        extFos = new FileOutputStream(extLogFile, true);
+                    } catch (Throwable ignored) {
+                    }
+                    InputStream is = proc.getInputStream();
+                    byte[] b = new byte[4096];
+                    int n;
+                    String carry = "";
+                    while ((n = is.read(b)) > 0) {
+                        fos.write(b, 0, n);
+                        fos.flush();
+                        if (extFos != null) {
+                            try { extFos.write(b, 0, n); extFos.flush(); } catch (Throwable ignored) {}
+                        }
+                        // v1.12：一次 read 可能在行中间断开，token URL 会被截成两半 → 拼接后再切行
+                        String s = carry + new String(b, 0, n, "UTF-8");
+                        int cut = s.lastIndexOf('\n');
+                        carry = cut >= 0 ? s.substring(cut + 1) : s;
+                        String parse = cut >= 0 ? s.substring(0, cut) : "";
+                        for (String line : parse.split("\n")) {
+                            String t = line.trim();
+                            if (!t.isEmpty()) Log.i(TAG, "node: " + t);
+                            // 0.1.5 认证：引擎打印 "dsh web: http://127.0.0.1:3080/?token=..."，
+                            // 解析出来供健康探测与 WebView 首次加载使用。
+                            // v1.39.1：不再写死 127.0.0.1 —— 局域网模式下引擎打印的是
+                            // "http://0.0.0.0:3080/?token=…"，写死前缀一条都匹配不到，
+                            // 于是 /lan 报 tokenReady:false、urls 空（开关能开、链接却没有）。
+                            String u = tokenUrlIn(t);
+                            if (u != null) {
+                                engineTokenUrl = u;
+                                Log.i(TAG, "engine token url captured");
+                            }
+                        }
+                    }
+                } catch (IOException e) {
+                    Log.w(TAG, "log reader error", e);
+                } finally {
+                    try { if (fos != null) fos.close(); } catch (IOException ignored) {}
+                    try { if (extFos != null) extFos.close(); } catch (IOException ignored) {}
+                }
+            }
+        }, "node-log").start();
+    }
+
+    private boolean healthOk() {
+        return isDshEngine(enginePort);
+    }
+
+    /** 读 HTTP 正文（容忍错误流；仅供探测用，上限 max 字节）。 */
+    private String conReadBody(HttpURLConnection c, int max) {
+        try {
+            InputStream in = null;
+            try { in = c.getInputStream(); } catch (Throwable t) { in = c.getErrorStream(); }
+            if (in == null) return null;
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] chunk = new byte[4096];
+            int total = 0;
+            int r;
+            while ((r = in.read(chunk)) > 0 && total < max) { out.write(chunk, 0, r); total += r; }
+            try { in.close(); } catch (Throwable ignored) {}
+            return out.toString("UTF-8");
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private void waitForServer() {
+        long start = System.currentTimeMillis();
+        long deadline = start + 90000;
+        while (System.currentTimeMillis() < deadline) {
+            if (engineStartAborted) return;   // v1.13：用户点了「停止」→ 立即收手，别再刷“已等待 N 秒”
+            if (healthOk()) { loadHome(); executePendingScheduledTask(); return; }
+            long waited = (System.currentTimeMillis() - start) / 1000;
+            if (waited >= 12) {
+                setStatus("正在准备运行环境…");
+            }
+            try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
+        }
+        if (engineStartAborted) return;   // v1.13：停止后不再走超时兜底（否则会重新 spawn + 重新加载页面）
+        // 超时：带端口提示便于排查（node 日志已写入 files/dsh-web.log）
+        Log.e(TAG, "engine start timeout on port " + enginePort + ", check dsh-web.log");
+        // v1.5.2 慢启动修复兜底：本次走了「快速同步」（同内核升级），若引擎仍起不来，
+        // 可能外部 dshroot 有缺失文件（快速路径不 stat 已有文件）→ 全量补齐后重启引擎再等一轮。
+        // v1.49：受管内核起不来 → 先回退内置树再试，别让它连坐整个引擎。
+        // 只回退一次：置空后走原有超时兜底（fastSyncedThisBoot / 迟到达）。
+        if (kernelManagedTree != null) {
+            String badVer = KernelStore.kernelVersionAt(kernelManagedTree);
+            Log.w(TAG, "managed kernel boot timeout: " + badVer + " → fallback to builtin");
+            KernelStore.deactivate(this);
+            kernelManagedTree = null;
+            File fbPayload = payloadDir();
+            dshrootDir = new File(fbPayload, "dshroot");
+            setStatus("内核 " + (badVer.length() > 0 ? badVer : "受管") + " 启动失败，已回退内置内核…");
+            conToast("内核启动失败，已自动回退内置内核");
+            try {
+                spawnNode(fbPayload);
+            } catch (Throwable t) {
+                Log.e(TAG, "respawn after kernel fallback failed", t);
+            }
+            waitForServer();
+            return;
+        }
+        if (fastSyncedThisBoot) {
+            fastSyncedThisBoot = false;
+            Log.w(TAG, "fast sync may have missed files, forcing full dshroot repair");
+            setStatus("引擎启动超时，正在补齐引擎文件后重试…");
+            try {
+                File externalRoot = new File(Environment.getExternalStorageDirectory(), pkgRoot());
+                extractPayload(new File(getFilesDir(), "payload"), externalRoot, "dshroot");
+                writeDshrootComplete(externalRoot);
+            } catch (Throwable t) {
+                Log.w(TAG, "full repair failed", t);
+            }
+            try {
+                spawnNode(new File(getFilesDir(), "payload"));
+            } catch (Throwable t) {
+                Log.e(TAG, "respawn after repair failed", t);
+            }
+            waitForServer();
+            return;
+        }
+        // v1.13.12：超时不再 loadHome()（引擎没起来，WebView 只会对着死端口反复重试，
+        // 用户看到的就是"权限引导走完进不了应用"，只能杀掉重开）。改为：
+        // ① 回控制台（那里有真实状态与「启动引擎/日志」入口）；② 后台继续等引擎"迟到"——
+        // 首启在真机上（首次建 profiles/冷启动）可能超过 90 秒，引擎一旦就绪自动进入主界面。
+        setStatus("引擎启动超时（端口 " + enginePort + "），后台正在继续守望重试…");
+        bumpBootFailure();
+        conEngineTimedOut();
+    }
+
+    /** 引擎启动超时后的兜底：后台守望，引擎迟到就绪时自动进入主界面。 */
+    private void conEngineTimedOut() {
+        ui.post(new Runnable() { @Override public void run() {
+            try {
+                conToast("引擎启动稍慢，后台正在继续连接…");
+            } catch (Throwable ignored) {}
+        }});
+        final long deadline = System.currentTimeMillis() + 600000L; // 最多再守望 10 分钟
+        new Thread(new Runnable() { @Override public void run() {
+            while (System.currentTimeMillis() < deadline) {
+                if (engineStoppedByUser || engineStartAborted) return; // 用户主动停止 → 不再打扰
+                if (engineStartTs == 0L) return;                       // 期间被重启流程接管 → 收手
+                try {
+                    if (healthOk()) {
+                        starting = false;
+                        ui.post(new Runnable() { @Override public void run() {
+                            try {
+                                conToast("引擎已就绪");
+                                enterMainUi();
+                            } catch (Throwable ignored) {}
+                        }});
+                        return;
+                    }
+                } catch (Throwable ignored) {}
+                try { Thread.sleep(3000); } catch (InterruptedException e) { return; }
+            }
+        }}, "engine-late-bloom").start();
+    }
+
+    /** 定时任务自动执行：闹钟到点后引擎就绪，把任务文本作为消息自动发送给 AI（无需用户操作）。 */
+    private void executePendingScheduledTask() {
+        final String task = pendingScheduledTask;
+        pendingScheduledTask = null; // 只执行一次
+        if (task == null || task.isEmpty()) return;
+        logSchedule("开始自动执行任务: " + task);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    // 等引擎完全就绪（HTTP 200 后 API 可能还需一点时间）
+                    for (int i = 0; i < 20; i++) {
+                        if (healthOk()) break;
+                        Thread.sleep(1000);
+                    }
+                    // 调 DSH API：建会话 + 发消息（AI 自动执行任务）
+                    String sessionId = createSession();
+                    if (sessionId == null) {
+                        logSchedule("自动执行失败：无法创建会话（引擎未就绪或无 API Key？）");
+                        return;
+                    }
+                    boolean sent = sendPrompt(sessionId, task);
+                    logSchedule(sent ? "任务已发送给 AI 执行: " + task : "任务发送失败: " + task);
+                } catch (Throwable t) {
+                    logSchedule("自动执行异常: " + t.getMessage());
+                }
+            }
+        }, "scheduled-exec").start();
+    }
+
+    /** Create a session through the current authenticated RPC protocol. */
+    private String createSession() {
+        try {
+            return EngineRpc.call(conLogFile(), enginePort, "session/create", new org.json.JSONObject())
+                    .getString("sessionId");
+        } catch (Exception e) {
+            Log.w(TAG, "scheduled session creation failed", e);
+            return null;
+        }
+    }
+
+    /** Submit a scheduled task; accepted means queued, not completed. */
+    private boolean sendPrompt(String sessionId, String text) {
+        try {
+            return EngineRpc.call(conLogFile(), enginePort, "session/prompt", EngineRpc.prompt(sessionId, text))
+                    .optBoolean("accepted", false);
+        } catch (Exception e) {
+            Log.w(TAG, "scheduled prompt failed", e);
+            return false;
+        }
+    }
+
+    /**
+     * 2026-10-19：页面挂载 6 秒后，把关键 JS 状态回读落盘。
+     *
+     * 没有 WebView devtools 时，evaluateJavascript 的返回值回调是**唯一**能拿到页面内部事实的
+     * 通道。这里问的全是能"二选一"的问题：模块加载器在不在、桥注没注入、
+     * 控制台插件到底有没有往 DOM 里放东西（它的类名都带 ctl- 前缀）。
+     */
+    private void probePageState(final WebView view) {
+        if (view == null) return;
+        view.postDelayed(new Runnable() {
+            @Override public void run() {
+                try {
+                    final String js = "(function(){try{"
+                        + "var all=document.querySelectorAll('*'),ctl=0,i,c;"
+                        + "for(i=0;i<all.length;i++){c=all[i].className;"
+                        + "if(typeof c==='string'&&c.indexOf('ctl-')>=0)ctl++;}"
+                        + "return JSON.stringify({booted:!!window.__ModuleLoader__,"
+                        + "token:!!window.__DSH_INPUT_TOKEN,bridge:!!window.dshinput,"
+                        + "shareApi:!!(window.dshinput&&window.dshinput.shareState),"
+                        + "ctlNodes:ctl,nodes:all.length,"
+                        + "ta:document.querySelectorAll('textarea').length,"
+                        + "ce:document.querySelectorAll('[contenteditable]').length});"
+                        + "}catch(e){return 'ERR:'+e}})()";
+                    view.evaluateJavascript(js, new android.webkit.ValueCallback<String>() {
+                        @Override public void onReceiveValue(String v) {
+                            diagLog("PROBE", String.valueOf(v));
+                        }
+                    });
+                } catch (Throwable t) {
+                    diagLog("PROBE", "failed " + t);
+                }
+            }
+        }, 6000L);
+    }
+
+    /**
+     * 2026-10-19：WebView 诊断**落盘**。
+     *
+     * 为什么不能只靠 logcat：logcat 环形缓冲只有 256 KiB，等包装上、用户回来找我时，
+     * 页面加载期的日志早滚没了（这次就被这个坑住，只能靠猜）。落盘到 files/diag/webview.log，
+     * 超 512 KiB 整体轮转成 webview.old.log，最多占 1 MB。
+     */
+    private void diagLog(String tag, String msg) {
+        try {
+            Log.i(tag, msg);
+            java.io.File dir = new java.io.File(getFilesDir(), "diag");
+            if (!dir.isDirectory() && !dir.mkdirs()) return;
+            java.io.File f = new java.io.File(dir, "webview.log");
+            if (f.length() > 512 * 1024) {
+                java.io.File old = new java.io.File(dir, "webview.old.log");
+                try { if (old.exists()) old.delete(); } catch (Throwable ignored) {}
+                try { f.renameTo(old); } catch (Throwable ignored) {}
+            }
+            String stamp = new java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.US)
+                    .format(new java.util.Date());
+            java.io.FileOutputStream out = new java.io.FileOutputStream(f, true);
+            try {
+                out.write((stamp + " " + tag + " " + msg + "\n").getBytes("UTF-8"));
+            } finally {
+                try { out.close(); } catch (Throwable ignored) {}
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    /** node 看门狗：node 进程死亡且服务不可用时自动重启引擎并刷新页面 */
+    private void startWatchdog() {
+        if (watchdogStarted) return;
+        watchdogStarted = true;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                while (!Thread.currentThread().isInterrupted()) {
+                    try { Thread.sleep(5000); } catch (InterruptedException e) { return; }
+                    try {
+                        if (nodeProcess == null) continue;
+                        if (engineStoppedByUser) continue;   // v1.13：用户点了「停止」→ 不自动拉起
+                        ensureNotifyServer();                // v1.14：通知通道独立自愈（与 node 存活无关）
+                        boolean serverUp = healthOk();
+                        boolean nodeAlive = nodeProcess.isAlive();
+                        if (!serverUp && !nodeAlive) {
+                            long now = System.currentTimeMillis();
+                            if (now - lastRespawnAt < 20000) continue; // 避免风车重启
+                            lastRespawnAt = now;
+                            Log.w(TAG, "node died, respawning engine");
+                            spawnNode(new File(getFilesDir(), "payload"));
+                            // v1.39.2：以前这里 spawnNode 之后立刻 loadUrl —— 端口还没 listen，
+                            // WebView 直接撞 ERR_CONNECTION_REFUSED，且没人再导航，页面就一直白屏
+                            // （用户只能滑掉 App 重进）。改成等引擎真的答话再导航，最多等 40s。
+                            reloadWhenEngineReady();
+                        }
+                    } catch (Throwable t) {
+                        Log.w(TAG, "watchdog error", t);
+                    }
+                }
+            }
+        }, "node-watchdog").start();
+    }
+
+    /** v1.39.2：等引擎端口真的答话再导航；看门狗重拉引擎后专用，避免白屏卡死。 */
+    private void reloadWhenEngineReady() {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                for (int i = 0; i < 160; i++) {           // 每次 250ms，最多等 40 秒
+                    if (healthOk()) break;
+                    try { Thread.sleep(250); } catch (InterruptedException e) { return; }
+                }
+                final WebView wv = webView;
+                if (wv == null) return;
+                ui.post(new Runnable() {
+                    @Override public void run() { wv.loadUrl(webHomeUrl()); }
+                });
+            }
+        }, "engine-ready-reload").start();
+    }
+
+
+    // ==================== v1.52 白屏兜底页：加载与自救 ====================
+
+    /** 主页面加载：引擎答话才 loadUrl；不答话先给兜底页，别再对着死端口白屏空转。 */
+    /** 引擎起来前那次「再等两轮」的探测是否已在跑（防重入，v1.53）。 */
+    private volatile boolean bootRechecking = false;
+
+    private void loadHomeGuarded() {
+        final WebView wv = webView;
+        if (wv == null) return;
+        fallbackWhy = null;
+        fallbackReady = false;
+        if (healthOk()) {
+            pageLoadedAt = 0L;
+            wv.loadUrl(webHomeUrl());
+            scheduleStallWatch();
+            return;
+        }
+        // v1.53：引擎常常只差一两秒才开始监听端口，探测一失败就切兜底页 → 用户看到兜底页闪一下
+        // （2026-11-06 实测：44s 判「没监听」，45s 引擎就 ready）。改成后台再等两轮（每轮 2 秒），
+        // 仍不通才真的兜底；等待期间保持启动动画，比闪一屏兜底页体面。
+        if (bootRechecking) return;
+        bootRechecking = true;
+        new Thread(new Runnable() { @Override public void run() {
+            try {
+                for (int i = 0; i < 2; i++) {
+                    try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
+                    if (engineStartAborted || fallbackActive || pageLoadedAt > 0L) return;
+                    if (healthOk()) {
+                        final WebView w2 = webView;
+                        if (w2 == null) return;
+                        ui.post(new Runnable() { @Override public void run() {
+                            if (fallbackActive) return;
+                            pageLoadedAt = 0L;
+                            w2.loadUrl(webHomeUrl());
+                            scheduleStallWatch();
+                        }});
+                        return;
+                    }
+                }
+                ui.post(new Runnable() { @Override public void run() {
+                    if (fallbackActive) return;
+                    showBootFallback("引擎还没应答（端口 " + enginePort + " 没监听）");
+                }});
+            } finally { bootRechecking = false; }
+        }}, "boot-recheck").start();
+    }
+
+    /** 主页面 loadUrl 之后 90 秒还没 onPageFinished（前端崩 / 资源 404）也交给兜底页。 */
+    private void scheduleStallWatch() {
+        final long expectAfter = System.currentTimeMillis();
+        ui.postDelayed(new Runnable() { @Override public void run() {
+            if (fallbackActive) return;
+            if (pageLoadedAt >= expectAfter) return;
+            showBootFallback("页面 90 秒没有加载完成");
+        }}, 90000L);
+    }
+
+    /** 切到兜底页，并在后台继续探测引擎。幂等：已经在兜底页就只更新原因。 */
+    private void showBootFallback(final String why) {
+        if (why != null) fallbackWhy = why;
+        if (fallbackActive) return;
+        final WebView wv = webView;
+        if (wv == null) return;
+        fallbackActive = true;
+        fallbackReady = false;
+        // 只有「进去过又掉回来」才算一轮循环；首启从没进去过就任由它慢慢加载。
+        if (everEnteredHome) bootCycleFailures++;
+        if (fallbackSince == 0L) fallbackSince = System.currentTimeMillis();
+        diagLog("FALLBACK", "show: " + why);
+        ui.post(new Runnable() { @Override public void run() {
+            try { wv.loadUrl(FALLBACK_URL); } catch (Throwable t) { Log.w(TAG, "fallback load", t); }
+        }});
+        scheduleFallbackProbe();
+    }
+
+    /** 兜底页期间：每 1.2 秒探一次端口，通了只置 ready（由页面自己要求 enter，动画更顺）。 */
+    private void scheduleFallbackProbe() {
+        if (fallbackProbing) return;
+        fallbackProbing = true;
+        final long deadline = System.currentTimeMillis() + 15 * 60 * 1000L;
+        new Thread(new Runnable() { @Override public void run() {
+            while (System.currentTimeMillis() < deadline) {
+                if (!fallbackActive) { fallbackProbing = false; return; }
+                try {
+                    if (healthOk()) {
+                        fallbackReady = true;
+                        diagLog("FALLBACK", "engine ready, waiting for page to enter");
+                        fallbackProbing = false;
+                        return;
+                    }
+                } catch (Throwable ignored) {}
+                try { Thread.sleep(1200); } catch (InterruptedException e) { fallbackProbing = false; return; }
+            }
+            fallbackProbing = false;
+        }}, "fallback-probe").start();
+    }
+
+    /** 兜底页状态：页面每 1.5 秒拉一次。刻意做得很轻 —— 这里不跑 HTTP，只读缓存标志。 */
+    private String fallbackStateJson() {
+        org.json.JSONObject o = new org.json.JSONObject();
+        try {
+            boolean alive = false;
+            try { alive = nodeProcess != null && nodeProcess.isAlive(); } catch (Throwable ignored) {}
+            long waited = fallbackSince == 0L ? 0 : Math.max(0, (System.currentTimeMillis() - fallbackSince) / 1000);
+            // 连续两轮「进去了又掉回来」就不再自动进：否则就是兜底页 ↔ 白页来回跳
+            boolean ready = fallbackReady && bootCycleFailures < 2;
+            o.put("status", ready ? "ready" : (alive ? "booting" : "offline"));
+            o.put("waited", waited);
+            o.put("version", conVersionLabel());
+            o.put("model", android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL);
+            o.put("android", android.os.Build.VERSION.RELEASE + "（API " + android.os.Build.VERSION.SDK_INT + "）");
+            o.put("webview", webViewVersionText());
+            o.put("engine", engineStateOneLine(alive));
+            String why = fallbackWhy == null ? "" : fallbackWhy;
+            if (bootCycleFailures >= 2) {
+                why = (why.isEmpty() ? "" : why + "；") + "已经连着 " + bootCycleFailures
+                        + " 次没进到主界面，先别自动重试了";
+            }
+            o.put("lastError", why);
+            o.put("logPath", externalLogFile().getAbsolutePath());
+        } catch (Throwable t) {
+            return "{\"status\":\"offline\",\"waited\":0,\"version\":\"\",\"model\":\"\",\"android\":\"\",\"webview\":\"\",\"engine\":\"状态拼装失败\",\"lastError\":\"\",\"logPath\":\"\"}";
+        }
+        return o.toString();
+    }
+
+    private String engineStateOneLine(boolean alive) {
+        try {
+            boolean listening = portListening(enginePort);
+            boolean ok = healthOk();
+            if (ok) return "运行中（端口 " + enginePort + " 已应答）";
+            if (listening) return "进程在，端口已监听但还没应答";
+            if (alive) return "进程在，端口 " + enginePort + " 还没监听";
+            return "进程不在（没起来或已退出）";
+        } catch (Throwable t) { return "状态未知：" + t; }
+    }
+
+    private String webViewVersionText() {
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                android.content.pm.PackageInfo pi = android.webkit.WebView.getCurrentWebViewPackage();
+                if (pi != null && pi.versionName != null) {
+                    return pi.versionName + "（Chromium " + parseChromeMajor(pi.versionName) + "）";
+                }
+            }
+            int c = parseChromeMajor(webView == null ? null : webView.getSettings().getUserAgentString());
+            return c > 0 ? ("Chromium " + c) : "未知";
+        } catch (Throwable t) { return "未知"; }
+    }
+
+    /** 引擎日志的外部镜像（未 root 也可读），与 spawnNode 里写的落点保持一致。 */
+    private File externalLogFile() {
+        String dir = getPackageName().contains("beta") ? "DeepSeekHarnessLite"
+                : getPackageName().contains("compat") ? "DeepSeekHarnessCompat" : "DeepSeekHarness";
+        return new File(android.os.Environment.getExternalStorageDirectory(), dir + "/dsh-web.log");
+    }
+
+    /** 诊断文本：用户点一下「复制诊断」拿到的就是它，直接粘群里。 */
+    private String buildDiagText() {
+        StringBuilder b = new StringBuilder();
+        b.append("===== DeepSeek Harness 诊断 =====\n");
+        b.append("时间：").append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new java.util.Date())).append('\n');
+        b.append("版本：").append(conVersionLabel()).append('\n');
+        b.append("包名：").append(getPackageName()).append('\n');
+        b.append("机型：").append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL).append('\n');
+        b.append("系统：").append(android.os.Build.VERSION.RELEASE)
+         .append("（API ").append(android.os.Build.VERSION.SDK_INT).append("）\n");
+        b.append("WebView：").append(webViewVersionText()).append('\n');
+        boolean alive = false;
+        try { alive = nodeProcess != null && nodeProcess.isAlive(); } catch (Throwable ignored) {}
+        b.append("兜底页：").append(fallbackActive ? "显示中" : "未显示");
+        if (fallbackWhy != null) b.append("（").append(fallbackWhy).append("）");
+        b.append('\n');
+        b.append("引擎：").append(engineStateOneLine(alive)).append('\n');
+        b.append("端口：").append(enginePort)
+         .append("，token=").append(engineTokenUrl == null ? "未取到" : "已取到").append('\n');
+        try {
+            b.append("安全模式：").append(safeModeActive() ? "开" : "关")
+             .append("，连续失败 ").append(bootFailures()).append(" 次\n");
+        } catch (Throwable ignored) {}
+        b.append("\n----- dsh-web.log（末尾 300 行）-----\n");
+        try {
+            String tail = conTailOf(conLogFile(), 300);
+            b.append(tail == null || tail.isEmpty() ? "（空）" : tail);
+        } catch (Throwable t) { b.append("读取失败：").append(t); }
+        b.append("\n----- webview.log（末尾 60 行）-----\n");
+        try {
+            String tail = conTailOf(new File(getFilesDir(), "diag/webview.log"), 60);
+            b.append(tail == null || tail.isEmpty() ? "（空）" : tail);
+        } catch (Throwable t) { b.append("读取失败：").append(t); }
+        b.append("\n===== 诊断结束 =====\n");
+        return b.toString();
+    }
+
+    /** 兜底页专用桥：只在兜底页文档上生效，方法就这几个，不给任何文件 / 命令能力。 */
+    private final class BootBridge {
+        @android.webkit.JavascriptInterface
+        public String state() {
+            return fallbackActive ? fallbackStateJson() : "{}";
+        }
+
+        @android.webkit.JavascriptInterface
+        public String action(final String id) {
+            if (!fallbackActive) return "{\"ok\":false,\"msg\":\"当前不是兜底页\"}";
+            if ("enter".equals(id)) {
+                if (bootCycleFailures >= 2) {
+                    return "{\"ok\":false,\"msg\":\"已经连着 " + bootCycleFailures + " 次没进去，先点「重新连接」\"}";
+                }
+                ui.post(new Runnable() { @Override public void run() {
+                    if (webView == null) return;
+                    fallbackActive = false;
+                    fallbackSince = 0L;
+                    fallbackReady = false;
+                    fallbackWhy = null;
+                    pageLoadedAt = 0L;
+                    webView.loadUrl(webHomeUrl());
+                    scheduleStallWatch();
+                }});
+                return "{\"ok\":true,\"msg\":\"正在进入主界面\"}";
+            }
+            if ("retry".equals(id)) {
+                bootCycleFailures = 0;   // 用户自己点的重连：给他重开一轮
+                authReloadTries = 0;
+                boolean alive = false;
+                try { alive = nodeProcess != null && nodeProcess.isAlive(); } catch (Throwable ignored) {}
+                if (!alive) {
+                    // 引擎进程压根不在：只探端口会一路干等，直接把引擎拉起来
+                    ui.post(new Runnable() { @Override public void run() { conEngineClick(); }});
+                    scheduleFallbackProbe();
+                    return "{\"ok\":true,\"msg\":\"引擎没在跑，正在启动\"}";
+                }
+                new Thread(new Runnable() { @Override public void run() {
+                    for (int i = 0; i < 60; i++) {
+                        if (healthOk()) { fallbackReady = true; return; }
+                        try { Thread.sleep(250); } catch (InterruptedException e) { return; }
+                    }
+                }}, "fallback-retry").start();
+                scheduleFallbackProbe();
+                return "{\"ok\":true,\"msg\":\"正在重新探测引擎\"}";
+            }
+            if ("copy".equals(id)) {
+                final String text = buildDiagText();
+                ui.post(new Runnable() { @Override public void run() {
+                    try {
+                        android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                        if (cm != null) cm.setPrimaryClip(android.content.ClipData.newPlainText("DSH 诊断", text));
+                        conToast("诊断信息已复制，粘到群里即可");
+                    } catch (Throwable t) { conToast("复制失败：" + t.getMessage()); }
+                }});
+                return "{\"ok\":true,\"msg\":\"诊断信息已复制\"}";
+            }
+            if ("share".equals(id)) {
+                final String text = buildDiagText();
+                ui.post(new Runnable() { @Override public void run() { conSendShare(text); }});
+                return "{\"ok\":true,\"msg\":\"正在打开分享\"}";
+            }
+            if ("safe".equals(id)) {
+                ui.post(new Runnable() { @Override public void run() { conSafeModeNow(); }});
+                return "{\"ok\":true,\"msg\":\"正在切到安全模式\"}";
+            }
+            if ("open-log".equals(id)) {
+                ui.post(new Runnable() { @Override public void run() { conShareLog(); }});
+                return "{\"ok\":true,\"msg\":\"正在准备日志文件\"}";
+            }
+            return "{\"ok\":false,\"msg\":\"未知动作\"}";
+        }
+    }
+
+    /** 三按钮弹窗：在「取消 / 退出」之外再给一个次要出口（白屏时用来导日志）。 */
+    private void conDialog3(String title, String body, String neutral, final Runnable onNeutral,
+                            String positive, final Runnable onPositive, String negative) {
+        TextView t = (body == null || body.length() == 0) ? null : cText(body, 12.5f, cSub(), false);
+        conDialogView3(title, t, neutral, onNeutral, positive, onPositive, negative);
+    }
+
+    private void loadHome() {
+        // v1.12：控制台还开着时不抢界面（引擎就绪后由用户点「打开主界面」进来）
+        if (consoleVisible) return;
+        startWatchdog();
+        final boolean film = bootFilmOn && !bootFilmDone;
+        if (film) {
+            // 片子收尾：连接阶段亮起 → 就绪 → 淡黑谢幕，然后才把 WebView 切到 GUI
+            bootFilmDone = true;
+            if (bootStage == 1) recordEngineSecs();
+            bootStage = 2;
+            bootFilmTarget = 0.97f;
+            filmJs("DSH_BOOT.progress(0.970)");
+            filmJs("DSH_BOOT.stage(2)");
+            ui.postDelayed(new Runnable() {
+                @Override public void run() {
+                    filmJs("DSH_BOOT.ready()");
+                    ui.postDelayed(new Runnable() {
+                        @Override public void run() {
+                            bootFilmOn = false;
+                            bootFilmReady = false;
+                            if (webView != null) {
+                                loadHomeGuarded();
+                                webView.clearHistory();
+                            }
+                        }
+                    }, 1500);
+                }
+            }, 520);
+        }
+        ui.post(new Runnable() {
+            @Override public void run() {
+                if (splashBox != null && splashBox.getVisibility() == View.VISIBLE) {
+                    splashBox.animate()
+                            .alpha(0f)
+                            .translationY(-dp(16))
+                            .setDuration(240)
+                            .setInterpolator(new AccelerateDecelerateInterpolator())
+                            .setListener(new AnimatorListenerAdapter() {
+                                @Override public void onAnimationEnd(Animator animation) {
+                                    if (splashBox != null) splashBox.setVisibility(View.GONE);
+                                    if (splashLogoView != null) splashLogoView.stopAnim();
+                                    if (splashLogo != null) splashLogo.setVisibility(View.GONE);
+                                    if (splashBrand != null) splashBrand.setVisibility(View.GONE);
+                                    if (statusView != null) statusView.setVisibility(View.GONE);
+                                }
+                            }).start();
+                } else {
+                    if (splashLogoView != null) splashLogoView.stopAnim();
+                    if (splashLogo != null) splashLogo.setVisibility(View.GONE);
+                    if (splashBrand != null) splashBrand.setVisibility(View.GONE);
+                    if (statusView != null) statusView.setVisibility(View.GONE);
+                }
+                if (progressBar != null) {
+                    progressBar.setIndeterminate(false);
+                    progressBar.setVisibility(View.GONE);
+                }
+                if (!film) loadHomeGuarded();   // 开机动画在放时，由上面的收尾流程接管
+            }
+        });
+    }
+
+    private void setStatus(final String s) {
+        ui.post(new Runnable() {
+            @Override public void run() {
+                if (s != null && !s.isEmpty()) {
+                    statusView.setText(s);
+                    statusView.setVisibility(View.VISIBLE);
+                } else {
+                    statusView.setVisibility(View.GONE);
+                }
+                if (consoleVisible) conSay(s);
+            }
+        });
+    }
+
+    private void setProgress(final int percent, final String s) {
+        if (bootFilmOn && bootStage == 0 && bootFilmTarget < 0.82f) {
+            bootFilmTarget = Math.max(bootFilmTarget, 0.10f + 0.72f * Math.min(100, Math.max(0, percent)) / 100f);
+        }
+        ui.post(new Runnable() {
+            @Override public void run() {
+                if (splashLogoView != null) splashLogoView.setProgress(percent);
+                if (progressBar != null) {
+                    progressBar.setIndeterminate(false);
+                    progressBar.setVisibility(View.VISIBLE);
+                    progressBar.setProgress(percent);
+                }
+                if (s != null) statusView.setText(s);
+                if (consoleVisible) {
+                    if (conBar != null) conBar.setVisibility(View.VISIBLE);
+                    conSetProgress(percent);
+                    conSay(s);
+                }
+            }
+        });
+    }
+
+    private void showIndeterminate(final String s) {
+        if (bootFilmOn && bootStage < 1) {                       // 进入「起引擎」阶段
+            bootStage = 1;
+            bootEngineAt = System.currentTimeMillis();
+            bootFilmTarget = Math.max(bootFilmTarget, 0.86f);
+        }
+        ui.post(new Runnable() {
+            @Override public void run() {
+                if (splashLogoView != null) splashLogoView.setIndeterminate(true);
+                if (progressBar != null) {
+                    progressBar.setIndeterminate(true);
+                    progressBar.setVisibility(View.VISIBLE);
+                }
+                if (s != null) statusView.setText(s);
+                if (consoleVisible) conSay(s);
+            }
+        });
+    }
+
+    private void hideProgress() {
+        ui.post(new Runnable() {
+            @Override public void run() {
+                if (splashLogoView != null) splashLogoView.setIndeterminate(false);
+                if (progressBar != null) {
+                    progressBar.setIndeterminate(false);
+                    progressBar.setVisibility(View.GONE);
+                }
+            }
+        });
+    }
+
+    @Override
+    protected void onPause() {
+        if (draftInput != null) draftInput.pause();
+        super.onPause();
+        // v1.51 省电：退后台不只暂停渲染，连 JS 定时器一起暂停。
+        // 前端有周期轮询（状态/日志），onPause 只停 WebView 渲染时 setInterval 仍在空转，
+        // 是「挂后台掉电」的主要来源之一。恢复时 onResume 会 resumeTimers。
+        if (webView != null) { webView.onPause(); webView.pauseTimers(); }
+        disableNfcReader();   // v1.16：退后台/锁屏立刻关 reader mode（别抢用户的卡）
+    }
+
+    @Override
+    protected void onDestroy() {
+        trustedWebDocument = false;
+        if (draftInput != null) draftInput.destroy();
+        if (webView != null) webView.destroy();
+        super.onDestroy();
+    }
+
+    // ==================== v1.12 控制台（冷启动首页 · 原生界面） ====================
+    // 控制台是盖在 WebView 之上的一层原生视图（同一个 FrameLayout 根），冷启动时显示；
+    // 切屏回来 / 任务恢复（savedInstanceState != null）不进它，直接回 DSH 主界面。
+    // 四块：解压文件（完成后收起成一行）、启动引擎、授予权限（含 root）、插件开关、日志。
+
+    private volatile boolean conRootOk = false;
+    private long conRootProbeTs = 0L;
+
+    private int cLine() { return Color.parseColor(isDark() ? "#232a38" : "#e5e7eb"); }
+    private int cAccent() { return getColor(R.color.accent_brand); }
+
+    private File payloadDir() { return new File(getFilesDir(), "payload"); }
+
+    /** 当前安装包的 versionCode（用于判断“内部那棵树是不是本次安装解压的”）。 */
+    private int conBuildCode() {
+        try { return (int) getPackageManager().getPackageInfo(getPackageName(), 0).getLongVersionCode(); }
+        catch (Throwable t) { return 0; }
+    }
+
+    /** 关键文件缺失检查（只查标记文件不够：解压中途失败、文件被杀都不算就绪）。 */
+    private String conMissingKey() {
+        File p = payloadDir();
+        String[] keys = {".extracted", "dshroot/REVISION",
+                "dshroot/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
+                "runtime/bin/node", "rish/rish_shizuku.dex"};
+        for (int i = 0; i < keys.length; i++) if (!new File(p, keys[i]).exists()) return keys[i];
+        return null;
+    }
+
+    /**
+     * 运行时与内核树是否已就绪。
+     * v1.12：加两道判定 —— ① 关键文件必须在；② 内部那棵树必须是**当前这次安装**解压出来的
+     * （payload_build_code == 当前 versionCode）。否则升级安装后拿着旧树（例：v1.10 留下的）
+     * 会显示“已解压”、校验也“通过”（用户实测就是这个问题）。
+     */
+    private boolean conFilesReady() {
+        if (conMissingKey() != null) return false;
+        int done = 0;
+        try { done = getSharedPreferences("dsh_prefs", MODE_PRIVATE).getInt("payload_build_code", 0); } catch (Throwable ignored) {}
+        return done != 0 && done == conBuildCode();
+    }
+
+    private void conMarkPayloadDone() {
+        try {
+            getSharedPreferences("dsh_prefs", MODE_PRIVATE).edit()
+                    .putInt("payload_build_code", conBuildCode()).apply();
+        } catch (Throwable ignored) {}
+    }
+
+    private String conKernelVer() {
+        try {
+            String s = readFileText(new File(payloadDir(), "dshroot_kernel_version.txt"));
+            if (s != null && s.trim().length() > 0) return s.trim();
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private String conVersionLabel() {
+        String v = "";
+        try { v = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Throwable ignored) {}
+        String k = conKernelVer();
+        return v + (k != null ? " · 内核 " + k : "");
+    }
+
+    /**
+     * 控制台用的“引擎就绪”判定：**只认真实端口探测**，不再回退看进程句柄。
+     * v1.13 修正：真机实测 node 从拉起→开始监听要 17~25 秒，若把“进程活着”当成“已就绪”，
+     * 控制台会过早点亮「打开主界面」，用户点进去时 3080 还没监听 → WebView 连不上，
+     * 看起来就是“点了没反应”；同时底部还在刷“正在启动…（已等待 N 秒）” → 两套文案交替闪。
+     * 现在：就绪=探测通过；进程活着但未就绪 → 由 conEngineBooting() 归入“启动中”。
+     */
+    private boolean conEngineRunning() {
+        long now = System.currentTimeMillis();
+        if (now - engineProbeAt > 1500L && !engineProbeBusy) {
+            engineProbeBusy = true;
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    conProbeEngineNow();
+                    engineProbeBusy = false;
+                    if (consoleVisible) ui.post(new Runnable() { @Override public void run() { refreshConsole(); } });
+                }
+            }, "engine-probe").start();
+        }
+        return engineAliveCached;
+    }
+
+    /** 已拉起但还没监听端口（node 启动中）；控制台据此显示“启动中…”并禁用入口。 */
+    private boolean conEngineBooting() {
+        if (engineAliveCached) return false;
+        Process p = nodeProcess;
+        return starting || (p != null && p.isAlive());
+    }
+
+    /** 端口是否已被监听（TCP 连接得通即算；**后台线程调用**）。
+     *  比 healthOk() 更早为真：node 还在启动时端口已经 listen，用它避免重复拉起引擎。 */
+    private boolean portListening(int port) {
+        java.net.Socket s = null;
+        try {
+            s = new java.net.Socket();
+            s.connect(new java.net.InetSocketAddress("127.0.0.1", port), 400);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        } finally {
+            try { if (s != null) s.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** 真探一次引擎端口（**必须在后台线程调用**：主线程做网络 IO 会被系统直接抛异常）。 */
+    private boolean conProbeEngineNow() {
+        boolean up = false;
+        try { up = healthOk(); } catch (Throwable ignored) {}
+        engineAliveCached = up;
+        engineProbeAt = System.currentTimeMillis();
+        // 引擎真的就绪 → 漬零连续失败计数（供安全模式提示用）。
+        if (up) resetBootFailures();
+        return up;
+    }
+
+    /**
+     * 从引擎日志尾部把最新一条 token URL 捞回来。
+     * 适用：引擎已经在跑、但本次 App 进程没抓到那条启动输出（例：App 被杀后重开、
+     * 引擎此前已被拉起）。不捞的话 WebView 只能不带 token 加载 → 401 认证页。
+     */
+    private String conTokenFromLog() {
+        try {
+            File f = conLogFile();
+            if (!f.exists()) return null;
+            // v1.39.1：解析逻辑统一到 tokenUrlIn（不限 host），否则局域网模式下
+            // 日志里只有 http://0.0.0.0:3080/?token=… 这一种形态，这里同样捞不到。
+            String tail = conTailOf(f, 400);
+            return tokenUrlIn(tail);
+        } catch (Throwable t) { return null; }
+    }
+
+    // ==================== v1.34 控制台 → 网页设置页 ====================
+    // 要的最终形态：把原生控制台的功能与文字，照「通用设置」那一页的样子做成 DSH 前端里的
+    // 一个设置页（客户端插件 dsh-android-console，注册 settings.section）。
+    // 页面上的每个动作都要落回安卓壳执行，所以壳这边只开一条窄桥：
+    //     dshshell.ctlState()        → 控制台状态 JSON
+    //     dshshell.ctlAct(id, arg)   → 执行一个动作，立刻返回 {"ok":true}
+    // 桥方法跑在 WebView 的 JavaBridge 线程上：读状态是只读的、可以直接答；动作一律
+    // ui.post 回主线程（它们要碰视图与 Intent）。
+    //
+    // 原生控制台**没删**，但不再有用户可见入口：它降级成**救援面** —— 文件没解压、
+    // 引擎启动超时、或通知带 open_console 时自动出现。理由：设置页由引擎端出来，
+    // 引擎起不来时它连不上，必须留一条不依赖引擎的路。
+
+    /** 控制台「权限」页的行：id / 标题 / 说明。原生页与网页设置页共用同一份文字。 */
+    private static final String[][] CON_PERMS = {
+        {"storage", "所有文件访问", "读写 /sdcard，AI 才能碰你的文件"},
+        {"notify", "通知", "AI 发通知、定时任务提醒"},
+        {"overlay", "悬浮窗", "黑鲸鱼悬浮窗 / 虚拟屏预览"},
+        {"battery", "电池优化", "设为「不限制」，否则切后台引擎会被杀"},
+        {"root", "root（超级用户）", "替代 Shizuku 跑特权命令：装应用 / 改设置 / 虚拟屏点击 / 任意 shell"},
+        {"shizuku", "Shizuku（免 root 特权通道）", "有 root 时用 root；没 root 时装 Shizuku 走同一套能力"},
+        {"a11y", "无障碍服务（读屏 / 点屏）", "android_screen / tap / type / see（不需要 root 或 Shizuku）"},
+        {"install", "安装未知应用", "android_package 装 APK 用"},
+    };
+
+    /** 网页设置页要的全部状态，一次答完（页面每 2 秒拉一次）。 */
+    private String ctlStateJson() {
+        org.json.JSONObject o = new org.json.JSONObject();
+        try {
+            o.put("version", conVersionLabel());
+
+            boolean ready = conFilesReady();
+            org.json.JSONObject ex = new org.json.JSONObject();
+            ex.put("ready", ready);
+            ex.put("busy", extracting);
+            ex.put("state", extracting ? "正在解压…" : (ready ? "已解压" : "未解压"));
+            ex.put("meta", conExtractMetaText(ready));
+            o.put("extract", ex);
+
+            boolean run = conEngineRunning();
+            boolean booting = conEngineBooting();
+            boolean busy = !run && (booting || starting);
+            org.json.JSONObject en = new org.json.JSONObject();
+            en.put("running", run);
+            en.put("booting", booting);
+            en.put("busy", busy);
+            en.put("state", run ? "引擎运行中" : (busy ? "启动中…" : "未启动"));
+            en.put("meta", conEngineMetaText(run, ready, busy));
+            o.put("engine", en);
+
+            boolean safe = safeModeActive();
+            int fails = bootFailures();
+            String rescueDesc;
+            if (safe) {
+                rescueDesc = "已旁置 profile 的用户层，用出厂配置启动——会话 / 凭证 / 设置都还在。"
+                        + "修好之后再「退出安全模式」把用户层还回去。";
+            } else if (fails >= BOOT_FAIL_HINT_AT) {
+                rescueDesc = "连续 " + fails + " 次启动失败。很可能是装的插件把配置文件写坏了——"
+                        + "用「安全模式启动」跳过用户层，不丢任何数据。";
+            } else {
+                rescueDesc = "引擎起不来时，用安全模式跳过用户层启动（不丢数据）；也可以随时导出全部数据做备份。";
+            }
+            org.json.JSONObject rs = new org.json.JSONObject();
+            rs.put("safeMode", safe);
+            rs.put("fails", fails);
+            rs.put("warn", !safe && fails >= BOOT_FAIL_HINT_AT);
+            rs.put("desc", rescueDesc);
+            o.put("rescue", rs);
+
+            org.json.JSONObject th = new org.json.JSONObject();
+            int mode = themeMode();
+            th.put("mode", mode);
+            th.put("label", themeModeLabel(mode));
+            o.put("theme", th);
+
+            org.json.JSONObject re = new org.json.JSONObject();
+            String eff = conReasoningEffort();
+            re.put("effort", eff);
+            re.put("label", conReasoningLabel(eff));
+            o.put("reasoning", re);
+
+            org.json.JSONObject pm = new org.json.JSONObject();
+            pm.put("summary", conPermSummary());
+            org.json.JSONArray pr = new org.json.JSONArray();
+            for (int i = 0; i < CON_PERMS.length; i++) {
+                String pid = CON_PERMS[i][0];
+                boolean ok = conPermOk(pid);
+                boolean noRoot = "root".equals(pid) && !rootDetected;
+                org.json.JSONObject row = new org.json.JSONObject();
+                row.put("id", pid);
+                row.put("title", CON_PERMS[i][1]);
+                row.put("desc", CON_PERMS[i][2]);
+                row.put("ok", ok);
+                row.put("disabled", noRoot);
+                row.put("state", ok ? "已授权" : (noRoot ? "本机无 root" : "未授权"));
+                pr.put(row);
+            }
+            pm.put("rows", pr);
+            o.put("perm", pm);
+
+            org.json.JSONObject ws = new org.json.JSONObject();
+            String wp = workspacePath();
+            ws.put("path", wp == null ? "" : wp);
+            ws.put("unset", wp == null || wp.isEmpty());
+            o.put("workspace", ws);
+
+            org.json.JSONObject pg = new org.json.JSONObject();
+            pg.put("summary", conPlugSummary());
+            org.json.JSONArray pl = new org.json.JSONArray();
+            for (int i = 0; i < CON_PLUGINS.length; i++) {
+                org.json.JSONObject row = new org.json.JSONObject();
+                row.put("id", CON_PLUGINS[i][0]);
+                row.put("title", "dsh-" + CON_PLUGINS[i][0]);
+                row.put("desc", CON_PLUGINS[i][1]);
+                row.put("on", !conPluginDisabled(CON_PLUGINS[i][0]));
+                pl.put(row);
+            }
+            pg.put("rows", pl);
+            o.put("plugins", pg);
+
+            org.json.JSONObject be = new org.json.JSONObject();
+            be.put("installed", BuildEnvInstaller.isInstalled(this));
+            be.put("summary", conBuildEnvSummary());
+            be.put("statusText", BuildEnvInstaller.statusText(this));
+            be.put("installing", beInstalling);
+            be.put("stage", beStage == null ? "" : beStage);
+            be.put("resolving", beResolving);
+            be.put("err", beResolveErr == null ? "" : beResolveErr);
+            org.json.JSONArray src = new org.json.JSONArray();
+            if (beSources != null) {
+                for (int i = 0; i < beSources.size(); i++) {
+                    org.json.JSONObject s = new org.json.JSONObject();
+                    s.put("index", i);
+                    s.put("label", beSources.get(i).label);
+                    src.put(s);
+                }
+            }
+            be.put("sources", src);
+            o.put("buildEnv", be);
+
+            // v1.49：内核切换 —— 状态给网页控制台（dsh-android-console）的「引擎内核」页用。
+            org.json.JSONObject kn = new org.json.JSONObject();
+            String kActive = KernelStore.activeVersion(this);
+            kn.put("active", kActive == null ? "" : kActive);
+            kn.put("activeText", kActive == null ? "内置内核" : kActive);
+            org.json.JSONArray kIn = new org.json.JSONArray();
+            java.util.List<KernelStore.Bundle> kInst = KernelStore.installed(this);
+            for (int i = 0; i < kInst.size(); i++) {
+                KernelStore.Bundle kb = kInst.get(i);
+                org.json.JSONObject r = new org.json.JSONObject();
+                r.put("version", kb.version);
+                r.put("label", kb.label == null ? "" : kb.label);
+                r.put("sizeBytes", kb.sizeBytes);
+                r.put("active", kb.active);
+                kIn.put(r);
+            }
+            kn.put("installed", kIn);
+            org.json.JSONArray kSt = new org.json.JSONArray();
+            java.util.List<KernelStore.Bundle> kStore = KernelStore.scanStore(this);
+            for (int i = 0; i < kStore.size(); i++) {
+                KernelStore.Bundle kb = kStore.get(i);
+                org.json.JSONObject r = new org.json.JSONObject();
+                r.put("version", kb.version);
+                r.put("label", kb.label == null ? "" : kb.label);
+                r.put("sizeBytes", kb.sizeBytes);
+                r.put("installed", kb.installed);
+                r.put("note", kb.note == null ? "" : kb.note);
+                kSt.put(r);
+            }
+            kn.put("store", kSt);
+            kn.put("storeDir", KernelStore.STORE);
+            o.put("kernel", kn);
+
+            org.json.JSONObject lg = new org.json.JSONObject();
+            lg.put("summary", conLogSummary());
+            lg.put("path", conLogFile().getAbsolutePath());
+            o.put("log", lg);
+
+            org.json.JSONObject vo = new org.json.JSONObject();
+            VoiceManager vm = VoiceManager.get(this);
+            vo.put("hotwordEnabled", vm.isHotwordEnabled());
+            vo.put("wakeWords", vm.getWakeWords());
+            vo.put("summary", (vm.isHotwordEnabled() ? "语音唤醒已开启" : "语音唤醒已关闭") + " · 唤醒词: " + vm.getWakeWords());
+            o.put("voice", vo);
+
+            org.json.JSONObject lf = new org.json.JSONObject();
+            readLifeDbState(lf);
+            o.put("life", lf);
+            o.put("schedules", ScheduleBridge.list(this));
+        } catch (Throwable t) {
+            try { o.put("error", String.valueOf(t.getMessage())); } catch (Throwable ignored) {}
+        }
+        return o.toString();
+    }
+
+    /** 桥入口：执行一个控制台动作。动作本身异步，立刻回 ok（失败会 Toast）。 */
+    private String ctlAction(final String id, final String arg) {
+        try {
+            ui.post(new Runnable() { @Override public void run() {
+                if (trustedWebDocument) ctlActionOnUi(id, arg);
+            } });
+            return "{\"ok\":true}";
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"msg\":" + org.json.JSONObject.quote(String.valueOf(t.getMessage())) + "}";
+        }
+    }
+
+    /** 动作表。全部在主线程执行；二次确认由网页那一侧做（原生弹窗这里看不见）。 */
+    private void ctlActionOnUi(String id, String arg) {
+        try {
+            if ("extract".equals(id)) { conExtractClick(); return; }
+            if ("engine.start".equals(id)) {
+                if (conEngineRunning()) { enterMainUi(); return; }
+                engineStoppedByUser = false;
+                engineStartAborted = false;
+                conEngineClick();
+                return;
+            }
+            if ("engine.restart".equals(id)) { conRestartEngine(); return; }
+            if ("engine.stop".equals(id)) { conStopEngine(); return; }
+            if ("rescue.toggle".equals(id)) {
+                if (safeModeActive()) conExitSafeMode(); else conSafeMode();
+                return;
+            }
+            if ("backup.export".equals(id)) { conBackupExport(); return; }
+            if ("backup.import".equals(id)) { conBackupImport(); return; }
+            if ("backup.snapshotImport".equals(id)) { conSnapshotImport(); return; }
+            if ("snapshot".equals(id)) { triggerSnapshotBackup(); return; }
+            if ("notification.history".equals(id)) { showNotificationHistory(); return; }
+            if ("log.view".equals(id)) { conViewLog(); return; }
+            if ("log.share".equals(id)) { conShareLog(); return; }
+            if ("log.clear".equals(id)) { conClearLogNow(); return; }
+            if ("theme.set".equals(id)) {
+                int mode = 0;
+                try { mode = Integer.parseInt(arg); } catch (Throwable ignored) {}
+                if (mode < 0 || mode > 2 || mode == themeMode()) return;
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt("theme_mode", mode).apply();
+                recreate();   // 主题（含 WebView 的 prefers-color-scheme）随 onCreate 重新生效
+                return;
+            }
+            if ("reasoning.set".equals(id)) {
+                conSetReasoningEffort(arg);
+                return;
+            }
+            if ("open.url".equals(id)) {
+                if (arg != null && (arg.startsWith("https://") || arg.startsWith("http://")
+                        || arg.startsWith("mqqapi://"))) {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(arg)));
+                    } catch (Throwable t) {
+                        conToast("无法打开链接: " + t.getMessage());
+                    }
+                }
+                return;
+            }
+            if ("schedule.cancel".equals(id)) {
+                org.json.JSONObject request = new org.json.JSONObject(arg);
+                org.json.JSONObject result = ScheduleBridge.cancel(this, request.optString("source", "app"), request.optString("id", ""));
+                conToast(result.optBoolean("ok") ? result.optString("warning", "已取消后续触发") : result.optString("error", "取消失败"));
+                return;
+            }
+            if ("update.check".equals(id)) { checkForUpdate(true); return; }
+            if ("perm.action".equals(id)) { conPermAction(arg); return; }
+            if ("workspace.change".equals(id)) { onWorkspaceRowClick(); return; }
+            if ("plugin.toggle".equals(id)) {
+                int c = arg == null ? -1 : arg.lastIndexOf(':');
+                if (c <= 0) return;
+                conSetPluginDisabled(arg.substring(0, c), !"1".equals(arg.substring(c + 1)));
+                return;
+            }
+            if ("buildenv.resolve".equals(id)) { conBuildEnvResolve(); return; }
+            if ("buildenv.cancel".equals(id)) { BuildEnvInstaller.cancel(); return; }
+            // 内核切换（网页控制台「引擎内核」页）：确认弹层在网页侧做，这里只管执行。
+            if ("kernel.install".equals(id)) {
+                java.util.List<KernelStore.Bundle> store = KernelStore.scanStore(this);
+                for (int i = 0; i < store.size(); i++) {
+                    KernelStore.Bundle b = store.get(i);
+                    if (b.version.equals(arg)) {
+                        if (b.installed) { conToast("这个内核已经装过了"); return; }
+                        conKernelInstall(b);
+                        return;
+                    }
+                }
+                conToast("找不到内核包: " + arg);
+                return;
+            }
+            if ("kernel.switch".equals(id)) { conKernelSwitchDirect(arg); return; }
+            if ("kernel.remove".equals(id)) { conKernelRemoveDirect(arg); return; }
+            if ("kernel.deactivate".equals(id)) {
+                KernelStore.deactivate(this);
+                conToast("已回退到内置内核，下次启动引擎生效");
+                return;
+            }
+            if ("buildenv.install".equals(id)) {
+                int idx = -1;
+                try { idx = Integer.parseInt(arg); } catch (Throwable ignored) {}
+                if (beSources != null && idx >= 0 && idx < beSources.size()) startBuildEnvInstall(beSources.get(idx));
+                else conToast("来源已失效，请重新查询");
+                return;
+            }
+            if ("voice.hotword.toggle".equals(id)) {
+                boolean enable = "1".equals(arg) || "true".equalsIgnoreCase(arg);
+                VoiceManager.get(this).setHotwordEnabled(enable);
+                conToast(enable ? "已开启语音热词唤醒" : "已关闭语音热词唤醒");
+                return;
+            }
+            if ("voice.wakewords.set".equals(id)) {
+                VoiceManager.get(this).setWakeWords(arg);
+                conToast("自定义唤醒词已保存: " + arg);
+                return;
+            }
+            if ("voice.test.tone".equals(id)) {
+                VoiceManager.get(this).playPromptTone();
+                return;
+            }
+            if ("voice.test.tts".equals(id)) {
+                VoiceManager.get(this).speak("DeepSeek 语音播报测试正常，随时听候您的指令。", false);
+                return;
+            }
+            if ("voice.test.listen".equals(id)) {
+                VoiceManager.get(this).triggerVoiceInteraction();
+                return;
+            }
+            if ("life.daemon.start".equals(id)) {
+                runLifeToolCommand("daemon", "start");
+                conToast("正在启动生活助理守护进程…");
+                return;
+            }
+            if ("life.daemon.stop".equals(id)) {
+                runLifeToolCommand("daemon", "stop");
+                conToast("已停止生活助理守护进程");
+                return;
+            }
+            if ("life.daemon.restart".equals(id)) {
+                runLifeToolCommand("daemon", "restart");
+                conToast("正在重启生活助理守护进程…");
+                return;
+            }
+            if ("life.pkg.pick".equals(id)) {
+                runLifeToolCommand("pkg", "pick", arg);
+                conToast("已标记包裹为已取件");
+                return;
+            }
+            if ("life.code.copy".equals(id)) {
+                copyToClipboardDirect(arg);
+                conToast("验证码 [" + arg + "] 已复制到剪贴板");
+                return;
+            }
+            if ("life.scan".equals(id)) {
+                runLifeToolCommand("scan", "50");
+                conToast("正在回溯扫描最近 50 条历史通知…");
+                return;
+            }
+            if ("life.task.run".equals(id)) {
+                runLifeToolCommand("cron", "run", arg);
+                conToast("已触发任务: " + arg);
+                return;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "ctlAction " + id, t);
+            conToast("操作失败：" + t.getMessage());
+        }
+    }
+
+    private void copyToClipboardDirect(String text) {
+        try {
+            android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (cm != null) {
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("code", text));
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private void runLifeToolCommand(final String... args) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    File node = new File(getFilesDir(), "payload/runtime/bin/node");
+                    File tool = new File(getFilesDir(), "payload/dshhome/skills/dsh-life/scripts/life.js");
+                    if (!tool.isFile()) tool = new File("/sdcard/DeepSeekHarness/tools/life.js");
+                    if (!tool.exists()) return;
+                    java.util.List<String> cmd = new java.util.ArrayList<>();
+                    cmd.add(node.getAbsolutePath());
+                    cmd.add(tool.getAbsolutePath());
+                    for (String a : args) cmd.add(a);
+                    ProcessBuilder pb = new ProcessBuilder(cmd);
+                    pb.redirectErrorStream(true);
+                    Process p = pb.start();
+                    p.waitFor();
+                } catch (Throwable ignored) {}
+            }
+        }).start();
+    }
+
+    private void readLifeDbState(org.json.JSONObject lf) {
+        try {
+            // 1. 守护进程存活检查
+            File pidFile = new File(getFilesDir(), "tmp/life-daemon.pid");
+            boolean daemonRunning = false;
+            if (pidFile.exists()) {
+                try {
+                    String pidStr = readFileText(pidFile).trim();
+                    int pid = Integer.parseInt(pidStr);
+                    if (pid > 0 && new File("/proc/" + pid).exists()) {
+                        daemonRunning = true;
+                    }
+                } catch (Throwable ignored) {}
+            }
+            lf.put("daemonRunning", daemonRunning);
+
+            // 2. 读取 SQLite
+            File dbFile = new File("/sdcard/DeepSeekHarness/life.db");
+            if (!dbFile.exists()) {
+                lf.put("ready", false);
+                lf.put("summary", (daemonRunning ? "🟢 守护中" : "⚪ 未启动") + " · 数据库就绪中");
+                return;
+            }
+            lf.put("ready", true);
+
+            android.database.sqlite.SQLiteDatabase db = null;
+            try {
+                db = android.database.sqlite.SQLiteDatabase.openDatabase(
+                        dbFile.getAbsolutePath(), null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY);
+
+                // A. 待取包裹
+                org.json.JSONArray pkgs = new org.json.JSONArray();
+                android.database.Cursor cPkg = db.rawQuery(
+                        "SELECT id, pickup_code, station, carrier, created_at FROM packages WHERE status = 'pending' ORDER BY id DESC LIMIT 10", null);
+                while (cPkg.moveToNext()) {
+                    org.json.JSONObject p = new org.json.JSONObject();
+                    p.put("id", cPkg.getInt(0));
+                    p.put("pickup_code", cPkg.getString(1));
+                    p.put("station", cPkg.getString(2));
+                    p.put("carrier", cPkg.getString(3));
+                    p.put("created_at", cPkg.getLong(4));
+                    pkgs.put(p);
+                }
+                cPkg.close();
+                lf.put("packages", pkgs);
+
+                // B. 最近验证码
+                org.json.JSONArray codes = new org.json.JSONArray();
+                android.database.Cursor cCode = db.rawQuery(
+                        "SELECT id, code, source, created_at FROM verification_codes ORDER BY id DESC LIMIT 5", null);
+                while (cCode.moveToNext()) {
+                    org.json.JSONObject cd = new org.json.JSONObject();
+                    cd.put("id", cCode.getInt(0));
+                    cd.put("code", cCode.getString(1));
+                    cd.put("source", cCode.getString(2));
+                    cd.put("created_at", cCode.getLong(3));
+                    codes.put(cd);
+                }
+                cCode.close();
+                lf.put("codes", codes);
+
+                // C. 今日收支统计
+                long todayStart = getTodayStartMillis();
+                double totalExp = 0.0;
+                double totalInc = 0.0;
+                android.database.Cursor cSum = db.rawQuery(
+                        "SELECT type, SUM(amount) FROM transactions WHERE created_at >= ? GROUP BY type",
+                        new String[]{String.valueOf(todayStart)});
+                while (cSum.moveToNext()) {
+                    String type = cSum.getString(0);
+                    double amt = cSum.getDouble(1);
+                    if ("expense".equalsIgnoreCase(type)) totalExp = amt;
+                    else if ("income".equalsIgnoreCase(type)) totalInc = amt;
+                }
+                cSum.close();
+                lf.put("todayExpense", totalExp);
+                lf.put("todayIncome", totalInc);
+
+                // D. 最近交易明细
+                org.json.JSONArray txs = new org.json.JSONArray();
+                android.database.Cursor cTx = db.rawQuery(
+                        "SELECT id, type, amount, merchant, category, account, created_at FROM transactions ORDER BY id DESC LIMIT 10", null);
+                while (cTx.moveToNext()) {
+                    org.json.JSONObject tx = new org.json.JSONObject();
+                    tx.put("id", cTx.getInt(0));
+                    tx.put("type", cTx.getString(1));
+                    tx.put("amount", cTx.getDouble(2));
+                    tx.put("merchant", cTx.getString(3));
+                    tx.put("category", cTx.getString(4));
+                    tx.put("account", cTx.getString(5));
+                    tx.put("created_at", cTx.getLong(6));
+                    txs.put(tx);
+                }
+                cTx.close();
+                lf.put("transactions", txs);
+
+                // E. 活跃定时任务
+                org.json.JSONArray tasks = new org.json.JSONArray();
+                android.database.Cursor cTask = db.rawQuery(
+                        "SELECT id, name, cron_expr, action_type, enabled, last_status, next_run_at FROM scheduled_tasks ORDER BY id ASC", null);
+                while (cTask.moveToNext()) {
+                    org.json.JSONObject t = new org.json.JSONObject();
+                    t.put("id", cTask.getString(0));
+                    t.put("name", cTask.getString(1));
+                    t.put("cron_expr", cTask.getString(2));
+                    t.put("action_type", cTask.getString(3));
+                    t.put("enabled", cTask.getInt(4) == 1);
+                    t.put("last_status", cTask.getString(5));
+                    t.put("next_run_at", cTask.getLong(6));
+                    tasks.put(t);
+                }
+                cTask.close();
+                lf.put("tasks", tasks);
+
+                // F. 摘要
+                String summary = (daemonRunning ? "🟢 守护中" : "⚪ 未启动") + " · 今日支出 ¥" + String.format(java.util.Locale.US, "%.2f", totalExp)
+                        + (pkgs.length() > 0 ? " · 📦 待取快递 " + pkgs.length() + " 件" : "");
+                lf.put("summary", summary);
+            } finally {
+                if (db != null) db.close();
+            }
+        } catch (Throwable t) {
+            try { lf.put("error", t.getMessage()); } catch (Throwable ignored) {}
+        }
+    }
+
+    private long getTodayStartMillis() {
+        java.util.Calendar cal = java.util.Calendar.getInstance();
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0);
+        cal.set(java.util.Calendar.MINUTE, 0);
+        cal.set(java.util.Calendar.SECOND, 0);
+        cal.set(java.util.Calendar.MILLISECOND, 0);
+        return cal.getTimeInMillis();
+    }
+
+    private void showConsole() {
+        // 原生控制台已彻底弃用，统一直接启动引擎
+        startEngine();
+    }
+
+    private void buildConsoleLayer() {
+        if (engineRoot == null) return;
+        ScrollView sc = new ScrollView(this);
+        sc.setBackgroundColor(cBg());
+        sc.setFillViewport(true);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(dp(18), dp(24), dp(18), dp(24));
+        sc.addView(col, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        consoleBody = col;
+        consoleLayer = sc;
+        engineRoot.addView(sc, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+    }
+
+    private void startConsoleTick() {
+        if (conTick == null) conTick = new Handler(Looper.getMainLooper());
+        conTick.removeCallbacks(consoleTick);
+        conTick.postDelayed(consoleTick, 900);
+    }
+
+    /** 控制台里显示一句状态：解压阶段进解压块，否则进引擎块。 */
+    private void conSay(String s) {
+        if (s == null) return;
+        if (extracting) { conExtractMsg = s; if (conExMeta != null) conExMeta.setText(s); }
+        else if (conEnMeta != null) conEnMeta.setText(s);
+    }
+
+    // ---------- 通用控件 ----------
+    private TextView cText(String s, float sp, int color, boolean bold) {
+        TextView t = new TextView(this);
+        t.setText(s);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        t.setTextColor(color);
+        if (bold) t.setTypeface(null, android.graphics.Typeface.BOLD);
+        return t;
+    }
+
+    /** 圆角形状（替代系统 Button/ProgressBar 自带背景，避免 ColorOS 上灰底、裁字、颜色不对）。 */
+    private android.graphics.drawable.GradientDrawable cShape(int fill, int stroke, int strokeW, int radius) {
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+        g.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
+        g.setColor(fill);
+        g.setCornerRadius(dp(radius));
+        if (strokeW > 0) g.setStroke(dp(strokeW), stroke);
+        return g;
+    }
+
+    private int cTrack() { return Color.parseColor(isDark() ? "#141b2b" : "#eef1f6"); }
+
+    /** 自绘按钮：内边距固定、单行、超长省略号，不再出现“文字超出按钮”的情况。 */
+    private Button cButton(String label, boolean primary) {
+        Button b = new Button(this);
+        b.setAllCaps(false);
+        b.setText(label);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, primary ? 13.5f : 12.5f);
+        b.setSingleLine(true);
+        b.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        b.setMinWidth(dp(primary ? 96 : 68));
+        b.setMinimumWidth(dp(primary ? 96 : 68));
+        b.setPadding(dp(16), dp(9), dp(16), dp(9));
+        b.setIncludeFontPadding(false);
+        if (primary) {
+            b.setTextColor(Color.WHITE);
+            b.setBackground(cShape(cAccent(), cAccent(), 0, 8));
+        } else {
+            // 次按钮：强调色描边 + 强调色文字（之前用灰底，看着像“禁用”）
+            b.setTextColor(cAccent());
+            b.setBackground(cShape(isDark() ? 0x1A4D6BFE : 0x144D6BFE, cAccent(), 1, 8));
+        }
+        return b;
+    }
+
+    /** 统一“禁用”外观：自绘背景下系统不会自动变灰，必须手动降透明度。 */
+    private void cSetEnabled(Button b, boolean on) {
+        if (b == null) return;
+        b.setEnabled(on);
+        b.setAlpha(on ? 1f : 0.38f);
+    }
+
+    /** 进度条（自绘：轨道 + 强调色填充，风格与页面一致）。 */
+    private void conSetProgress(int pct) {
+        if (conFill == null || conSpacer == null) return;
+        int p = Math.max(0, Math.min(100, pct));
+        LinearLayout.LayoutParams f = (LinearLayout.LayoutParams) conFill.getLayoutParams();
+        LinearLayout.LayoutParams s = (LinearLayout.LayoutParams) conSpacer.getLayoutParams();
+        f.weight = Math.max(p, 0.01f);
+        s.weight = Math.max(100 - p, 0.01f);
+        conFill.setLayoutParams(f);
+        conSpacer.setLayoutParams(s);
+    }
+
+    /** 插件开关（自绘小胶囊，比系统 Switch 更可控且与页面同风格）。 */
+    private TextView cToggle(final String id, boolean on) {
+        final TextView t = new TextView(this);
+        t.setTag(Boolean.valueOf(on));
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        t.setPadding(dp(12), dp(6), dp(12), dp(6));
+        t.setSingleLine(true);
+        t.setGravity(Gravity.CENTER);
+        conTogglePaint(t);
+        t.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                boolean now = !((Boolean) t.getTag()).booleanValue();
+                t.setTag(Boolean.valueOf(now));
+                conTogglePaint(t);
+                conSetPluginDisabled(id, !now);
+                conToast("dsh-" + id + (now ? " 已启用" : " 已关闭") + "（重启引擎生效）");
+            }
+        });
+        return t;
+    }
+
+    private void conTogglePaint(TextView t) {
+        boolean on = ((Boolean) t.getTag()).booleanValue();
+        t.setText(on ? "已启用" : "已关闭");
+        t.setTextColor(on ? cGreen() : cSub());
+        t.setBackground(cShape(on ? (isDark() ? 0x241F9D6B : 0x1A1F9D6B) : 0x00000000,
+                on ? cGreen() : cLine(), 1, 12));
+    }
+
+    private LinearLayout.LayoutParams cTop(int topMargin) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = topMargin;
+        return lp;
+    }
+
+    private View cSep(int topMargin) {
+        View v = new View(this);
+        v.setBackgroundColor(cLine());
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
+        lp.topMargin = topMargin;
+        v.setLayoutParams(lp);
+        return v;
+    }
+
+    private View cNavRow(String title, String sub, String value, final int page) {
+        LinearLayout left = new LinearLayout(this);
+        left.setOrientation(LinearLayout.VERTICAL);
+        left.addView(cText(title, 14f, cText(), false));
+        if (sub != null && sub.length() > 0) left.addView(cText(sub, 11f, cSub(), false));
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(15), 0, dp(15));
+        row.addView(left, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        if (value != null && value.length() > 0) row.addView(cText(value, 11f, cSub(), false));
+        row.addView(cText("›", 14f, cSub(), false));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { consolePage = page; renderConsole(); }
+        });
+        return row;
+    }
+
+    private View conBackRow(String title) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        Button back = cButton("‹ 控制台", false);
+        back.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        back.setPadding(0, dp(4), dp(8), dp(4));
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { consolePage = 0; renderConsole(); }
+        });
+        row.addView(back);
+        row.addView(cText(title, 12.5f, cSub(), false));
+        return row;
+    }
+
+    private void conToast(final String s) {
+        ui.post(new Runnable() { @Override public void run() {
+            try { android.widget.Toast.makeText(MainActivity.this, s, android.widget.Toast.LENGTH_SHORT).show(); } catch (Throwable ignored) {}
+        }});
+    }
+
+    // ---------- 页面渲染 ----------
+    private void renderConsole() {
+        if (consoleBody == null) return;
+        consoleBody.removeAllViews();
+        if (consolePage == 1) { renderConsolePerm(); return; }
+        if (consolePage == 2) { renderConsolePlug(); return; }
+        if (consolePage == 3) { renderConsoleLog(); return; }
+        if (consolePage == 4) { renderConsoleBuildEnv(); return; }
+        if (consolePage == 5) { renderConsoleKernel(); return; }
+        if (consolePage == 4) { renderConsoleBuildEnv(); return; }
+        renderConsoleMain();
+    }
+
+    private void renderConsoleMain() {
+        LinearLayout col = consoleBody;
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.BOTTOM);
+        top.addView(cText("DEEPSEEK HARNESS", 10f, cSub(), false),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        top.addView(cText(conVersionLabel(), 10f, cSub(), false));
+        col.addView(top);
+
+        // ① 解压文件
+        col.addView(cSep(dp(16)));
+        conExState = cText("", 15f, cText(), false);
+        col.addView(conExState, cTop(dp(16)));
+        conExMeta = cText("", 11f, cSub(), false);
+        conExMeta.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (!conFilesReady()) return;
+                consoleDetailOpen = !consoleDetailOpen;
+                refreshConsole();
+            }
+        });
+        col.addView(conExMeta, cTop(dp(7)));
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setBackground(cShape(cTrack(), 0, 0, 2));
+        conFill = new View(this);
+        conFill.setBackgroundColor(cAccent());
+        conSpacer = new View(this);
+        bar.addView(conFill, new LinearLayout.LayoutParams(0, dp(4), 1f));
+        bar.addView(conSpacer, new LinearLayout.LayoutParams(0, dp(4), 0f));
+        bar.setVisibility(View.GONE);
+        conBar = bar;
+        col.addView(bar, cTop(dp(10)));
+        conDetailBox = conExtractDetail();
+        col.addView(conDetailBox);
+        conExBtn = cButton("解压文件", true);
+        conExBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conExtractClick(); }
+        });
+        col.addView(conExBtn, cTop(dp(12)));
+
+        // ② 启动引擎
+        col.addView(cSep(dp(18)));
+        conEnState = cText("", 15f, cText(), false);
+        col.addView(conEnState, cTop(dp(16)));
+        conEnMeta = cText("", 11f, cSub(), false);
+        col.addView(conEnMeta, cTop(dp(7)));
+        LinearLayout enActs = new LinearLayout(this);
+        enActs.setOrientation(LinearLayout.HORIZONTAL);
+        conEnBtn = cButton("启动引擎", true);
+        conEnBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conEngineClick(); }
+        });
+        enActs.addView(conEnBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        conEnRestart = cButton("重启", false);
+        conEnRestart.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conRestartEngine(); }
+        });
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rlp.leftMargin = dp(8);
+        enActs.addView(conEnRestart, rlp);
+        conEnStop = cButton("停止", false);
+        conEnStop.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conStopEngine(); }
+        });
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.leftMargin = dp(8);
+        enActs.addView(conEnStop, slp);
+        col.addView(enActs, cTop(dp(12)));
+
+        // ②·5 救援（安全模式 / 备份）
+        // 解决的真实痛点：装的插件把 profile 的 patch 文件写成非法 YAML → 引擎直接拒启，
+        // 而「修」又得先让引擎跑起来 → 形成死结，过去只能清数据。
+        col.addView(cSep(dp(18)));
+        boolean safe = safeModeActive();
+        int fails = bootFailures();
+        col.addView(cText(safe ? "安全模式：已开启" : "救援", 15f, cText(), false), cTop(dp(16)));
+        String rescueDesc;
+        if (safe) {
+            rescueDesc = "已旁置 profile 的用户层，用出厂配置启动——会话/凭证/设置都还在。"
+                    + "修好之后再「退出安全模式」把用户层还回去。";
+        } else if (fails >= BOOT_FAIL_HINT_AT) {
+            rescueDesc = "连续 " + fails + " 次启动失败。很可能是装的插件把配置文件写坏了——"
+                    + "用「安全模式启动」跳过用户层，不丢任何数据。";
+        } else {
+            rescueDesc = "引擎起不来时，用安全模式跳过用户层启动（不丢数据）；"
+                    + "也可以随时导出全部数据做备份。";
+        }
+        col.addView(cText(rescueDesc, 11f, fails >= BOOT_FAIL_HINT_AT && !safe ? cRed() : cSub(), false), cTop(dp(7)));
+        LinearLayout rsActs = new LinearLayout(this);
+        rsActs.setOrientation(LinearLayout.HORIZONTAL);
+        Button safeBtn = cButton(safe ? "退出安全模式" : "安全模式启动", false);
+        safeBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { if (safeModeActive()) conExitSafeMode(); else conSafeMode(); }
+        });
+        rsActs.addView(safeBtn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Button expBtn = cButton("导出全部数据", true);
+        expBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conBackupExport(); }
+        });
+        LinearLayout.LayoutParams elp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        elp.leftMargin = dp(8);
+        rsActs.addView(expBtn, elp);
+        col.addView(rsActs, cTop(dp(12)));
+        Button impBtn = cButton("从备份导入还原", false);
+        impBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conBackupImport(); }
+        });
+        col.addView(impBtn, cTop(dp(8)));
+        // 两种备份格式各走各的门：上面那个只吃「导出全部数据」的 zip，
+        // 这里吃时光机生成的 .dshbackup（长得多、内容是全站资产 + 会话 + 记忆库）。
+        Button snapImpBtn = cButton("从时光机快照还原", false);
+        snapImpBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conSnapshotImport(); }
+        });
+        col.addView(snapImpBtn, cTop(dp(8)));
+
+        // ③ 三个入口
+        col.addView(cSep(dp(20)));
+        col.addView(cNavRow("授予权限", "存储 · 通知 · 悬浮窗 · 电池 · root · Shizuku · 无障碍", conPermSummary(), 1));
+        col.addView(cSep(0));
+        col.addView(cNavRow("插件", "关掉用不到的，省上下文", conPlugSummary(), 2));
+        // 这个项目的核心价值是"能在手机上自己编译自己出包"，那套环境 342MB 不塞进主包，按需下载
+        col.addView(cNavRow("内核", "切换引擎内核（实验功能）：内置内核永远兜底", conKernelSummary(), 5));
+        col.addView(cNavRow("自建环境", "在手机上自己编译 / 打包 / 签名（可选，约 193MB）", conBuildEnvSummary(), 4));
+        col.addView(cSep(0));
+        LinearLayout logActs = new LinearLayout(this);
+        logActs.setOrientation(LinearLayout.HORIZONTAL);
+        Button lv = cButton("查看", false);
+        lv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        lv.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conViewLog(); }
+        });
+        Button le = cButton("分享", false);
+        le.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        le.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conShareLog(); }
+        });
+        logActs.addView(lv);
+        logActs.addView(le);
+        // v1.15.1：清空入口先前只在日志子页里，主页面看不到（用户反馈"清空日志还是没有"）。
+        // 这里补一个「清空」按钮，主页面一键直达；日志行本身也仍可点进日志页。
+        Button lc = cButton("清空", false);
+        lc.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        lc.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conClearLog(); }
+        });
+        logActs.addView(lc);
+        LinearLayout logLeft = new LinearLayout(this);
+        logLeft.setOrientation(LinearLayout.VERTICAL);
+        logLeft.addView(cText("日志", 14f, cText(), false));
+        logLeft.addView(cText(conLogSummary(), 11f, cSub(), false));
+        LinearLayout logRow = new LinearLayout(this);
+        logRow.setOrientation(LinearLayout.HORIZONTAL);
+        logRow.setGravity(Gravity.CENTER_VERTICAL);
+        logRow.setPadding(0, dp(12), 0, dp(12));
+        logRow.addView(logLeft, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        logRow.addView(logActs);
+        // v1.15.1 修复：原来这一行只有「查看 / 分享」两个快捷按钮，**没有任何入口**
+        // 把 consolePage 设为 3 —— 于是渲染日志页的 renderConsoleLog()（含「清空日志」）
+        // 成了不可达的死代码，用户找不到清空入口。现在整行可点进入日志页，并补 › 提示。
+        logRow.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { consolePage = 3; renderConsole(); }
+        });
+        logRow.addView(cText("›", 14f, cSub(), false));
+        col.addView(logRow);
+        col.addView(cSep(0));
+
+        // 时光机全站备份（一键打包全站会话+记忆库+配置+技能）
+        LinearLayout snapRow = new LinearLayout(this);
+        snapRow.setOrientation(LinearLayout.HORIZONTAL);
+        snapRow.setGravity(Gravity.CENTER_VERTICAL);
+        snapRow.setPadding(0, dp(12), 0, dp(12));
+        LinearLayout snapLeft = new LinearLayout(this);
+        snapLeft.setOrientation(LinearLayout.VERTICAL);
+        snapLeft.addView(cText("时光机全站备份", 14f, cText(), false));
+        snapLeft.addView(cText("一键打包记忆库、所有历史会话与配置 (存至 /sdcard/Download/DSH_Backups)", 11f, cSub(), false));
+        snapRow.addView(snapLeft, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button snapBtn = cButton("立即备份", false);
+        snapBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        snapBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { triggerSnapshotBackup(); }
+        });
+        snapRow.addView(snapBtn);
+        col.addView(snapRow);
+        col.addView(cSep(0));
+
+        conFoot = cText("就绪", 11f, cSub(), false);
+        col.addView(conFoot, cTop(dp(14)));
+        col.addView(cText("换内核版本 / 覆盖安装后需要重新解压；平时只用到「启动引擎」。", 11f, cSub(), false), cTop(dp(6)));
+        // v1.13.12：界面主题设置（跟随系统/浅色/深色）。前端「跟随系统」看的就是这里的生效主题。
+        LinearLayout themeRow = new LinearLayout(this);
+        themeRow.setOrientation(LinearLayout.HORIZONTAL);
+        themeRow.setGravity(Gravity.CENTER_VERTICAL);
+        themeRow.setPadding(0, dp(12), 0, dp(12));
+        themeRow.addView(cText("界面主题", 12f, cSub(), false),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        themeRow.addView(cText(themeModeLabel(themeMode()) + " ›", 12f, cSub(), false));
+        themeRow.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conThemeDialog(); }
+        });
+        col.addView(themeRow);
+        col.addView(cSep(0));
+        // 检查更新（v1.12：不再启动时自动检查，改这里手动触发）
+        LinearLayout upd = new LinearLayout(this);
+        upd.setOrientation(LinearLayout.HORIZONTAL);
+        upd.setGravity(Gravity.CENTER_VERTICAL);
+        TextView updLink = cText("检查更新", 12f, cSub(), false);
+        updLink.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conToast("正在检查…"); checkForUpdate(true); }
+        });
+        upd.addView(updLink, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        upd.addView(cText("当前 " + conVersionLabel(), 11f, cSub(), false));
+        col.addView(upd, cTop(dp(16)));
+        refreshConsole();
+    }
+
+    /**
+     * 内置工具脚本的实际位置。
+     * 先取 payload 内核区的 tools/：它在 App 私有目录里，跟包一起发出去，
+     * 也动不到（还原 dshhome 不会覆盖内核区）；再回落到早期开发机上手工堆的 /sdcard 目录。
+     * 只认 /sdcard 那条路的话，别人装了这个包点备份只会看到「未找到备份工具脚本」。
+     */
+    private File builtinTool(String name) {
+        File bundled = new File(getFilesDir(), "payload/dshroot/lib/node_modules/@deepseek-ai/dsh/tools/" + name);
+        if (bundled.isFile()) return bundled;
+        return new File("/sdcard/DeepSeekHarness/tools/" + name);
+    }
+
+    /** 触发时光机全站一键备份 */
+    private void triggerSnapshotBackup() {
+        conToast("正在生成时光机快照…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    File node = new File(getFilesDir(), "payload/runtime/bin/node");
+                    File tool = builtinTool("backup.mjs");
+                    if (!tool.exists()) {
+                        ui.post(new Runnable() {
+                            @Override public void run() { conToast("未找到备份工具脚本"); }
+                        });
+                        return;
+                    }
+                    ProcessBuilder pb = new ProcessBuilder(node.getAbsolutePath(), tool.getAbsolutePath(), "create", "--name", "console-backup");
+                    // node 是动态链接的（libz 等），不给 LD_LIBRARY_PATH 会直接
+                    // CANNOT LINK EXECUTABLE ... library "libz.so.1" not found，
+                    // 脚本一行都跑不到。引擎自己有设，这几条裸起 node 的旁路以前漏了。
+                    pb.environment().put("LD_LIBRARY_PATH", new File(getFilesDir(), "payload/runtime/lib").getAbsolutePath());
+                    pb.redirectErrorStream(true);
+                    Process p = pb.start();
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream(), "UTF-8"));
+                    final StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        sb.append(line).append("\n");
+                    }
+                    int code = p.waitFor();
+                    if (code == 0) {
+                        ui.post(new Runnable() {
+                            @Override public void run() {
+                                conDialog("时光机备份成功", "全站资产（记忆库/所有会话/配置/技能）已完整打包！\n\n保存位置：\n/sdcard/Download/DSH_Backups/\n\n换机或重装时可随时一键还原。", "我知道了", null, null);
+                            }
+                        });
+                    } else {
+                        ui.post(new Runnable() {
+                            @Override public void run() {
+                                conDialog("时光机备份失败", "执行返回错误码: " + code + "\n" + sb.toString(), "关闭", null, null);
+                            }
+                        });
+                    }
+                } catch (Throwable t) {
+                    final String err = t.getMessage();
+                    ui.post(new Runnable() {
+                        @Override public void run() {
+                            conDialog("时光机备份异常", "异常信息: " + err, "关闭", null, null);
+                        }
+                    });
+                }
+            }
+        }, "dsh-backup-worker").start();
+    }
+
+    /** 与控制台同一套视觉的弹窗（平色底、同字体、同按钮样式，跟随系统深浅色）。 */
+    private void conDialog(String title, String body, String positive, final Runnable onPositive, String negative) {
+        TextView t = null;
+        if (body != null && body.length() > 0) t = cText(body, 12.5f, cSub(), false);
+        conDialogView(title, t, positive, onPositive, negative);
+    }
+
+    /** 同风格弹窗的通用版：内容自定（例如带滚动的日志正文）。 */
+    private void conDialogView(String title, View content, String positive, final Runnable onPositive, String negative) {
+        conDialogView3(title, content, null, null, positive, onPositive, negative);
+    }
+
+    private void conDialogView3(String title, View content, String neutral, final Runnable onNeutral,
+                                String positive, final Runnable onPositive, String negative) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        // v1.13：卡片自己画圆角背景（原来用直角色块，系统对话框面板的圆角/描边会露在外面，
+        // 看上去就是“弹窗外面还套了一层小白边/小黑边”）。
+        box.setBackground(cShape(cBg(), 0, 0, 16));
+        box.setPadding(dp(22), dp(22), dp(22), dp(14));
+        if (title != null && title.length() > 0) box.addView(cText(title, 16f, cText(), true));
+        if (content != null) box.addView(content, cTop(dp(12)));
+
+        LinearLayout acts = new LinearLayout(this);
+        acts.setOrientation(LinearLayout.HORIZONTAL);
+        acts.setGravity(Gravity.RIGHT);
+        if (neutral != null) {
+            Button ub = cButton(neutral, false);
+            ub.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    closeDialogOverlay();
+                    if (onNeutral != null) onNeutral.run();
+                }
+            });
+            acts.addView(ub);
+        }
+        if (negative != null) {
+            Button nb = cButton(negative, false);
+            nb.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { closeDialogOverlay(); }
+            });
+            acts.addView(nb);
+        }
+        if (positive != null) {
+            Button pb = cButton(positive, true);
+            pb.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    closeDialogOverlay();
+                    if (onPositive != null) onPositive.run();
+                }
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.leftMargin = dp(8);
+            acts.addView(pb, lp);
+        }
+        box.addView(acts, cTop(dp(18)));
+
+        // 改用 Activity 内自绘浮层（见 showDialogOverlay 注释），
+        // 不再走系统 AlertDialog —— 它会把主题的深色圆角面板画在卡片外面。
+        showDialogOverlay(box);
+    }
+
+    /**
+     * 把弹窗做成 Activity 自己视图树里的浮层，而不是系统对话框窗口。
+     *
+     * 症状：弹窗卡片外面还套着一层深色圆角框（用户截图可见）。
+     * 成因：AlertDialog 的面板背景来自 Activity 主题（Theme.Black 的 alertDialogTheme），
+     *   那层 frame 画在 **对话框布局自己身上**，只把 *窗口* 背景设成透明并不管用
+     *   （旧代码就是把窗口背景设透明，所以外框一直在）。
+     * 做法：自绘「遮罩 + 圆角卡片」，不经过任何系统对话框窗口 —— 没有主题面板，
+     *   也就没有外框；顺带把圆角/边距/点空白取消都握在自己手里。
+     */
+    private void showDialogOverlay(View card) {
+        closeDialogOverlay();
+        FrameLayout host = null;
+        try { host = (FrameLayout) findViewById(android.R.id.content); } catch (Throwable ignored) {}
+        if (host == null || card == null) return;
+        card.setClickable(true);                 // 卡片自己吃掉点击，避免点卡片也被当成“点空白”
+        final FrameLayout scrim = new FrameLayout(this);
+        scrim.setBackgroundColor(0xB3000000);    // 70% 黑遮罩（原系统对话框的 dim 观感）
+        scrim.setClickable(true);
+        scrim.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { closeDialogOverlay(); }   // 点空白 = 取消
+        });
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        lp.gravity = Gravity.CENTER;
+        lp.leftMargin = dp(20);
+        lp.rightMargin = dp(20);
+        scrim.addView(card, lp);
+        // 内容再高也不超过屏幕 80%（历史日志弹窗等），超出部分由内容自己的 ScrollView 滚
+        scrim.post(new Runnable() {
+            @Override public void run() {
+                try {
+                    View c = scrim.getChildAt(0);
+                    if (c == null) return;
+                    int maxH = Math.round(getResources().getDisplayMetrics().heightPixels * 0.8f);
+                    if (c.getHeight() > maxH) {
+                        ViewGroup.LayoutParams p = c.getLayoutParams();
+                        p.height = maxH;
+                        c.setLayoutParams(p);
+                    }
+                } catch (Throwable ignored) {}
+            }
+        });
+        host.addView(scrim, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        dialogOverlay = scrim;
+    }
+
+    /** 关掉当前自绘弹窗（没有则什么都不做）；按钮回调与返回键共用。 */
+    private void closeDialogOverlay() {
+        View v = dialogOverlay;
+        dialogOverlay = null;
+        if (v == null) return;
+        try {
+            ViewGroup p = (ViewGroup) v.getParent();
+            if (p != null) p.removeView(v);
+        } catch (Throwable ignored) {}
+    }
+
+    private View conExtractDetail() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setVisibility(View.GONE);
+        box.addView(cText("布局标记 hoisted-1 · 插件与补丁面已验证", 11f, cSub(), false), cTop(dp(8)));
+        LinearLayout acts = new LinearLayout(this);
+        acts.setOrientation(LinearLayout.HORIZONTAL);
+        Button re = cButton("重新解压", false);
+        re.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conReExtract(); }
+        });
+        Button vf = cButton("校验", false);
+        vf.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conVerifyFiles(); }
+        });
+        acts.addView(re);
+        acts.addView(vf);
+        box.addView(acts, cTop(dp(10)));
+        return box;
+    }
+
+    private void refreshConsole() {
+        if (!consoleVisible || consoleBody == null || consolePage != 0) return;
+        boolean ready = conFilesReady();
+        if (conExState != null) conExState.setText(extracting ? "正在解压…" : (ready ? "已解压" : "未解压"));
+        if (conExMeta != null) conExMeta.setText(conExtractMetaText(ready));
+        if (conDetailBox != null) conDetailBox.setVisibility(ready && consoleDetailOpen ? View.VISIBLE : View.GONE);
+        if (conBar != null) conBar.setVisibility(extracting ? View.VISIBLE : View.GONE);
+        if (!extracting) conSetProgress(ready ? 100 : 0);
+        if (conExBtn != null) {
+            conExBtn.setText(extracting ? "解压中…" : (ready ? "重新解压" : "解压文件"));
+            cSetEnabled(conExBtn, !extracting && !starting);
+        }
+        boolean run = conEngineRunning();          // 真就绪（端口探测通过）
+        boolean booting = conEngineBooting();      // 已拉起、还在监听前的空窗期
+        if (run && engineStartTs == 0L) engineStartTs = System.currentTimeMillis();
+        // v1.13：只在“真就绪”时结束启动中；并且启动中不得点亮入口。
+        // （反面教训：把“node 进程活着”当就绪 → 按钮提前亮、点进去 3080 未监听 → “点了没反应”）
+        if (run) starting = false;
+        else if (starting && engineStartTs > 0
+                && System.currentTimeMillis() - engineStartTs > 150000L) starting = false;   // 超时兜底
+        boolean busy = !run && (booting || starting);
+        if (conEnState != null) conEnState.setText(run ? "引擎运行中" : (busy ? "启动中…" : "未启动"));
+        if (conEnMeta != null) conEnMeta.setText(conEngineMetaText(run, ready, busy));
+        if (conEnBtn != null) {
+            conEnBtn.setText(run ? "打开主界面" : (busy ? "启动中…" : "启动引擎"));
+            cSetEnabled(conEnBtn, !busy && (run || ready));
+        }
+        cSetEnabled(conEnRestart, run || busy);
+        cSetEnabled(conEnStop, run || busy);
+        if (conFoot != null) conFoot.setText(run ? "本地服务已就绪" : (busy ? "正在启动引擎…" : "就绪"));
+    }
+
+    private String conExtractMetaText(boolean ready) {
+        if (extracting) return conExtractMsg != null ? conExtractMsg : "正在解压运行时与内核树…";
+        if (ready) {
+            String s = conFilesSummary != null ? conFilesSummary : "运行环境与内核树已就绪";
+            return s + (consoleDetailOpen ? "" : " · 点这一行看详情");
+        }
+        return "需要解压运行环境与内核（约 2.5 万个文件 / 约 220 MB）；解压完成后才能启动引擎。";
+    }
+
+    private String conEngineMetaText(boolean run, boolean ready, boolean busy) {
+        if (run) {
+            long mins = engineStartTs > 0 ? Math.max(0, (System.currentTimeMillis() - engineStartTs) / 60000) : 0;
+            return "端口 " + enginePort + " · 已运行 " + mins + " 分 · 通知 " + notifyPort();
+        }
+        // v1.13：启动中显示统一的倒计时文案（真机 node 预熟要 17~25 秒，必须给用户一个“在动”的反馈）
+        if (busy) {
+            long sec = engineStartTs > 0 ? Math.max(0, (System.currentTimeMillis() - engineStartTs) / 1000) : 0;
+            return "端口 " + enginePort + " · 启动中… 已等待 " + sec + " 秒";
+        }
+        // v1.13：原来无论文件是否已解压都写“解压完成后可启动”，已解压时这句误导人。
+        return (ready ? "点「启动引擎」开始 · 端口 " : "解压完成后可启动 · 端口 ") + enginePort;
+    }
+
+    // ---------- 动作：解压 / 启动 ----------
+    private void conExtractClick() {
+        if (extracting || starting) return;
+        if (conFilesReady()) { conReExtract(); return; }
+        conStartExtract();
+    }
+
+    private void conStartExtract() {
+        if (extracting) return;
+        if (!conFilesReady()) {
+            // 本次安装还没解压过（升级安装最常见）：清掉旧标记 → 走一次**完整内部解压**
+            // （runtime/node/so/dshhome/rish 全部重写），避免“拿着上一版的树”看着像已解压。
+            try { new File(payloadDir(), ".extracted").delete(); } catch (Throwable ignored) {}
+        }
+        extracting = true;
+        conExtractMsg = null;
+        extractOnlyMode = true;
+        filesPreparedThisBoot = false;
+        refreshConsole();
+        startEngine();   // 复用同一条链路；extractOnlyMode 会在文件准备完后提前返回
+    }
+
+    private void conReExtract() {
+        if (extracting || starting) { conToast("正在忙，稍后"); return; }
+        filesPreparedThisBoot = false;
+        extracting = true;
+        conExtractMsg = null;
+        extractOnlyMode = true;
+        refreshConsole();
+        new Thread(new Runnable() { @Override public void run() {
+            try { new File(payloadDir(), ".extracted").delete(); } catch (Throwable ignored) {}
+            try { new File(payloadDir(), "dshroot/.complete").delete(); } catch (Throwable ignored) {}
+            ui.post(new Runnable() { @Override public void run() { extracting = false; conStartExtract(); } });
+        }}, "extract-reset").start();
+    }
+
+    private void conEngineClick() {
+        if (starting) return;
+        // v1.13：判定“引擎是否已在跑”必须先真正探一次端口，而探测**只能在后台线程做**
+        // （主线程做网络 IO → NetworkOnMainThreadException 被吞 → 误判未启动 → 又拉起第二个 node）。
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final boolean running = conProbeEngineNow();
+                ui.post(new Runnable() { @Override public void run() { conEngineClickAfterProbe(running); } });
+            }
+        }, "engine-click-probe").start();
+    }
+
+    private void conEngineClickAfterProbe(boolean running) {
+        if (starting) return;
+        if (running) {
+            engineStartAborted = false;
+            engineStoppedByUser = false;
+            enterMainUi();
+            return;
+        }
+        if (!conFilesReady()) { conToast("先解压文件"); return; }
+        extracting = false;
+        extractOnlyMode = false;
+        starting = true;
+        engineStartTs = System.currentTimeMillis();
+        refreshConsole();
+        startEngine();   // 文件已就绪 → 只起引擎
+    }
+
+    /**
+     * 「重启」原来只 destroy 内存里的 nodeProcess 句柄 ——
+     * Activity 被重建 / 进程被杀后重开时那个句柄是 null，于是点了重启等于什么都没发生
+     * （用户反馈原话：“点重启其实没有用，你并没有被重启”）。
+     * 现在改成按 PID 真杀（见 killEngineNow），并等端口真正释放后再拉起新引擎。
+     */
+    private void conRestartEngine() {
+        if (starting) return;
+        conToast("正在重启引擎…");
+        engineStoppedByUser = false;
+        engineStartAborted = false;
+        new Thread(new Runnable() { @Override public void run() {
+            killEngineNow();
+            // 等端口释放：否则紧接着的探针会看到旧进程还 listen → 误判“已在运行” → 又不重启
+            long deadline = System.currentTimeMillis() + 10000;
+            while (System.currentTimeMillis() < deadline && portListening(enginePort)) {
+                try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+            }
+            ui.post(new Runnable() { @Override public void run() { conEngineClick(); } });
+        }}, "engine-restart").start();
+    }
+
+    private void conStopEngine() {
+        // v1.13：旧实现只 destroy 进程，两个后果 —— ① 在飞的 waitForServer 仍每秒刷“已等待 N 秒”（界面一直计时）；
+        // ② 看门狗 5 秒后看到 nodeProcess 非空却已死 → 又把引擎拉起来（用户看到的“停不掉”）。
+        // 同样不能只 destroy 句柄 —— 句柄丢了就什么都停不掉，改用 killEngineNow（按 PID）。
+        engineStoppedByUser = true;
+        engineStartAborted = true;
+        conToast("正在停止引擎…");
+        // v1.13.12：停引擎 = 虚拟屏一起销毁（用户确认的行为）。虚拟屏由 AI 经引擎驱动，
+        // 引擎停了虚拟屏就是一块没人管的孤儿屏；不一起收掉的话它还挂在屏幕上。
+        VsreenBridgeService.requestDestroyVscreen();
+        new Thread(new Runnable() { @Override public void run() {
+            killEngineNow();
+            starting = false;
+            engineStartTs = 0L;
+            ui.post(new Runnable() { @Override public void run() {
+                setStatus("引擎已停止");
+                refreshConsole();
+                conToast("引擎已停止");
+            }});
+        }}, "engine-stop").start();
+    }
+
+    /**
+     * 找出当前真正在跑的引擎 node 进程 PID（不依赖内存里的 Process 句柄）。
+     *
+     * 为什么可行：node 是本 App 的子进程、**同一个 uid**，而同 uid 的进程在 /proc 里互相可见
+     * （真机实测：App 身份能读到 /proc/&lt;pid&gt;/cmdline）。所以哪怕 Activity 被重建、
+     * 句柄丢了，也仍然能定位并终止它。
+     * 认人条件：cmdline 同时含 bin.js、web、--port &lt;enginePort&gt;，避免误杀别的 node。
+     */
+    private int findEnginePid() {
+        File[] kids;
+        try { kids = new File("/proc").listFiles(); } catch (Throwable t) { return -1; }
+        if (kids == null) return -1;
+        int self = android.os.Process.myPid();
+        for (File d : kids) {
+            String name = d.getName();
+            if (name == null || name.isEmpty() || !Character.isDigit(name.charAt(0))) continue;
+            int pid;
+            try { pid = Integer.parseInt(name); } catch (Throwable t) { continue; }
+            if (pid == self) continue;
+            String cmd = readProcCmdline(pid);
+            if (cmd == null || cmd.length() == 0) continue;
+            if (cmd.indexOf("bin.js") < 0) continue;
+            if (cmd.indexOf(" web") < 0) continue;
+            if (cmd.indexOf("--port " + enginePort) < 0) continue;
+            return pid;
+        }
+        return -1;
+    }
+
+    /** 读 /proc/&lt;pid&gt;/cmdline（NUL 分隔 → 空格）。读不到返回 null。 */
+    private String readProcCmdline(int pid) {
+        FileInputStream in = null;
+        try {
+            in = new FileInputStream("/proc/" + pid + "/cmdline");
+            byte[] buf = new byte[1024];
+            int n = in.read(buf);
+            if (n <= 0) return "";
+            for (int i = 0; i < n; i++) if (buf[i] == 0) buf[i] = ' ';
+            return new String(buf, 0, n, "UTF-8");
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            try { if (in != null) in.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /**
+     * 真把引擎进程杀掉（阻塞直到死透或超时）。
+     * 先 SIGTERM 让 node 正常退出（会释放端口），6 秒内没死再 SIGKILL 兜底。
+     * 调用方必须在后台线程（内部有 sleep / 轮询）。
+     */
+    private void killEngineNow() {
+        int pid = findEnginePid();
+        if (pid > 0) {
+            try { android.os.Process.sendSignal(pid, 15); } catch (Throwable ignored) {}   // SIGTERM
+        }
+        try { if (nodeProcess != null && nodeProcess.isAlive()) nodeProcess.destroy(); } catch (Throwable ignored) {}
+        long deadline = System.currentTimeMillis() + 6000;
+        while (System.currentTimeMillis() < deadline) {
+            if (findEnginePid() <= 0) break;
+            try { Thread.sleep(200); } catch (InterruptedException e) { break; }
+        }
+        int still = findEnginePid();
+        if (still > 0) {
+            Log.w(TAG, "engine pid " + still + " still alive after SIGTERM, SIGKILL");
+            try { android.os.Process.killProcess(still); } catch (Throwable ignored) {}     // SIGKILL 兜底
+            try { Thread.sleep(600); } catch (InterruptedException ignored) {}
+        }
+        nodeProcess = null;
+        // v1.39.1：引擎死了，上一实例的令牌立即作废。不清空的话，局域网开关重启引擎后
+        // /lan 会把旧令牌当成有效值发出去（链接能点开、全是 401）。清空后由
+        // currentEngineTokenUrl() 从新实例的日志里取。
+        engineTokenUrl = null;
+    }
+
+    private void enterMainUi() {
+        consoleVisible = false;
+        if (consoleLayer != null) consoleLayer.setVisibility(View.GONE);
+        if (conTick != null) conTick.removeCallbacks(consoleTick);
+        // 没有 token 时先从日志里捞回来（否则 WebView 只能 401 认证页 → 白屏）
+        if (engineTokenUrl == null) {
+            String u = conTokenFromLog();
+            if (u != null) engineTokenUrl = u;
+        }
+        loadHome();
+    }
+
+    private void conExtractDone() {
+        extracting = false;
+        consoleDetailOpen = false;
+        computeFilesSummaryAsync();
+        refreshConsole();
+        conToast("解压完成，可以启动引擎了");
+    }
+
+    private void conExtractFailed(String msg) {
+        extracting = false;
+        refreshConsole();
+        conToast("解压失败：" + msg);
+    }
+
+    private void conEngineFailed(String msg) {
+        starting = false;
+        refreshConsole();
+        conToast("引擎启动失败：" + msg);
+    }
+
+    /** 只负责起引擎（文件已就绪）：健康探测 → spawnNode → 等就绪。v1.12 从 startEngine 拆出。 */
+    /**
+     * 给 profile 树补上它缺失的内核包软链（清单：payload 内
+     * dshhome/profiles/web/PROFILE-KERNEL-LINKS.txt，随包发布）。
+     *
+     * 为什么需要：插件在 profiles/web 下按裸导入解析依赖，而内核包只存在于 dshroot，
+     * 两棵树各有独立的 node_modules，互不可见。缺一个包就会让那个插件整体加载失败，
+     * 而且失败是静默的 —— 它负责的功能随后悄悄退步（工具闸门失效后，开局改回
+     * 一次性注入全部工具，按需解锁的机制形同作废）。
+     *
+     * 幂等：profile 里已存在就跳过；链指向内核树，内核升级自动跟随。
+     * 每次拉起引擎前跑一遍，profile 被重铺或手工清掉之后能自愈。
+     */
+    private void ensureProfileKernelLinks(File payload) {
+        File list = new File(payload, "dshhome/profiles/web/PROFILE-KERNEL-LINKS.txt");
+        File kernel = new File(payload, "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai");
+        File prof = new File(payload, "dshhome/profiles/web/node_modules/@deepseek-ai");
+        if (!list.exists() || !kernel.isDirectory() || !prof.isDirectory()) return;
+        java.io.BufferedReader r = null;
+        int made = 0;
+        try {
+            r = new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(list), "UTF-8"));
+            String line;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) continue;
+                File src = new File(kernel, line);
+                File dst = new File(prof, line);
+                if (!src.isDirectory() || dst.exists()) continue;
+                try {
+                    Os.symlink(src.getAbsolutePath(), dst.getAbsolutePath());
+                    made++;
+                } catch (Throwable t) {
+                    Log.w(TAG, "profile kernel link failed: " + line, t);
+                }
+            }
+            if (made > 0) Log.i(TAG, "profile kernel links restored: " + made);
+        } catch (Throwable t) {
+            Log.w(TAG, "ensureProfileKernelLinks failed", t);
+        } finally {
+            try { if (r != null) r.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    private void launchEngine(File payload) {
+        ensureProfileKernelLinks(payload);
+        if (healthOk()) {
+            // 端口通、但本次进程从没起过引擎、日志里也捞不到令牌 —— 那是上次装包/被杀时留下的
+            // 引擎在应答。前端拿不到能配对的令牌，界面能开、消息发不出去。收掉重建。
+            if (nodeProcess == null && currentEngineTokenUrl() == null) {
+                Log.w(TAG, "engine answers but no token recoverable, recycling orphan");
+                killEngineNow();
+            } else {
+                starting = false;
+                engineAliveCached = true;                        // v1.13：写回缓存 → 控制台立刻显示“引擎运行中”
+                engineProbeAt = System.currentTimeMillis();
+                if (engineStartTs == 0L) engineStartTs = System.currentTimeMillis();
+                ui.post(new Runnable() { @Override public void run() { refreshConsole(); } });
+                if (!consoleVisible) loadHome();
+                return;
+            }
+        }
+        showIndeterminate("正在启动 DeepSeek Harness…");
+        starting = true;
+        if (engineStartTs == 0L) engineStartTs = System.currentTimeMillis();
+        // v1.13：已有一个 node 进程在跑（可能只是还没开始监听端口）→ **绝不再 spawn 第二个**。
+        // 旧实现只看 healthOk()：node 启动中的那几秒会被误判为“没在跑”→ 重复 spawn。
+        // 真机日志实证：同一时刻两个 node 抢 3080，第二次流程的 notify 端口 3081 直接 EADDRINUSE。
+        Process alive = nodeProcess;
+        if (alive != null && alive.isAlive()) {
+            Log.w(TAG, "engine process already alive, wait instead of respawning");
+            waitForServer();
+            starting = false;
+            ui.post(new Runnable() { @Override public void run() { refreshConsole(); } });
+            return;
+        }
+        // v1.13 第二道防线：句柄丢了（App 重启/被系统回收）也不凭 healthOk() 就重建 ——
+        // node 启动中虽然不响应 HTTP，但**端口已经 listen**；只要端口被占就不该再拉一个。
+        // （引擎日志里 EADDRINUSE 高达 72 次 vs 成功启动 38 次，重复拉起是最高频的浪费。）
+        if (portListening(enginePort)) {
+            // 「端口被占」有两种，处置相反：
+            //   a) 本进程起的 node 正在启动（句柄还在）→ 等它，别拉第二个；
+            //   b) 装包/被系统杀死留下的孤儿 node（句柄已丢）→ 它守着端口，可前端拿的是本次
+            //      新进程的令牌，对不上就一直是 401，干等到超时也不会好。收掉它再起一个。
+            if (nodeProcess == null || !nodeProcess.isAlive()) {
+                Log.w(TAG, "port " + enginePort + " held by an orphan node, recycling before spawn");
+                killEngineNow();
+            }
+            if (portListening(enginePort)) {
+                Log.w(TAG, "port " + enginePort + " already listening, wait instead of respawning");
+                waitForServer();
+                starting = false;
+                ui.post(new Runnable() { @Override public void run() { refreshConsole(); } });
+                return;
+            }
+        }
+        try {
+            spawnNode(payload);
+        } catch (Throwable t) {
+            starting = false;
+            Log.e(TAG, "spawnNode failed", t);
+            final String msg = String.valueOf(t.getMessage());
+            setStatus("引擎启动失败：" + msg);
+            writeStartupDiag(msg);
+            ui.post(new Runnable() { @Override public void run() { conEngineFailed(msg); } });
+            return;
+        }
+        waitForServer();
+        starting = false;
+        ui.post(new Runnable() { @Override public void run() { refreshConsole(); } });
+    }
+
+    // ---------- 文件摘要 / 校验 ----------
+    private void computeFilesSummaryAsync() {
+        if (!conFilesReady()) { conFilesSummary = null; return; }
+        new Thread(new Runnable() { @Override public void run() {
+            final String s = conComputeFilesSummary();
+            ui.post(new Runnable() { @Override public void run() { conFilesSummary = s; refreshConsole(); } });
+        }}, "files-summary").start();
+    }
+
+    private String conComputeFilesSummary() {
+        try {
+            java.util.ArrayDeque<File> q = new java.util.ArrayDeque<File>();
+            q.add(new File(payloadDir(), "dshroot"));
+            long n = 0;
+            long bytes = 0;
+            while (!q.isEmpty()) {
+                File f = q.poll();
+                File[] cs = f.listFiles();
+                if (cs == null) continue;
+                for (int i = 0; i < cs.length; i++) {
+                    if (cs[i].isDirectory()) q.add(cs[i]);
+                    else { n++; bytes += cs[i].length(); }
+                }
+            }
+            return String.format(java.util.Locale.US, "%,d 个文件 · %d MB", Long.valueOf(n), Long.valueOf(bytes / 1048576L));
+        } catch (Throwable t) { return null; }
+    }
+
+    private void conVerifyFiles() {
+        conToast("校验中…");
+        new Thread(new Runnable() { @Override public void run() {
+            final String miss = conMissingKey();
+            int done = 0;
+            try { done = getSharedPreferences("dsh_prefs", MODE_PRIVATE).getInt("payload_build_code", 0); } catch (Throwable ignored) {}
+            final int fdone = done;
+            final int cur = conBuildCode();
+            final String s = conComputeFilesSummary();
+            ui.post(new Runnable() { @Override public void run() {
+                if (miss != null) conToast("校验失败：缺 " + miss + "，请点「重新解压」");
+                else if (fdone != cur) conToast("校验失败：内部文件是旧版本解压的（记录 " + fdone + " / 当前 " + cur + "），请重新解压");
+                else conToast("校验通过，" + (s == null ? "文件齐全" : s) + " · 已对应当前安装版本");
+            }});
+        }}, "files-verify").start();
+    }
+
+    // ---------- 权限页 ----------
+    private String conPermSummary() {
+        int ok = 0;
+        for (int i = 0; i < CON_PERMS.length; i++) if (conPermOk(CON_PERMS[i][0])) ok++;
+        return "已授权 " + ok + " / " + CON_PERMS.length;
+    }
+
+    private boolean conPermOk(String id) {
+        try {
+            if ("storage".equals(id)) {
+                if (Build.VERSION.SDK_INT >= 30) return Environment.isExternalStorageManager();
+                return checkSelfPermission("android.permission.WRITE_EXTERNAL_STORAGE") == PackageManager.PERMISSION_GRANTED;
+            }
+            if ("notify".equals(id)) {
+                android.app.NotificationManager nm = (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                return nm != null && nm.areNotificationsEnabled();
+            }
+            if ("overlay".equals(id)) return Settings.canDrawOverlays(this);
+            if ("battery".equals(id)) {
+                PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                return pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+            }
+            if ("root".equals(id)) return conRootOk;
+            if ("shizuku".equals(id)) return shizukuOk != null && shizukuOk.booleanValue();
+            if ("a11y".equals(id)) return conA11yEnabled();
+            if ("install".equals(id)) return Build.VERSION.SDK_INT < 26 || getPackageManager().canRequestPackageInstalls();
+        } catch (Throwable t) { return false; }
+        return false;
+    }
+
+    private boolean conA11yEnabled() {
+        try {
+            String s = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            if (s == null) return false;
+            return s.toLowerCase().contains(getPackageName().toLowerCase());
+        } catch (Throwable t) { return false; }
+    }
+
+    private void conRefreshRootAsync() {
+        if (System.currentTimeMillis() - conRootProbeTs < 5000) return;
+        conRootProbeTs = System.currentTimeMillis();
+        new Thread(new Runnable() { @Override public void run() {
+            boolean ok = false;
+            try { ok = rootAvailable(); } catch (Throwable ignored) {}
+            conRootOk = ok;
+            ui.post(new Runnable() { @Override public void run() {
+                refreshConsolePermIfShown();
+                refreshConsole();
+            }});
+        }}, "root-probe").start();
+    }
+
+    private void renderConsolePerm() {
+        LinearLayout col = consoleBody;
+        col.addView(conBackRow("授予权限"));
+        col.addView(cSep(dp(12)));
+        // 行文字与网页设置页共用 CON_PERMS（单一来源，别再各写一份）
+        for (int i = 0; i < CON_PERMS.length; i++) {
+            final String pid = CON_PERMS[i][0];
+            addPermRow(col, CON_PERMS[i][1], CON_PERMS[i][2], pid);
+        }
+        // issue #30：工作区入口原先只在首启引导完成页，走完引导就再无入口（只能清数据重走引导）。
+        // 这里复用同一套 onWorkspaceRowClick()，使权限页也能查看 / 更改 / 恢复默认。
+        addWorkspaceRow(col);
+        col.addView(cText("root / Shizuku 二选一即可（root 优先）。root 只能由你在 root 管理器（Magisk / KernelSU）里授予本应用；设备没 root 时这一项显示「本机无 root」。",
+                11f, cSub(), false), cTop(dp(14)));
+        conRefreshRootAsync();
+    }
+
+    /**
+     * 控制台「权限」页的 AI 工作区行：显示当前绑定路径，点按进入「更改 / 恢复默认」。
+     * 与引导完成页共用 onWorkspaceRowClick()，保证两条入口行为一致（issue #30）。
+     */
+    private void addWorkspaceRow(LinearLayout col) {
+        final String cur = workspacePath();
+        final boolean unset = (cur == null || cur.isEmpty());
+        LinearLayout left = new LinearLayout(this);
+        left.setOrientation(LinearLayout.VERTICAL);
+        left.addView(cText("AI 工作区（可选）", 13.5f, cText(), false));
+        conWorkspaceDesc = new TextView(this);
+        conWorkspaceDesc.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        conWorkspaceDesc.setTextColor(cSub());
+        conWorkspaceDesc.setPadding(0, dp(2), 0, 0);
+        conWorkspaceDesc.setText(unset ? "未设置（AI 文件操作在内部目录）" : cur);
+        left.addView(conWorkspaceDesc);
+        Button act = cButton(unset ? "选择" : "更改", false);
+        act.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        act.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { onWorkspaceRowClick(); }
+        });
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(13), 0, dp(13));
+        row.addView(left, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        alp.leftMargin = dp(8);
+        row.addView(act, alp);
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { onWorkspaceRowClick(); }
+        });
+        col.addView(row);
+        col.addView(cSep(0));
+    }
+
+    /** 工作区变更后，若正停在控制台「权限」页就整页重绘（按钮文案「选择 / 更改」跟着变）。 */
+    private void refreshConsolePermIfShown() {
+        if (consoleVisible && consolePage == 1) renderConsole();
+    }
+
+    private void addPermRow(LinearLayout col, String title, String desc, final String id) {
+        boolean ok = conPermOk(id);
+        boolean noRoot = "root".equals(id) && !rootDetected;
+        String state = ok ? "已授权" : (noRoot ? "本机无 root" : "未授权");
+        int color = ok ? cGreen() : (noRoot ? cSub() : cRed());
+        LinearLayout left = new LinearLayout(this);
+        left.setOrientation(LinearLayout.VERTICAL);
+        left.addView(cText(title, 13.5f, cText(), false));
+        left.addView(cText(desc, 11f, cSub(), false));
+        Button act = cButton(ok ? "管理" : "去授权", false);
+        act.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        if (noRoot) cSetEnabled(act, false);
+        act.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conPermAction(id); }
+        });
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(13), 0, dp(13));
+        row.addView(left, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(cText(state, 11f, color, false));
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        alp.leftMargin = dp(8);
+        row.addView(act, alp);
+        col.addView(row);
+        col.addView(cSep(0));
+    }
+
+    private void conPermAction(String id) {
+        try {
+            if ("storage".equals(id)) {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    Intent i = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                    i.setData(Uri.parse("package:" + getPackageName()));
+                    startActivity(i);
+                } else {
+                    requestPermissions(new String[]{"android.permission.WRITE_EXTERNAL_STORAGE"}, REQ_STORAGE);
+                }
+                return;
+            }
+            if ("notify".equals(id)) {
+                Intent i = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+                i.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+                startActivity(i);
+                return;
+            }
+            if ("overlay".equals(id)) {
+                startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
+                return;
+            }
+            if ("battery".equals(id)) {
+                startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName())));
+                return;
+            }
+            if ("root".equals(id)) {
+                rootOk = null;
+                conRootProbeTs = 0L;
+                conRefreshRootAsync();
+                conToast("正在请求 root 授权，请在管理器弹窗中允许");
+                return;
+            }
+            if ("shizuku".equals(id)) {
+                // v1.13.3：这里原来只调 probeShizuku()（纯探测）——用户点「管理」永远不会弹授权框。
+                // 真机实测：引擎里 AI 调 shizuku_status / shizuku_shell（内部走 rish 广播）能弹出 Shizuku 授权框，
+                // 控制台却不弹；差别就在“有没有发出真实请求”。改走统一入口：
+                // 实时探测 → 未授权就 requestPermission + 两条真实触发（binder / rish）→ 仍未授权给手动引导。
+                showShizukuDialog();
+                return;
+            }
+            if ("a11y".equals(id)) {
+                startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                return;
+            }
+            if ("install".equals(id)) {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+                } else {
+                    conToast("本机系统无需单独授权");
+                }
+                return;
+            }
+        } catch (Throwable t) {
+            conToast("打不开系统页：" + t.getMessage());
+        }
+    }
+
+    // ---------- 插件页 ----------
+    private static final String[][] CON_PLUGINS = {
+        {"tool-vscreen", "虚拟屏：建屏 / 看图 / 点击 · 8 个工具"},
+        {"tool-accessibility", "无障碍读屏 / 手势 / 截图理解"},
+        {"tool-android", "用量统计 / 悬浮窗 / 剪贴板 / 定时任务"},
+        {"tool-shizuku", "特权 shell（root 或 Shizuku 任一）"},
+        {"llm-pi-ai", "第三方供应商适配（关掉则「添加提供方」不可用）"},
+        {"session-telemetry-otel", "遥测上报 · Android 上不需要"},
+        {"session-log-download", "会话日志导出按钮（右上角）"},
+        {"pwsh-sandbox", "PowerShell 沙箱 · Android 无 pwsh"},
+        {"bash-sandbox", "bash 沙箱（本项目用 bash-local 替代）"},
+        {"sandbox", "沙箱服务"},
+    };
+
+    private String conPlugSummary() {
+        int on = 0;
+        for (int i = 0; i < CON_PLUGINS.length; i++) if (!conPluginDisabled(CON_PLUGINS[i][0])) on++;
+        return "已启用 " + on + " / " + CON_PLUGINS.length;
+    }
+
+    private String conPatchPath() { return new File(payloadDir(), "dshhome/cordis.patch.yml").getAbsolutePath(); }
+    private String conWebProfilePatchPath() { return new File(payloadDir(), "dshhome/profiles/web/cordis.patch.yml").getAbsolutePath(); }
+
+    private String conReasoningEffort() {
+        try {
+            File f = new File(conWebProfilePatchPath());
+            if (!f.exists()) f = new File(conPatchPath());
+            if (!f.exists()) return "high";
+            BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"));
+            String line;
+            boolean inDefaultModel = false;
+            while ((line = r.readLine()) != null) {
+                String t = line.trim();
+                if (t.startsWith("- id:") && t.contains("agent-default-model")) {
+                    inDefaultModel = true;
+                    continue;
+                }
+                if (inDefaultModel) {
+                    if (t.startsWith("- id:")) break;
+                    if (t.startsWith("reasoningEffort:")) {
+                        r.close();
+                        return t.substring(16).trim();
+                    }
+                }
+            }
+            r.close();
+        } catch (Throwable ignored) {}
+        return "high";
+    }
+
+    private String conReasoningLabel(String effort) {
+        if ("off".equals(effort)) return "关闭（极速）";
+        if ("low".equals(effort)) return "轻度（经济）";
+        if ("max".equals(effort)) return "极致（深度）";
+        return "标准（平衡）";
+    }
+
+    private void conSetReasoningEffort(final String effort) {
+        if (effort == null || effort.isEmpty()) return;
+        try {
+            File f = new File(conWebProfilePatchPath());
+            if (!f.exists()) f = new File(conPatchPath());
+            if (!f.exists()) return;
+            BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"));
+            java.util.List<String> lines = new java.util.ArrayList<String>();
+            String line;
+            while ((line = r.readLine()) != null) lines.add(line);
+            r.close();
+
+            int at = -1;
+            for (int i = 0; i < lines.size(); i++) {
+                String t = lines.get(i).trim();
+                if (t.startsWith("- id:") && t.contains("agent-default-model")) {
+                    at = i;
+                    break;
+                }
+            }
+            if (at >= 0) {
+                int end = conRowEnd(lines, at);
+                int effortIdx = -1;
+                for (int j = at + 1; j <= end; j++) {
+                    if (lines.get(j).trim().startsWith("reasoningEffort:")) {
+                        effortIdx = j;
+                        break;
+                    }
+                }
+                String ind = conSpaces(conIndentOf(lines.get(at)) + 4);
+                if (effortIdx >= 0) {
+                    lines.set(effortIdx, ind + "reasoningEffort: " + effort);
+                } else {
+                    lines.add(at + 2, ind + "reasoningEffort: " + effort);
+                }
+                FileOutputStream out = new FileOutputStream(f);
+                out.write(conJoinLines(lines, "\n").getBytes("UTF-8"));
+                out.close();
+            }
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        ProcessBuilder pb = new ProcessBuilder(
+                                new File(getFilesDir(), "payload/runtime/bin/node").getAbsolutePath(),
+                                builtinTool("tier.mjs").getAbsolutePath(),
+                                effort);
+                        // 同上：裸起 node 必须带库路径，否则 libz 链不上、静默失败
+                        pb.environment().put("LD_LIBRARY_PATH", new File(getFilesDir(), "payload/runtime/lib").getAbsolutePath());
+                        pb.start();
+                    } catch (Throwable ignored) {}
+                }
+            }).start();
+        } catch (Throwable t) {
+            conToast("设置思考程度失败: " + t.getMessage());
+        }
+    }
+
+    // ---------- cordis.patch.yml 读写（v1.13 重写） ----------
+    // 文件结构：顶层是**平铺的 patch 条目数组** —— 要么 `- id: <行id>` + `disabled: true` / `config:`
+    // （作用在别层已注册的行上），要么 `- insert:` 桶（桶内 `    - id: <行id>` + `      name:` 注册新行）。
+    // 两条硬规则：① patch 按列表顺序生效 —— insert 桶里的行必须先被注册，之后的行才能按 id 命中该行；
+    // ② 开关只能**原地**改写条目本身那一行 —— 删掉 `- id:` 行会留下悬空 `name:`（YAML 重复键 → 引擎启动即崩）。
+
+    /** 行首缩进宽度（空格/Tab 各计 1，够用）。 */
+    private static int conIndentOf(String line) {
+        int n = 0;
+        while (n < line.length() && (line.charAt(n) == ' ' || line.charAt(n) == '\t')) n++;
+        return n;
+    }
+
+    private static boolean conBlankOrComment(String trimmed) {
+        return trimmed.length() == 0 || trimmed.startsWith("#");
+    }
+
+    private static String conSpaces(int n) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) sb.append(' ');
+        return sb.toString();
+    }
+
+    /** 拆行（去行尾 CR，保留空行）。 */
+    private static java.util.List<String> conSplitLines(String txt) {
+        String[] raw = txt.split("\n");
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        for (int i = 0; i < raw.length; i++) {
+            String l = raw[i];
+            if (l.endsWith("\r")) l = l.substring(0, l.length() - 1);
+            out.add(l);
+        }
+        return out;
+    }
+
+    private static String conJoinLines(java.util.List<String> lines, String nl) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < lines.size(); i++) { sb.append(lines.get(i)); sb.append(nl); }
+        return sb.toString();
+    }
+
+    /** 该行若是 `- id: xxx` 则返回 xxx，否则 null。 */
+    private static String conRowIdOf(String trimmed) {
+        if (!trimmed.startsWith("- id:")) return null;
+        String id = trimmed.substring(5).trim();
+        return id.length() == 0 ? null : id;
+    }
+
+    private int conFindRow(java.util.List<String> lines, String id) {
+        for (int i = 0; i < lines.size(); i++) {
+            String rid = conRowIdOf(lines.get(i).trim());
+            if (rid != null && rid.equals(id)) return i;
+        }
+        return -1;
+    }
+
+    /** 条目块末行下标（含）：往下直到同级/更浅缩进的非空白行。 */
+    private int conRowEnd(java.util.List<String> lines, int idIdx) {
+        int base = conIndentOf(lines.get(idIdx));
+        int end = idIdx;
+        for (int j = idIdx + 1; j < lines.size(); j++) {
+            String t = lines.get(j).trim();
+            if (t.length() == 0) break;              // 空行即条目结束
+            if (t.startsWith("#")) continue;         // 注释归下一条目
+            if (conIndentOf(lines.get(j)) <= base) break;
+            end = j;
+        }
+        return end;
+    }
+
+    /** 该行是否位于 `- insert:` 桶内（桶内行只能原地开关；顶层条目作用于别层注册的行）。 */
+    private boolean conInsideInsert(java.util.List<String> lines, int idIdx) {
+        int base = conIndentOf(lines.get(idIdx));
+        for (int j = idIdx - 1; j >= 0; j--) {
+            String t = lines.get(j).trim();
+            if (conBlankOrComment(t)) continue;
+            if (conIndentOf(lines.get(j)) < base) return t.startsWith("- insert:");
+        }
+        return false;
+    }
+
+    /** 条目内原地增/删/改 `disabled:` 行（绝不搬动条目本身）。 */
+    private void conSetRowDisabled(java.util.List<String> lines, int idIdx, boolean disabled) {
+        int end = conRowEnd(lines, idIdx);
+        int at = -1;
+        for (int j = idIdx + 1; j <= end; j++) {
+            if (lines.get(j).trim().startsWith("disabled:")) { at = j; break; }
+        }
+        if (disabled) {
+            String ind = conSpaces(conIndentOf(lines.get(idIdx)) + 2);
+            if (at >= 0) lines.set(at, ind + "disabled: true");
+            else lines.add(idIdx + 1, ind + "disabled: true");
+        } else if (at >= 0) {
+            lines.remove(at);
+        }
+    }
+
+    /** 顶层 patch 条目（id 由别层注册，如 sandbox）：禁用=确保该条目存在且 disabled: true；
+     *  启用=删掉 disabled 行，条目再无其它键时连 `- id:` 行一起删；新增一律**追加到文件末尾**
+     *  （patch 按顺序生效，插入行必须先被注册）。 */
+    private void conSetTopEntryDisabled(java.util.List<String> lines, String id, boolean disabled) {
+        int at = conFindRow(lines, id);
+        if (at < 0) {
+            if (!disabled) return;
+            lines.add("- id: " + id);
+            lines.add("  disabled: true");
+            return;
+        }
+        if (disabled) { conSetRowDisabled(lines, at, true); return; }
+        int end = conRowEnd(lines, at);
+        boolean hasOther = false;
+        for (int j = at + 1; j <= end; j++) {
+            String t = lines.get(j).trim();
+            if (conBlankOrComment(t) || t.startsWith("disabled:")) continue;
+            hasOther = true;
+            break;
+        }
+        if (hasOther) { conSetRowDisabled(lines, at, false); return; }
+        for (int j = end; j > at; j--) lines.remove(j);
+        lines.remove(at);
+    }
+
+    /** 结构性自愈（返回是否有改动）：修复控制台旧实现写坏的 cordis.patch.yml。
+     *  旧实现关插件时把 `- id: xxx` 整行删掉、再把条目搬到文件顶部，后果两连：
+     *   ① 原地留下悬空 `name:` → YAML “duplicated mapping key” → 引擎**启动即崩**、App 反复重拉（界面一直闪）；
+     *   ② 搬上去的条目落在 `- insert:` 之前 → 插入行还没注册 → 就算 YAML 合法也不生效。
+     *  自愈动作：按包名补回被删的 `- id:` 行；把“只有 disabled 的顶层条目”折叠回它对应的 insert 行内。 */
+    /** 从 `name: '@deepseek-ai/dsh-tool-vscreen'` 反推行 id（补回被删的 `- id:` 行用）。 */
+    private static String conIdFromName(String raw) {
+        String n = raw;
+        if (n.length() > 1 && ((n.charAt(0) == '\'' && n.endsWith("'"))
+                || (n.charAt(0) == '"' && n.endsWith("\"")))) {
+            n = n.substring(1, n.length() - 1);
+        }
+        if (n.startsWith("@deepseek-ai/dsh-")) n = n.substring("@deepseek-ai/dsh-".length());
+        else { int k = n.lastIndexOf('/'); if (k >= 0) n = n.substring(k + 1); }
+        return n.length() == 0 ? null : n;
+    }
+
+    private boolean conNormalizePatchLines(java.util.List<String> lines) {
+        boolean changed = false;
+        // ① 悬空 name 行 → 补回 `- id:`。判据：一个条目里只允许一个 `name:` 键，
+        //   同一个条目里再碰到第二个 name（前面不是 `- id:`）就说明它的 id 行被删了。
+        int curRow = -1;            // 当前条目的 `- id:` 缩进；-1 = 不在条目内
+        boolean sawName = false;
+        for (int i = 0; i < lines.size(); i++) {
+            String t = lines.get(i).trim();
+            if (t.length() == 0) { curRow = -1; sawName = false; continue; }   // 空行结束条目
+            if (t.startsWith("#")) continue;
+            int ind = conIndentOf(lines.get(i));
+            if (conRowIdOf(t) != null) { curRow = ind; sawName = false; continue; }
+            if (!t.startsWith("name:")) continue;
+            if (curRow >= 0 && ind > curRow && !sawName) { sawName = true; continue; }   // 正常键
+            String id = conIdFromName(t.substring(5).trim());
+            if (id == null) continue;
+            int at = (curRow >= 0 && ind > curRow) ? curRow : (ind > 2 ? ind - 2 : 0);
+            lines.add(i, conSpaces(at) + "- id: " + id);
+            curRow = at;
+            sawName = false;    // 下一轮处理原 name 行时把它计作新条目的 name
+            changed = true;
+            i++;
+        }
+        // ② 顶层“只有 disabled”的条目若对应文件内某个 insert 行 → 折叠进行内
+        for (int i = 0; i < lines.size(); i++) {
+            String rid = conRowIdOf(lines.get(i).trim());
+            if (rid == null || conIndentOf(lines.get(i)) != 0) continue;
+            int end = conRowEnd(lines, i);
+            boolean hasDisabled = false, hasOther = false;
+            for (int j = i + 1; j <= end; j++) {
+                String tt = lines.get(j).trim();
+                if (conBlankOrComment(tt)) continue;
+                if (tt.startsWith("disabled:")) { hasDisabled = true; continue; }
+                hasOther = true;
+                break;
+            }
+            if (!hasDisabled || hasOther) continue;
+            int row = -1;
+            for (int j = 0; j < lines.size(); j++) {
+                String jid = conRowIdOf(lines.get(j).trim());
+                if (jid != null && jid.equals(rid) && j != i && conInsideInsert(lines, j)) { row = j; break; }
+            }
+            if (row < 0) continue;
+            conSetRowDisabled(lines, row, true);
+            for (int j = end; j > i; j--) lines.remove(j);
+            lines.remove(i);
+            changed = true;
+            i--;
+        }
+        return changed;
+    }
+
+    /** 起引擎前调用（幂等；失败只记日志，不阻断启动）。 */
+    private void conHealPatchConfig() {
+        try {
+            File f = new File(conPatchPath());
+            if (!f.exists()) return;
+            String txt = readFileText(f);
+            if (txt == null) return;
+            String nl = txt.indexOf("\r\n") >= 0 ? "\r\n" : "\n";
+            java.util.List<String> lines = conSplitLines(txt);
+            if (!conNormalizePatchLines(lines)) return;
+            conWriteText(f, conJoinLines(lines, nl));
+            Log.w(TAG, "cordis.patch.yml repaired (broken by an older console plugin toggle)");
+        } catch (Throwable t) {
+            Log.w(TAG, "conHealPatchConfig", t);
+        }
+    }
+
+    private boolean conPluginDisabled(String id) {
+        try {
+            String txt = readFileText(new File(conPatchPath()));
+            if (txt == null) return false;
+            java.util.List<String> lines = conSplitLines(txt);
+            int i = conFindRow(lines, id);
+            if (i < 0) return false;
+            int end = conRowEnd(lines, i);
+            for (int j = i + 1; j <= end; j++) {
+                String t = lines.get(j).trim();
+                if (t.startsWith("disabled:")) return t.indexOf("true") >= 0;
+            }
+        } catch (Throwable t) { Log.w(TAG, "conPluginDisabled", t); }
+        return false;
+    }
+
+    private void conSetPluginDisabled(String id, boolean disabled) {
+        try {
+            File f = new File(conPatchPath());
+            String txt = readFileText(f);
+            if (txt == null) return;
+            String nl = txt.indexOf("\r\n") >= 0 ? "\r\n" : "\n";
+            java.util.List<String> lines = conSplitLines(txt);
+            conNormalizePatchLines(lines);   // 先自愈，避免“越点越烂”
+            int at = conFindRow(lines, id);
+            if (at >= 0 && conInsideInsert(lines, at)) conSetRowDisabled(lines, at, disabled);
+            else conSetTopEntryDisabled(lines, id, disabled);
+            conWriteText(f, conJoinLines(lines, nl));
+        } catch (Throwable t) { Log.w(TAG, "conSetPluginDisabled", t); conToast("写配置失败：" + t.getMessage()); }
+    }
+
+    private void conWriteText(File f, String s) throws IOException {
+        File p = f.getParentFile();
+        if (p != null && !p.exists()) p.mkdirs();
+        FileOutputStream fos = new FileOutputStream(f);
+        try { fos.write(s.getBytes("UTF-8")); } finally { fos.close(); }
+    }
+
+    private void renderConsolePlug() {
+        LinearLayout col = consoleBody;
+        col.addView(conBackRow("插件"));
+        col.addView(cText("关掉的插件不加载：工具不进 AI 的工具表，也少占上下文。改动在重启引擎后生效。",
+                11f, cSub(), false), cTop(dp(10)));
+        col.addView(cSep(dp(12)));
+        for (int i = 0; i < CON_PLUGINS.length; i++) {
+            final String id = CON_PLUGINS[i][0];
+            boolean disabled = conPluginDisabled(id);
+            LinearLayout left = new LinearLayout(this);
+            left.setOrientation(LinearLayout.VERTICAL);
+            left.addView(cText("dsh-" + id, 13.5f, cText(), false));
+            left.addView(cText(CON_PLUGINS[i][1], 11f, cSub(), false));
+            TextView pill = cToggle(id, !disabled);
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(12), 0, dp(12));
+            row.addView(left, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            row.addView(pill);
+            col.addView(row);
+            col.addView(cSep(0));
+        }
+        Button apply = cButton("重启引擎生效", true);
+        apply.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { conRestartEngine(); }
+        });
+        col.addView(apply, cTop(dp(14)));
+    }
+
+
+    // ---------- 自建环境页（v1.28）----------
+    // 为什么单开一页：这个项目的价值不在功能，在"能在手机上自己编译自己出包"。
+    // 但完整构建环境（proot+Alpine+OpenJDK+四个 jar）有 342MB，塞进主包对只想用 AI
+    // 的人是纯负担 → 按需下载（方案 B）。两个仓库对等，各放同样的分卷，任选其一。
+    private String conBuildEnvSummary() {
+        if (beInstalling) return "安装中…";
+        return BuildEnvInstaller.isInstalled(this) ? "已就绪" : "未安装";
+    }
+
+    private void renderConsoleBuildEnv() {
+        LinearLayout col = consoleBody;
+        col.addView(conBackRow("自建环境"));
+        col.addView(cText("装上它之后，你可以在这台手机上自己编译、打包、签名、安装这个 App —— 也就是这个项目本来的核心能力。",
+                12f, cText(), false), cTop(dp(12)));
+        col.addView(cText("主包不含这部分（约 193MB），所以按需下载。GitHub 与 Gitee 都放了同样的分卷，任选其一。",
+                11f, cSub(), false), cTop(dp(8)));
+
+        col.addView(cSep(dp(14)));
+        col.addView(cText(BuildEnvInstaller.statusText(this), 12.5f, cText(), false), cTop(dp(14)));
+        if (beInstalling && beStage.length() > 0) {
+            col.addView(cText(beStage, 11.5f, cAccent(), false), cTop(dp(10)));
+        }
+        col.addView(cSep(dp(14)));
+
+        if (beInstalling) {
+            Button c = cButton("取消安装", false);
+            c.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { BuildEnvInstaller.cancel(); }
+            });
+            col.addView(c, cTop(dp(14)));
+        } else if (beResolving) {
+            col.addView(cText("正在查两个仓库…", 12f, cSub(), false), cTop(dp(14)));
+        } else if (beSources == null || beSources.isEmpty()) {
+            if (beResolveErr.length() > 0) col.addView(cText(beResolveErr, 11.5f, cSub(), false), cTop(dp(14)));
+            Button r = cButton("重新查询", true);
+            r.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { conBuildEnvResolve(); }
+            });
+            col.addView(r, cTop(dp(12)));
+        } else {
+            // 对等：有几个来源就列几个按钮，谁也不做谁的兜底
+            for (int i = 0; i < beSources.size(); i++) {
+                final BuildEnvInstaller.Source s = beSources.get(i);
+                boolean ready = BuildEnvInstaller.isInstalled(this);
+                Button b = cButton((ready ? "用 " : "从 ") + s.label + (ready ? " 重新安装 / 修复" : " 下载安装"),
+                        i == 0);
+                b.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) { startBuildEnvInstall(s); }
+                });
+                col.addView(b, cTop(i == 0 ? dp(14) : dp(8)));
+            }
+            Button re = cButton("重新查询两个仓库", false);
+            re.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { conBuildEnvResolve(); }
+            });
+            col.addView(re, cTop(dp(12)));
+        }
+
+        col.addView(cText("⚠️ 解压必须落在内部存储 —— /sdcard 是 FUSE，存不了 rootfs 里的符号链接（918 个）。\n"
+                + "分卷会留在 /sdcard/DeepSeekHarness/buildenv，重装 App 后不用重新下载，重新解压即可。",
+                11f, cSub(), false), cTop(dp(12)));
+    }
+
+    private void conBuildEnvResolve() {
+        if (beResolving) return;
+        beResolving = true;
+        beResolveErr = "";
+        renderConsole();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final java.util.List<BuildEnvInstaller.Source> got = BuildEnvInstaller.resolveSources();
+                ui.post(new Runnable() {
+                    @Override public void run() {
+                        beResolving = false;
+                        beSources = got;
+                        if (got.isEmpty()) beResolveErr = "两个仓库都没查到自建环境（可能是网络不通，或还没发布）。";
+                        if (consoleVisible && consolePage == 4) renderConsole();
+                    }
+                });
+            }
+        }, "buildenv-resolve").start();
+    }
+
+    private void startBuildEnvInstall(final BuildEnvInstaller.Source src) {
+        beInstalling = true;
+        beStage = "准备中…";
+        renderConsole();
+        BuildEnvInstaller.install(this, src, new BuildEnvInstaller.Cb() {
+            @Override public void onStage(final String stage, final int pct) {
+                ui.post(new Runnable() {
+                    @Override public void run() {
+                        beStage = stage;
+                        if (consoleVisible && consolePage == 4) renderConsole();
+                    }
+                });
+            }
+            @Override public void onDone(final boolean ok, final String msg) {
+                ui.post(new Runnable() {
+                    @Override public void run() {
+                        beInstalling = false;
+                        beStage = "";
+                        if (consoleVisible) renderConsole();
+                        conToast(msg);
+                    }
+                });
+            }
+        });
+    }
+
+    // ---------- 内核页（v1.49 P0）----------
+    // 为什么单开一页：issue #13 要「rc2 / rc3 与 rc5 共存、随时切」。
+    // 做法不是塞多份内核进 APK，而是把内核树抽成独立包按需装、点一下切 ——
+    // 切完重启引擎，会话 / 记忆 / 设置都不动；内置树永远是兜底。
+    private boolean kernelBusy = false;
+    private String kernelStage = "";
+
+    private String conKernelSummary() {
+        if (kernelBusy) return "处理中…";
+        File t = KernelStore.activeTree(this);
+        if (t == null) return "内置";
+        String v = KernelStore.kernelVersionAt(t);
+        return v.length() > 0 ? v : "受管";
+    }
+
+    private void renderConsoleKernel() {
+        LinearLayout col = consoleBody;
+        col.addView(conBackRow("内核"));
+        File activeTree = KernelStore.activeTree(this);
+        String activeVer = activeTree == null ? "" : KernelStore.kernelVersionAt(activeTree);
+        col.addView(cText(activeVer.length() > 0
+                ? "当前内核：" + activeVer + "（受管，位于 files/kernels/）"
+                : "当前内核：内置（随 APK 发布，永远是兜底）", 12.5f, cText(), false), cTop(dp(12)));
+        col.addView(cText("切内核不动你的会话、记忆、设置。插件是按内核适配的：换完如果哪个插件报错，先切回来。",
+                11f, cSub(), false), cTop(dp(8)));
+
+        if (kernelBusy) {
+            col.addView(cSep(dp(14)));
+            col.addView(cText(kernelStage, 12f, cAccent(), false), cTop(dp(14)));
+            return;
+        }
+
+        // ① 已装
+        col.addView(cSep(dp(16)));
+        col.addView(cText("已安装", 14f, cText(), false), cTop(dp(16)));
+        java.util.List<KernelStore.Bundle> ins = KernelStore.installed(this);
+        if (ins.isEmpty()) {
+            col.addView(cText("还没装受管内核，现在用的是内置树。", 11.5f, cSub(), false), cTop(dp(8)));
+        }
+        for (final KernelStore.Bundle b : ins) {
+            LinearLayout left = new LinearLayout(this);
+            left.setOrientation(LinearLayout.VERTICAL);
+            left.addView(cText(b.version + (b.active ? "（使用中）" : ""), 13.5f, cText(), false));
+            left.addView(cText((b.sizeBytes > 0 ? (b.sizeBytes / 1048576) + "MB · " : "") + "已解压到 files/kernels/",
+                    11f, cSub(), false));
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(10), 0, dp(10));
+            row.addView(left, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            if (!b.active) {
+                Button sw = cButton("切换", true);
+                sw.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) { conKernelSwitch(b.version); }
+                });
+                row.addView(sw);
+            }
+            if (!b.active) {
+                Button del = cButton("删除", false);
+                LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                dlp.leftMargin = dp(8);
+                del.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        conDialog("删除内核 " + b.version, "只删解压出来的树，不动包文件，也不动数据。", "删除",
+                                new Runnable() { @Override public void run() {
+                                    boolean ok = KernelStore.remove(MainActivity.this, b.version);
+                                    conToast(ok ? "已删除" : "删除失败（正在使用中？先切走）");
+                                    renderConsole();
+                                }}, "取消");
+                    }
+                });
+                row.addView(del, dlp);
+            }
+            col.addView(row);
+            col.addView(cSep(0));
+        }
+
+        // ② 可安装（扫 /sdcard/DeepSeekHarness/kernels/）
+        col.addView(cSep(dp(16)));
+        col.addView(cText("可安装", 14f, cText(), false), cTop(dp(16)));
+        java.util.List<KernelStore.Bundle> store = KernelStore.scanStore(this);
+        if (store.isEmpty()) {
+            col.addView(cText("把内核包（kernel-*.tar.gz + manifest.json）放进 " + KernelStore.STORE + " 就会出现在这里。",
+                    11f, cSub(), false), cTop(dp(8)));
+        }
+        for (final KernelStore.Bundle b : store) {
+            boolean ready = b.installed;
+            LinearLayout left = new LinearLayout(this);
+            left.setOrientation(LinearLayout.VERTICAL);
+            left.addView(cText(b.display(), 13f, cText(), false));
+            left.addView(cText(b.installed ? "已安装" : (b.note.length() > 0 ? b.note : "待安装"), 11f,
+                    b.note.length() > 0 && !b.installed ? cRed() : cSub(), false));
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(10), 0, dp(10));
+            row.addView(left, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            if (!ready) {
+                Button ins2 = cButton("安装", true);
+                ins2.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) { conKernelInstall(b); }
+                });
+                row.addView(ins2);
+            }
+            col.addView(row);
+            col.addView(cSep(0));
+        }
+
+        // ③ 回退
+        if (activeVer.length() > 0) {
+            Button rv = cButton("回退到内置内核", false);
+            rv.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    KernelStore.deactivate(MainActivity.this);
+                    conToast("已切回内置内核，正在重启引擎…");
+                    conRestartEngine();
+                }
+            });
+            col.addView(rv, cTop(dp(16)));
+        }
+
+        col.addView(cText("⚠️ 内核包是整棵树（约 125MB），解压必须落内部存储 —— /sdcard 存不了符号链接。\n"
+                + "切换时要停一次引擎（几秒），失败会自动回退内置内核。", 11f, cSub(), false), cTop(dp(12)));
+    }
+
+    private void conKernelInstall(final KernelStore.Bundle b) {
+        kernelBusy = true;
+        kernelStage = "准备中…";
+        renderConsole();
+        KernelStore.install(this, b, new KernelStore.Cb() {
+            @Override public void onStage(final String stage, final int pct) {
+                ui.post(new Runnable() { @Override public void run() {
+                    kernelStage = stage + (pct >= 0 ? " " + pct + "%" : "");
+                    if (consoleVisible && consolePage == 5) renderConsole();
+                }});
+            }
+            @Override public void onDone(final boolean ok, final String msg) {
+                ui.post(new Runnable() { @Override public void run() {
+                    kernelBusy = false;
+                    kernelStage = "";
+                    conToast(msg);
+                    if (consoleVisible) renderConsole();
+                }});
+            }
+        });
+    }
+
+    private void conKernelSwitch(final String ver) {
+        conDialog("切换到内核 " + ver, "会停一次引擎再起来（几秒）。会话和记忆都在 dshhome 里，不受影响。", "切换",
+                new Runnable() { @Override public void run() {
+                    String err = KernelStore.activate(MainActivity.this, ver);
+                    if (err != null) { conToast(err); return; }
+                    conToast("已切到 " + ver + "，正在重启引擎…");
+                    applyKernelTreeNow();
+                    conRestartEngine();
+                }}, "取消");
+    }
+
+    /** 网页控制台「切换」：不弹原生框（网页侧已二次确认），直接激活并重启引擎。 */
+    private void conKernelSwitchDirect(String ver) {
+        String err = KernelStore.activate(this, ver);
+        if (err != null) { conToast(err); return; }
+        conToast("已切到 " + ver + "，正在重启引擎…");
+        applyKernelTreeNow();
+        conRestartEngine();
+    }
+
+    /**
+     * v1.49.1：切完内核立刻把 dshrootDir 换成新的树。
+     *
+     * 为什么必须有这一步：整段文件准备（含「受管内核优先」）被 filesPreparedThisBoot 守着，
+     * 只在本次 App 进程的第一次启动时跑一遍。控制台的「切换」是在同一个进程里杀引擎再拉起，
+     * 这一步不会被重跑 —— 于是新引擎仍然用着旧的 dshrootDir（内置树），切了等于白切。
+     * 用户看到的就是「点了切换、重启了、内核没变」。
+     */
+    private void applyKernelTreeNow() {
+        try {
+            File managed = KernelStore.activeTree(MainActivity.this);
+            if (managed != null) {
+                dshrootDir = managed;
+                kernelManagedTree = managed;
+                Log.i(TAG, "engine kernel -> managed " + managed.getAbsolutePath());
+            } else {
+                if (builtinDshrootDir != null) dshrootDir = builtinDshrootDir;
+                kernelManagedTree = null;
+                Log.i(TAG, "engine kernel -> builtin " + (dshrootDir == null ? "-" : dshrootDir.getAbsolutePath()));
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "applyKernelTreeNow failed", t);
+        }
+    }
+
+    /** 网页控制台「删除」。使用中的内核不许删（先回退/切走）。 */
+    private void conKernelRemoveDirect(String ver) {
+        String act = KernelStore.activeVersion(this);
+        if (ver != null && ver.equals(act)) { conToast("这个内核正在使用，先切回内置或别的版本再删"); return; }
+        boolean ok = KernelStore.remove(this, ver);
+        conToast(ok ? "已删除内核 " + ver : "删除失败: " + ver);
+    }
+
+    // ---------- 日志页 ----------
+    private void renderConsoleLog() {
+        LinearLayout col = consoleBody;
+        col.addView(conBackRow("日志"));
+        col.addView(cText(conLogSummary(), 12f, cText(), false), cTop(dp(12)));
+        col.addView(cText("「查看」直接看末尾 200 行；「分享」调用系统分享（QQ / 微信 / 邮件…都能选），正文里带完整日志路径与末尾 400 行。日志会随使用不断追加，太长不好读时可「清空日志」。",
+                11f, cSub(), false), cTop(dp(8)));
+        LinearLayout acts = new LinearLayout(this);
+        acts.setOrientation(LinearLayout.HORIZONTAL);
+        Button v = cButton("查看日志", false);
+        v.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View x) { conViewLog(); } });
+        Button e = cButton("分享", true);
+        e.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View x) { conShareLog(); } });
+        acts.addView(v);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = dp(8);
+        acts.addView(e, lp);
+        col.addView(acts, cTop(dp(14)));
+        // 只占一行的次要操作：日志积累久了会很大，给一个直接清空的入口（单独一行，避免窄屏挤在一起）
+        LinearLayout clearRow = new LinearLayout(this);
+        clearRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button c = cButton("清空日志", false);
+        c.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View x) { conClearLog(); } });
+        clearRow.addView(c);
+        col.addView(clearRow, cTop(dp(10)));
+    }
+
+    private File conLogFile() { return new File(getFilesDir(), "dsh-web.log"); }
+
+    /**
+     * 与日志相关的全部文件：内部/外部两份 dsh-web.log + 两份 startup-diag.txt。
+     * 外部那份是 v1.7.1 起镜像的（/sdcard/<pkgRoot>/），两处都要清，否则外部的旧内容还在。
+     */
+    private File[] conLogTargets() {
+        File extRoot = new File(Environment.getExternalStorageDirectory(), pkgRoot());
+        return new File[]{
+                new File(getFilesDir(), "dsh-web.log"),
+                new File(getFilesDir(), "startup-diag.txt"),
+                new File(extRoot, "dsh-web.log"),
+                new File(extRoot, "startup-diag.txt"),
+        };
+    }
+
+    /**
+     * 清空日志。
+     * 关键：引擎写日志的句柄是追加模式（FileOutputStream(f, true) → O_APPEND），
+     * 所以把文件截断到 0 既不会打断正在运行的引擎，也不会丢后续日志 ——
+     * 追加写总是写到当前文件末尾，截断后自然从 0 重新开始。
+     * （不要用 delete()：那会把 inode 摘掉，引擎的旧句柄会继续往已删除的文件里写，
+     * 于是"显示已清空、新日志却消失"。）
+     */
+    private void conClearLog() {
+        long total = 0;
+        for (File f : conLogTargets()) {
+            try { if (f.exists()) total += f.length(); } catch (Throwable ignored) {}
+        }
+        if (total == 0) { conToast("日志已经是空的"); return; }
+        // 与控制台其余弹窗统一走自绘浮层（conDialog），不再用系统 AlertDialog
+        // ——后者会带一层主题面板外框，和本页其它弹窗不是一套视觉。
+        conDialog("清空日志",
+                "当前共 " + (total / 1024) + " KB。\n\n"
+                        + "清空不影响正在运行的引擎，之后的新日志会继续正常写入。",
+                "清空",
+                new Runnable() { @Override public void run() { conClearLogNow(); } },
+                "取消");
+    }
+
+    private void conClearLogNow() {
+        int n = 0;
+        long freed = 0;
+        for (File f : conLogTargets()) {
+            try {
+                if (!f.exists() || f.length() == 0) continue;
+                long len = f.length();
+                java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "rw");
+                try { raf.setLength(0); } finally { raf.close(); }
+                freed += len;
+                n++;
+            } catch (Throwable t) {
+                Log.w(TAG, "clear log failed: " + f, t);
+            }
+        }
+        conToast(n == 0 ? "没有可清空的日志" : ("已清空 " + n + " 个日志文件，释放 " + (freed / 1024) + " KB"));
+        if (consoleVisible && consolePage == 3) renderConsole();
+    }
+
+    private String conLogSummary() {
+        try {
+            File f = conLogFile();
+            if (!f.exists()) return "还没有日志（引擎没启动过）";
+            return "dsh-web.log · " + (f.length() / 1024) + " KB · "
+                    + new SimpleDateFormat("MM-dd HH:mm").format(new java.util.Date(f.lastModified()));
+        } catch (Throwable t) { return "日志不可读"; }
+    }
+
+    private String conTailOf(File f, int maxLines) {
+        try {
+            java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r");
+            long len = raf.length();
+            long start = Math.max(0, len - 65536);
+            raf.seek(start);
+            byte[] buf = new byte[(int) (len - start)];
+            raf.readFully(buf);
+            raf.close();
+            String s = new String(buf, "UTF-8");
+            String[] lines = s.split("\n");
+            if (lines.length <= maxLines) return s;
+            StringBuilder sb = new StringBuilder();
+            for (int i = lines.length - maxLines; i < lines.length; i++) { sb.append(lines[i]); sb.append('\n'); }
+            return sb.toString();
+        } catch (Throwable t) { return "读取失败：" + t.getMessage(); }
+    }
+
+    private void conViewLog() {
+        try {
+            File f = conLogFile();
+            if (!f.exists()) { conToast("还没有日志（引擎没启动过）"); return; }
+            TextView tv = cText(conTailOf(f, 200), 10.5f, cText(), false);
+            tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+            tv.setTextIsSelectable(true);
+            ScrollView sv = new ScrollView(this);
+            sv.setBackground(cShape(isDark() ? 0xFF0F1524 : 0xFFF2F4F8, 0, 0, 6));
+            sv.setPadding(dp(12), dp(12), dp(12), dp(12));
+            sv.addView(tv);
+            sv.setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(380)));
+            conDialogView("dsh-web.log（末尾 200 行）", sv, "关闭", null, null);
+        } catch (Throwable t) { conToast("读取日志失败：" + t.getMessage()); }
+    }
+
+    /** v1.12：不再只能导到固定目录 —— 直接调系统分享（QQ / 微信 / 邮件随意选）。 */
+    @SuppressWarnings("unused")
+    private void conShareLogText() {
+        conToast("正在准备日志…");
+        new Thread(new Runnable() { @Override public void run() {
+            final String body = conBuildShareText();
+            ui.post(new Runnable() { @Override public void run() { conSendShare(body); } });
+        }}, "log-share").start();
+    }
+
+    private String conBuildShareText() {
+        try {
+            File f = conLogFile();
+            String head = "DeepSeek Harness 日志\n"
+                    + "版本 " + conVersionLabel() + "\n"
+                    + "端口 " + enginePort + " · " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new java.util.Date()) + "\n"
+                    + "完整日志路径：" + f.getAbsolutePath() + "\n"
+                    + "-------- dsh-web.log（末尾 400 行）--------\n";
+            if (!f.exists()) return head + "（还没有日志：引擎没启动过）";
+            return head + conTailOf(f, 400);
+        } catch (Throwable t) { return "日志读取失败：" + t.getMessage(); }
+    }
+
+    /** v1.13：以**文件**形式分享日志（原来是纯文字）。
+     * 准备好 dsh-web.log + 诊断文件 → 拷到 cache/share → 用 LogShareProvider 的 content:// URI 发出去。 */
+    private void conShareLog() {
+        conToast("正在准备日志文件…");
+        new Thread(new Runnable() { @Override public void run() {
+            final java.util.List<File> files = new java.util.ArrayList<File>();
+            String err = null;
+            try {
+                File dir = LogShareProvider.shareDir(MainActivity.this);
+                // 清掉上一次的残留，避免分享到旧文件
+                File[] old = dir.listFiles();
+                if (old != null) for (File o : old) { try { o.delete(); } catch (Throwable ignored) {} }
+
+                File log = conLogFile();
+                if (log.exists() && log.length() > 0) {
+                    File dst = new File(dir, "dsh-web.log");
+                    copyFile(log, dst);
+                    files.add(dst);
+                }
+                // 启动诊断（启动失败时才有）与外部日志镜像，一并带上
+                File diag = new File(getFilesDir(), "startup-diag.txt");
+                if (diag.exists() && diag.length() > 0) {
+                    File dst = new File(dir, "startup-diag.txt");
+                    copyFile(diag, dst);
+                    files.add(dst);
+                }
+            } catch (Throwable t) { err = String.valueOf(t.getMessage()); }
+            final String e = err;
+            ui.post(new Runnable() { @Override public void run() {
+                if (files.isEmpty()) { conToast("没有可分享的日志：" + (e != null ? e : "引擎还没启动过")); return; }
+                conSendLogFiles(files);
+            } });
+        }}, "log-share").start();
+    }
+
+    /** 发多个文件（ACTION_SEND_MULTIPLE + 读权限临时授权）。 */
+    private void conSendLogFiles(java.util.List<File> files) {
+        try {
+            java.util.ArrayList<Uri> uris = new java.util.ArrayList<Uri>();
+            for (File f : files) uris.add(LogShareProvider.uriFor(this, f.getName()));
+            Intent send;
+            if (uris.size() == 1) {
+                send = new Intent(Intent.ACTION_SEND);
+                send.putExtra(Intent.EXTRA_STREAM, uris.get(0));
+            } else {
+                send = new Intent(Intent.ACTION_SEND_MULTIPLE);
+                send.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+            }
+            send.setType("text/plain");   // 兼容性好：IM/邮件/网盘都能接
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            Intent chooser = Intent.createChooser(send, "分享日志文件");
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(chooser);
+        } catch (Throwable t) { conToast("调不起分享：" + t.getMessage()); }
+    }
+
+    /** 原纯文字分享（保留：某些接不住文件的场景可回退）。 */
+    private void conSendShare(String text) {
+        try {
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("text/plain");
+            send.putExtra(Intent.EXTRA_SUBJECT, "DeepSeek Harness 日志");
+            send.putExtra(Intent.EXTRA_TEXT, text);
+            Intent chooser = Intent.createChooser(send, "分享日志");
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(chooser);
+        } catch (Throwable t) { conToast("调不起分享：" + t.getMessage()); }
+    }
+
+    private void conExportLog() {
+        conToast("正在导出…");
+        new Thread(new Runnable() { @Override public void run() {
+            try {
+                String ts = new SimpleDateFormat("yyyyMMdd-HHmmss").format(new java.util.Date());
+                File dir = new File(Environment.getExternalStorageDirectory(), "Download/DSH日志-" + ts);
+                if (!dir.exists() && !dir.mkdirs()) throw new IOException("mkdir failed: " + dir);
+                File log = conLogFile();
+                if (log.exists()) conCopyFile(log, new File(dir, "dsh-web.log"));
+                File ext = new File(Environment.getExternalStorageDirectory(), pkgRoot());
+                File mirror = new File(ext, "dsh-web.log");
+                if (mirror.exists()) conCopyFile(mirror, new File(dir, "dsh-web-mirror.log"));
+                File diag = new File(ext, "startup-diag.txt");
+                if (diag.exists()) conCopyFile(diag, new File(dir, "startup-diag.txt"));
+                final String p = dir.getAbsolutePath();
+                ui.post(new Runnable() { @Override public void run() { conToast("已导出到 " + p); } });
+            } catch (Throwable t) {
+                final String m = String.valueOf(t.getMessage());
+                ui.post(new Runnable() { @Override public void run() { conToast("导出失败：" + m); } });
+            }
+        }}, "log-export").start();
+    }
+
+    private void conCopyFile(File src, File dst) throws IOException {
+        File p = dst.getParentFile();
+        if (p != null && !p.exists()) p.mkdirs();
+        FileInputStream in = new FileInputStream(src);
+        FileOutputStream out = new FileOutputStream(dst);
+        try {
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        } finally {
+            in.close();
+            out.close();
+        }
+    }
+
+    // ==================== 安全模式（救援启动） ====================
+    //
+    // 为什么需要它：引擎启动时要把 profile 的 patch 文件当配置解析。一旦这些文件
+    // 被写坏（用户装的插件写坏配置是常见路径），内核直接拒启：
+    //   dsh: failed to parse overlay <...>/profiles/web/cordis.patch.yml: YAMLException: ...
+    // 而「修它」又必须先把引擎跑起来（Web UI 与 AI 都靠引擎）—— 形成死结。
+    //
+    // 安全模式：把 profile 的**用户层**（可能被写坏的那些）整体旁置到旁边的
+    // web.userlayer-<时间>/，再从 APK 里恢复出厂 profile 文件。
+    // 用户数据（sessions / storages / .credentials.yaml / settings.yaml / 工作区绑定）**一律不动**。
+    // 引擎跑起来后，AI 可以直接读旁置目录里的坏文件去定位问题；修好后「退出安全模式」还回去。
+
+    /** profile 目录（web）。 */
+    private File profileDir() { return new File(payloadDir(), "dshhome/profiles/web"); }
+
+    /** 用户层：可能被用户/插件改坏、安全模式下要旁置的部分。 */
+    private static final String[] PROFILE_USER_LAYER = {
+            "cordis.patch.yml", "package.json", "pnpm-lock.yaml", "node_modules"
+    };
+
+    /** 出厂就该有的 profile 文件（payload.zip 里带，恢复安全模式时写回）。 */
+    private static final String[] PROFILE_SHIPPED = {
+            "cordis.yml", "cordis.patch.yml", "package.json", "pnpm-workspace.yaml"
+    };
+
+    /** 最近一次安全模式旁置目录名（退出安全模式时据此还原）。 */
+    private static final String KEY_SAFE_STASH = "safe_mode_stash";
+
+    private boolean safeModeActive() { return prefs().getBoolean(KEY_SAFE_MODE, false); }
+    private void setSafeModeFlag(boolean on) { prefs().edit().putBoolean(KEY_SAFE_MODE, on).apply(); }
+    private int bootFailures() { return prefs().getInt(KEY_BOOT_FAILS, 0); }
+    private void resetBootFailures() {
+        if (bootFailures() != 0) prefs().edit().putInt(KEY_BOOT_FAILS, 0).apply();
+    }
+    private void bumpBootFailure() {
+        final int n = bootFailures() + 1;
+        prefs().edit().putInt(KEY_BOOT_FAILS, n).apply();
+        Log.w(TAG, "engine boot failure #" + n);
+        ui.post(new Runnable() { @Override public void run() {
+            if (consoleVisible) refreshConsole();
+            if (n == BOOT_FAIL_HINT_AT) conToast("引擎连续启动失败：可在控制台用「安全模式启动」，不会丢数据");
+        }});
+    }
+
+    /** 安全模式启动（带确认）。 */
+    private void conSafeMode() {
+        conDialog("安全模式启动",
+                "做法：把 profile 的用户层（可能被插件写坏的配置）整体旁置，"
+                        + "用出厂配置启动引擎。\n\n"
+                        + "你的会话记录、API Key、模型配置、工作区绑定都会原样保留；"
+                        + "被旁置的文件也不删，启动后 AI 可以直接读它们来定位问题。\n\n"
+                        + "现在进入安全模式吗？",
+                "进入安全模式",
+                new Runnable() { @Override public void run() { conSafeModeNow(); } },
+                "取消");
+    }
+
+    private void conSafeModeNow() {
+        conToast("正在进入安全模式…");
+        new Thread(new Runnable() { @Override public void run() {
+            final String err;
+            try {
+                killEngineNow();
+                long deadline = System.currentTimeMillis() + 8000;
+                while (System.currentTimeMillis() < deadline && portListening(enginePort)) {
+                    try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+                }
+                err = enterSafeMode();
+            } catch (Throwable t) {
+                Log.e(TAG, "enter safe mode failed", t);
+                ui.post(new Runnable() { @Override public void run() { conToast("进入安全模式失败：" + t.getMessage()); } });
+                return;
+            }
+            ui.post(new Runnable() { @Override public void run() {
+                conToast(err == null ? "已进入安全模式，正在启动引擎…" : err);
+                refreshConsole();
+                if (err == null) { initDynamicShortcuts(); engineStoppedByUser = false; engineStartAborted = false; conEngineClick(); }
+            }});
+        }}, "safe-mode-on").start();
+    }
+
+    /** 退出安全模式（把旁置的用户层还回去）。 */
+    private void conExitSafeMode() {
+        conDialog("退出安全模式",
+                "把上次旁置的用户层放回去（覆盖当前出厂配置）。\n\n"
+                        + "如果刚才是因为插件把配置写坏才进的安全模式，建议先在对话里让 AI 把坏文件修好，"
+                        + "否则退出后可能又启动不了。\n\n确认退出吗？",
+                "退出并还原",
+                new Runnable() { @Override public void run() { conExitSafeModeNow(); } },
+                "取消");
+    }
+
+    private void conExitSafeModeNow() {
+        conToast("正在退出安全模式…");
+        new Thread(new Runnable() { @Override public void run() {
+            final String err;
+            try {
+                killEngineNow();
+                long deadline = System.currentTimeMillis() + 8000;
+                while (System.currentTimeMillis() < deadline && portListening(enginePort)) {
+                    try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+                }
+                err = exitSafeMode();
+            } catch (Throwable t) {
+                Log.e(TAG, "exit safe mode failed", t);
+                ui.post(new Runnable() { @Override public void run() { conToast("退出安全模式失败：" + t.getMessage()); } });
+                return;
+            }
+            ui.post(new Runnable() { @Override public void run() {
+                conToast(err == null ? "已退出安全模式，正在启动引擎…" : err);
+                refreshConsole();
+                if (err == null) { initDynamicShortcuts(); engineStoppedByUser = false; engineStartAborted = false; conEngineClick(); }
+            }});
+        }}, "safe-mode-off").start();
+    }
+
+    /** 真正干活：旁置用户层 + 恢复出厂 profile 文件。返回 null 表示成功，否则为错误文案。 */
+    private String enterSafeMode() {
+        try {
+            File dir = profileDir();
+            if (!dir.exists() && !dir.mkdirs()) return "无法创建 profile 目录：" + dir;
+            String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss").format(new java.util.Date());
+            File stash = new File(dir.getParentFile(), "web.userlayer-" + stamp);
+            if (!stash.exists() && !stash.mkdirs()) return "无法创建旁置目录：" + stash;
+            int moved = 0;
+            for (String name : PROFILE_USER_LAYER) {
+                File src = new File(dir, name);
+                if (!src.exists()) continue;
+                File dst = new File(stash, name);
+                if (!src.renameTo(dst)) { backupCopyRec(src, dst); backupDeleteRec(src); }
+                moved++;
+            }
+            int restored = restoreShippedProfileFiles();
+            prefs().edit().putBoolean(KEY_SAFE_MODE, true).putString(KEY_SAFE_STASH, stash.getName()).apply();
+            Log.w(TAG, "safe mode on: moved " + moved + " entries to " + stash + ", restored " + restored + " shipped files");
+            return null;
+        } catch (Throwable t) {
+            Log.e(TAG, "enterSafeMode", t);
+            return "进入安全模式失败：" + t.getMessage();
+        }
+    }
+
+    /** 把旁置的用户层放回去，并清掉安全模式标记。 */
+    private String exitSafeMode() {
+        try {
+            File dir = profileDir();
+            String stashName = prefs().getString(KEY_SAFE_STASH, null);
+            if (stashName == null || stashName.isEmpty()) {
+                setSafeModeFlag(false);
+                return "没有找到旁置目录，已直接关闭安全模式";
+            }
+            File stash = new File(dir.getParentFile(), stashName);
+            // 2026-10-09 审计第三批：旁置目录名来自 prefs，必须只认 enterSafeMode 自己造的形状
+            // （web.userlayer-yyyyMMdd-HHmmss），并核对 canonical 父目录 —— 否则一个被改过的
+            // 首选项/备份就能让这里去读任意目录，再把内容覆盖回 profile。
+            if (!SAFE_STASH_NAME.matcher(stashName).matches()) {
+                setSafeModeFlag(false);
+                return "旁置目录名不像本机生成（" + stashName + "），已直接关闭安全模式";
+            }
+            try {
+                File stashParent = stash.getCanonicalFile().getParentFile();
+                File profileParent = dir.getCanonicalFile().getParentFile();
+                if (stashParent == null || profileParent == null || !stashParent.equals(profileParent)) {
+                    setSafeModeFlag(false);
+                    return "旁置目录不在 profile 同级，已直接关闭安全模式";
+                }
+            } catch (Throwable t) {
+                setSafeModeFlag(false);
+                return "无法核对旁置目录位置，已直接关闭安全模式";
+            }
+            if (!stash.exists()) {
+                setSafeModeFlag(false);
+                return "旁置目录已不存在（" + stashName + "），已直接关闭安全模式";
+            }
+            int back = 0;
+            File[] kids = stash.listFiles();
+            if (kids != null) {
+                for (File src : kids) {
+                    File dst = new File(dir, src.getName());
+                    backupDeleteRec(dst);   // 先清掉出厂版，再把用户层放回
+                    if (!src.renameTo(dst)) { backupCopyRec(src, dst); backupDeleteRec(src); }
+                    back++;
+                }
+            }
+            setSafeModeFlag(false);
+            Log.w(TAG, "safe mode off: restored " + back + " entries from " + stash);
+            return null;
+        } catch (Throwable t) {
+            Log.e(TAG, "exitSafeMode", t);
+            return "退出安全模式失败：" + t.getMessage();
+        }
+    }
+
+    // ==================== 备份：导出 / 导入 ====================
+    // 设计目标：装插件把引擎弄崩时，能先把全部数据导出，清完重装再导回，什么都不丢。
+    // 与安全模式互补：安全模式解决「不用清数据就能启动」，导出/导入解决「换机、彻底重装、留底」。
+
+    private SharedPreferences prefs() { return getSharedPreferences(PREFS, MODE_PRIVATE); }
+
+    /** 参与备份的偏好项（其余是缓存/引擎运行态，不必带走）。 */
+    private static final String[] BACKUP_PREF_S = {
+            "workspace_path", "shizuku_app_id", "engine_port"
+    };
+    private static final String[] BACKUP_PREF_I = {
+            "engine_boot_failures"
+    };
+    private static final String[] BACKUP_PREF_B = {
+            "safe_mode_active", "setup_done"
+    };
+
+    /** 要导出/还原的用户数据根（相对 payload/dshhome）。 */
+    private static final String[] BACKUP_ROOTS = {
+            "sessions", "storages", ".credentials.yaml", "settings.yaml",
+            "settings.yaml.imported", "cordis.patch.yml", ".anonymous-user-id"
+    };
+
+    private void conBackupExport() {
+        conToast("正在打包全部数据…");
+        new Thread(new Runnable() { @Override public void run() {
+            File out = null; String err = null; int files = 0;
+            try {
+                String ts = new SimpleDateFormat("yyyyMMdd-HHmmss").format(new java.util.Date());
+                File dir = new File(Environment.getExternalStorageDirectory(), "Download");
+                if (!dir.exists()) dir.mkdirs();
+                out = new File(dir, "DSH备份-" + ts + ".zip");
+                files = writeBackupZip(out);
+            } catch (Throwable t) {
+                Log.e(TAG, "backup export", t);
+                err = t.getMessage(); out = null;
+            }
+            final File f = out; final String e = err; final int n = files;
+            ui.post(new Runnable() { @Override public void run() {
+                if (f == null) conToast("导出失败：" + e);
+                else conToast("已导出 " + n + " 个文件到 " + f.getAbsolutePath());
+            }});
+        }}, "backup-export").start();
+    }
+
+    /** 把用户数据 + 偏好写成一个 zip。返回写入的文件数。 */
+    private int writeBackupZip(File out) throws Exception {
+        File home = new File(payloadDir(), "dshhome");
+        byte[] buf = new byte[64 * 1024];
+        int n = 0;
+        java.util.zip.ZipOutputStream zos =
+                new java.util.zip.ZipOutputStream(new java.io.BufferedOutputStream(new FileOutputStream(out)));
+        try {
+            // manifest：只写能帮人判断“这是什么包”的最小事实
+            String manifest = "{\n"
+                    + "  \"kind\": \"dsh-android-backup\",\n"
+                    + "  \"format\": 1,\n"
+                    + "  \"app\": \"" + jesc(conVersionLabel()) + "\",\n"
+                    + "  \"package\": \"" + jesc(getPackageName()) + "\",\n"
+                    + "  \"saved_at\": \"" + jesc(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new java.util.Date())) + "\"\n"
+                    + "}\n";
+            zipAddBytes(zos, "manifest.json", manifest.getBytes("UTF-8"));
+            // 偏好：用简单的 TSV（类型 + 值），避免再引一套 JSON 解析
+            zipAddBytes(zos, "prefs.txt", backupPrefsText().getBytes("UTF-8"));
+            // 用户数据
+            for (String rel : BACKUP_ROOTS) {
+                File src = new File(home, rel);
+                if (!src.exists()) continue;
+                n += zipAdd(zos, src, "dshhome/" + rel, buf);
+            }
+            // profile 用户层（可能被插件改坏，必须一起带走）
+            File pdir = profileDir();
+            for (String name : PROFILE_USER_LAYER) {
+                File src = new File(pdir, name);
+                if (!src.exists()) continue;
+                n += zipAdd(zos, src, "dshhome/profiles/web/" + name, buf);
+            }
+        } finally { try { zos.close(); } catch (Throwable ignored) {} }
+        return n;
+    }
+
+    private String backupPrefsText() {
+        StringBuilder sb = new StringBuilder("# dsh-android-backup prefs v1\n");
+        SharedPreferences p = prefs();
+        for (String k : BACKUP_PREF_S) { String v = p.getString(k, null); if (v != null) sb.append("S\t").append(k).append('\t').append(v).append('\n'); }
+        for (String k : BACKUP_PREF_I) { sb.append("I\t").append(k).append('\t').append(p.getInt(k, 0)).append('\n'); }
+        for (String k : BACKUP_PREF_B) { sb.append("B\t").append(k).append('\t').append(p.getBoolean(k, false)).append('\n'); }
+        return sb.toString();
+    }
+
+    private void zipAddBytes(java.util.zip.ZipOutputStream zos, String name, byte[] data) throws Exception {
+        zos.putNextEntry(new ZipEntry(name));
+        zos.write(data);
+        zos.closeEntry();
+    }
+
+    /** 递归把一个文件/目录写进 zip（跳过符号链接：内核会自己重建 profile 的链接）。返回文件数。 */
+    private int zipAdd(java.util.zip.ZipOutputStream zos, File f, String entryName, byte[] buf) throws Exception {
+        if (isSymlink(f)) return 0;
+        if (f.isDirectory()) {
+            zos.putNextEntry(new ZipEntry(entryName + "/"));
+            zos.closeEntry();
+            int n = 0;
+            File[] kids = f.listFiles();
+            if (kids != null) for (File k : kids) n += zipAdd(zos, k, entryName + "/" + k.getName(), buf);
+            return n;
+        }
+        zos.putNextEntry(new ZipEntry(entryName));
+        FileInputStream in = new FileInputStream(f);
+        try { int r; while ((r = in.read(buf)) > 0) zos.write(buf, 0, r); }
+        finally { in.close(); }
+        zos.closeEntry();
+        return 1;
+    }
+
+    /** lstat does not follow self-referential or dangling symbolic links. */
+    private boolean isSymlink(File f) throws IOException {
+        try {
+            android.system.StructStat stat = Os.lstat(f.getAbsolutePath());
+            return (stat.st_mode & android.system.OsConstants.S_IFMT) == android.system.OsConstants.S_IFLNK;
+        } catch (android.system.ErrnoException failed) {
+            throw new IOException("Cannot inspect file before backup", failed);
+        }
+    }
+
+    private void conSnapshotImport() {
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            startActivityForResult(i, REQ_SNAPSHOT_FILE);
+        } catch (Throwable t) { conToast("无法打开文件选择器：" + t.getMessage()); }
+    }
+
+    private void conSnapshotImportFromUri(final Uri uri) {
+        conDialog("从时光机快照还原",
+                "会把快照里的全站资产（记忆库 / 所有会话 / 配置 / 技能）写回本机，然后重启引擎。\n\n"
+                        + "还原前脚本会先自动存一份当前状态的安全快照，出问题还能再还原回来。\n\n"
+                        + "整个过程可能要一两分钟，别中途退出。开始还原吗？",
+                "开始还原",
+                new Runnable() { @Override public void run() { conSnapshotImportNow(uri); } },
+                "取消");
+    }
+
+    /** 只认 backup.mjs 产出的 .dshbackup 容器（魔数 DSHB），不走 readBackupZip。
+     *  两种格式长期共存：zip 是「导出全部数据」的产物，.dshbackup 是时光机的全站快照。 */
+    private void conSnapshotImportNow(final Uri uri) {
+        conToast("正在准备还原…");
+        new Thread(new Runnable() { @Override public void run() {
+            File staged = null;
+            try {
+                staged = stageBackup(uri);
+                if (!looksLikeSnapshot(staged)) {
+                    throw new IOException("这个文件不是时光机快照（头部不是 DSHB），请选「立即备份」产出的 .dshbackup");
+                }
+                File node = new File(getFilesDir(), "payload/runtime/bin/node");
+                File tool = builtinTool("backup.mjs");
+                if (!node.exists()) throw new IOException("找不到内置 node");
+                if (!tool.exists()) throw new IOException("找不到备份工具脚本 backup.mjs");
+                // 还原是整体覆盖 dshhome，没有任何回退路径：先存一份还原前快照，
+                // 这一步失败就中止，绝不能在没有后路的情况下往下走。
+                ui.post(new Runnable() { @Override public void run() { conToast("正在备份当前状态…"); }});
+                if (runBackupTool(node, tool, "create", "--name", "before-restore") != 0) {
+                    throw new IOException("还原前备份失败，已中止，数据没有被改动");
+                }
+                // 引擎正读着 dshhome，边还原边读会拿到半截文件，必须先停干净
+                killEngineNow();
+                long deadline = System.currentTimeMillis() + 8000;
+                while (System.currentTimeMillis() < deadline && portListening(enginePort)) {
+                    try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+                }
+                ui.post(new Runnable() { @Override public void run() { conToast("正在还原，别退出…"); }});
+                ProcessBuilder pb = new ProcessBuilder(node.getAbsolutePath(), tool.getAbsolutePath(),
+                        "restore", staged.getAbsolutePath(), "--yes");
+                pb.environment().put("LD_LIBRARY_PATH", new File(getFilesDir(), "payload/runtime/lib").getAbsolutePath());
+                pb.redirectErrorStream(true);
+                Process p = pb.start();
+                BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream(), "UTF-8"));
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    sb.append(line).append('\n');
+                    if (sb.length() > 3000) sb.delete(0, sb.length() - 3000);   // 只留尾巴，够定位即可
+                }
+                int code = p.waitFor();
+                final String tail = sb.toString().trim();
+                if (code != 0) {
+                    throw new IOException("还原脚本退出码 " + code + (tail.isEmpty() ? "" : "：" + tail));
+                }
+            } catch (Throwable t) {
+                Log.e(TAG, "snapshot import", t);
+                final String m = t.getMessage();
+                ui.post(new Runnable() { @Override public void run() { conToast("还原失败：" + m); } });
+                return;
+            } finally {
+                if (staged != null) staged.delete();
+            }
+            ui.post(new Runnable() { @Override public void run() {
+                conToast("快照已写回，正在重启引擎…");
+                refreshConsole();
+                engineStoppedByUser = false; engineStartAborted = false;
+                conEngineClick();
+            }});
+        }}, "snapshot-import").start();
+    }
+
+    /** 跑一次 backup.mjs 子命令并返回退出码；输出丢弃，只在失败时用退出码判定。 */
+    private int runBackupTool(File node, File tool, String... args) throws Exception {
+        java.util.List<String> cmd = new java.util.ArrayList<String>();
+        cmd.add(node.getAbsolutePath());
+        cmd.add(tool.getAbsolutePath());
+        for (String a : args) cmd.add(a);
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        // node 是动态链接的，App 进程环境里没有 LD_LIBRARY_PATH，不显式给就链不上 libz
+        pb.environment().put("LD_LIBRARY_PATH", new File(getFilesDir(), "payload/runtime/lib").getAbsolutePath());
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream(), "UTF-8"));
+        try {
+            while (reader.readLine() != null) { /* 读干净，避免子进程写满管道阻塞 */ }
+        } catch (Exception ignored) {}
+        return p.waitFor();
+    }
+
+    /** .dshbackup 头 4 字节是 ASCII "DSHB"：选错文件时立刻报错，别等脚本跑完一整轮才说不行。 */
+    private boolean looksLikeSnapshot(File f) {
+        java.io.FileInputStream in = null;
+        try {
+            in = new java.io.FileInputStream(f);
+            byte[] magic = new byte[4];
+            if (in.read(magic) != 4) return false;
+            return magic[0] == 'D' && magic[1] == 'S' && magic[2] == 'H' && magic[3] == 'B';
+        } catch (Throwable t) {
+            return false;
+        } finally {
+            try { if (in != null) in.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    private void conBackupImport() {
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            startActivityForResult(i, REQ_BACKUP_FILE);
+        } catch (Throwable t) { conToast("无法打开文件选择器：" + t.getMessage()); }
+    }
+
+    private void conImportFromUri(final Uri uri) {
+        conDialog("从备份导入还原",
+                "会把备份里的用户数据（会话 / 凭证 / 设置 / 工作区）写回本机，然后重启引擎。\n\n"
+                        + "当前同名数据会被覆盖（备份文件本身不动）。\n\n开始导入吗？",
+                "开始导入",
+                new Runnable() { @Override public void run() { conImportNow(uri); } },
+                "取消");
+    }
+
+    private void conImportNow(final Uri uri) {
+        conToast("正在导入…");
+        new Thread(new Runnable() { @Override public void run() {
+            File candidate = null;
+            final String err; int files = 0;
+            try {
+                candidate = stageBackup(uri);
+                BackupValidator.validate(new FileInputStream(candidate), new File(payloadDir(), "dshhome"));
+                killEngineNow();
+                long deadline = System.currentTimeMillis() + 8000;
+                while (System.currentTimeMillis() < deadline && portListening(enginePort)) {
+                    try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+                }
+                files = readBackupZip(candidate);
+                err = null;
+            } catch (Throwable t) {
+                Log.e(TAG, "backup import", t);
+                // readBackupZip 内部已把这次写到一半的文件还原/删除（见 BackupRestore.rollback）
+                ui.post(new Runnable() { @Override public void run() { conToast("导入失败，已回滚本次改动：" + t.getMessage()); } });
+                return;
+            } finally {
+                if (candidate != null) candidate.delete();
+            }
+            final int n = files;
+            ui.post(new Runnable() { @Override public void run() {
+                conToast("已导入 " + n + " 个文件，正在重启引擎…");
+                refreshConsole();
+                engineStoppedByUser = false; engineStartAborted = false;
+                conEngineClick();
+            }});
+        }}, "backup-import").start();
+    }
+
+    private File stageBackup(Uri uri) throws Exception {
+        File file = File.createTempFile("backup-import-", ".zip", getCacheDir());
+        boolean complete = false;
+        try {
+            InputStream in = getContentResolver().openInputStream(uri);
+            if (in == null) throw new IOException("无法读取所选文件");
+            try {
+                FileOutputStream out = new FileOutputStream(file);
+                try {
+                    byte[] buffer = new byte[65536];
+                    long size = 0;
+                    int n;
+                    while ((n = in.read(buffer)) != -1) {
+                        size += n;
+                        if (size > 2L * 1024L * 1024L * 1024L) throw new IOException("备份文件过大");
+                        out.write(buffer, 0, n);
+                    }
+                } finally { out.close(); }
+            } finally { in.close(); }
+            complete = true;
+            return file;
+        } finally { if (!complete) file.delete(); }
+    }
+
+    /** Restore only a private, fully validated ZIP copy.
+     *  2026-10-09 审计第四批：不再“边读边覆盖、偏好立刻生效”。
+     *  现在文件全部写完（覆盖前先把原件挪进私有回滚目录）才应用偏好；
+     *  中途任何异常 → 还原被覆盖的文件、删掉新建的文件，偏好一个都不动。 */
+    private int readBackupZip(File candidate) throws Exception {
+        File base = payloadDir();
+        File home = new File(base, "dshhome");
+        byte[] buf = new byte[64 * 1024];
+        int n = 0;
+        boolean sawManifest = false;
+        String prefsText = null;
+        BackupRestore restore = new BackupRestore(home, new File(getCacheDir(), "backup-rollback"));
+        try {
+            InputStream raw = new FileInputStream(candidate);
+            ZipInputStream zis = new ZipInputStream(raw);
+            try {
+                ZipEntry e;
+                while ((e = zis.getNextEntry()) != null) {
+                    String name = e.getName();
+                    if (name.endsWith("/")) { zis.closeEntry(); continue; }
+                    if ("manifest.json".equals(name)) { sawManifest = true; zis.closeEntry(); continue; }
+                    if ("prefs.txt".equals(name)) {
+                        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                        int r; while ((r = zis.read(buf)) > 0) bos.write(buf, 0, r);
+                        prefsText = new String(bos.toByteArray(), "UTF-8");   // 先攒着，别急着生效
+                        zis.closeEntry();
+                        continue;
+                    }
+                    if (name.startsWith("dshhome/")) {
+                        File out = restore.prepare(name.substring("dshhome/".length()));
+                        FileOutputStream fos = new FileOutputStream(out);
+                        try { int r; while ((r = zis.read(buf)) > 0) fos.write(buf, 0, r); }
+                        finally { fos.close(); }
+                        n++;
+                    }
+                    zis.closeEntry();
+                }
+            } finally { try { zis.close(); } catch (Throwable ignored) {} }
+            if (!sawManifest) throw new IOException("这不像本应用的备份包（缺少 manifest.json）");
+            if (prefsText != null) applyBackupPrefs(prefsText);
+            if (!restore.commit()) Log.w(TAG, "backup rollback dir not fully removed");
+        } catch (Throwable failed) {
+            int undone = restore.rollback();
+            Log.e(TAG, "backup import rolled back " + undone + " entries", failed);
+            if (failed instanceof Exception) throw (Exception) failed;
+            throw new IOException(String.valueOf(failed));
+        }
+        // 用户层已还原 → 不再处于安全模式
+        setSafeModeFlag(false);
+        return n;
+    }
+
+    /** 备份里的 prefs 只允许改白名单内的键（BACKUP_PREF_S/I/B），且类型必须与键相符。 */
+    private static boolean backupPrefAllowed(String type, String key) {
+        String[] list;
+        if ("S".equals(type)) list = BACKUP_PREF_S;
+        else if ("I".equals(type)) list = BACKUP_PREF_I;
+        else if ("B".equals(type)) list = BACKUP_PREF_B;
+        else return false;
+        if (key == null || key.isEmpty()) return false;
+        for (String k : list) if (k.equals(key)) return true;
+        return false;
+    }
+
+    private void applyBackupPrefs(String text) {
+        SharedPreferences.Editor ed = prefs().edit();
+        String[] lines = text.split("\n");
+        int applied = 0, skipped = 0;
+        for (String line : lines) {
+            if (line.isEmpty() || line.startsWith("#")) continue;
+            String[] parts = line.split("\t", 3);
+            if (parts.length != 3) continue;
+            String type = parts[0], key = parts[1], value = parts[2];
+            // 2026-10-09 审计第三批：原来接受**任意** key —— 一份改过的备份就能写入
+            // safe_mode_active / safe_mode_stash 这类本不在导出清单里的键，等于把
+            // 「退出安全模式」那条路径的输入交给备份文件（配合旁置目录名可做路径越界）。
+            if (!backupPrefAllowed(type, key) || value.length() > 4096) { skipped++; continue; }
+            try {
+                if ("S".equals(type)) ed.putString(key, value);
+                else if ("I".equals(type)) ed.putInt(key, Integer.parseInt(value.trim()));
+                else if ("B".equals(type)) ed.putBoolean(key, Boolean.parseBoolean(value.trim()));
+            } catch (Throwable ignored) {}
+            applied++;
+        }
+        ed.apply();
+        Log.w(TAG, "backup prefs applied " + applied + ", skipped " + skipped);
+    }
+
+    /** 递归拷贝（rename 失败时的退路）。 */
+    private void backupCopyRec(File src, File dst) throws IOException {
+        if (isSymlink(src)) {
+            File parent = dst.getParentFile();
+            if (parent != null && !parent.isDirectory() && !parent.mkdirs()) throw new IOException("mkdir failed: " + parent);
+            try { Os.symlink(Os.readlink(src.getAbsolutePath()), dst.getAbsolutePath()); }
+            catch (android.system.ErrnoException failed) { throw new IOException("Cannot copy symbolic link", failed); }
+            return;
+        }
+        if (src.isDirectory()) {
+            if (!dst.exists() && !dst.mkdirs()) throw new IOException("mkdir failed: " + dst);
+            File[] kids = src.listFiles();
+            if (kids != null) for (File k : kids) backupCopyRec(k, new File(dst, k.getName()));
+            return;
+        }
+        File parent = dst.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) throw new IOException("mkdir failed: " + parent);
+        java.io.FileInputStream in = new java.io.FileInputStream(src);
+        try {
+            FileOutputStream out = new FileOutputStream(dst);
+            try { byte[] b = new byte[64 * 1024]; int r; while ((r = in.read(b)) > 0) out.write(b, 0, r); }
+            finally { out.close(); }
+        } finally { in.close(); }
+    }
+
+    /** Delete safely without following final or nested directory symlinks. */
+    private void backupDeleteRec(File f) throws IOException {
+        SafeFiles.deleteTree(f);
+    }
+
+    /** 从 assets/payload.zip 把出厂的 profile 文件写回（安全模式的关键一步）。 */
+    private int restoreShippedProfileFiles() throws IOException {
+        File dir = profileDir();
+        if (!dir.exists() && !dir.mkdirs()) throw new IOException("无法创建 " + dir);
+        final String prefix = "dshhome/profiles/web/";
+        byte[] buf = new byte[64 * 1024];
+        int n = 0;
+        ZipInputStream zis = new ZipInputStream(getAssets().open("payload.zip"));
+        try {
+            ZipEntry e;
+            while ((e = zis.getNextEntry()) != null) {
+                String name = e.getName();
+                boolean want = false;
+                for (String s : PROFILE_SHIPPED) {
+                    if (name.equals(prefix + s)) { want = true; break; }
+                }
+                if (!want) { zis.closeEntry(); continue; }
+                File out = new File(dir, name.substring(prefix.length()));
+                FileOutputStream fos = new FileOutputStream(out);
+                try {
+                    int r;
+                    while ((r = zis.read(buf)) > 0) fos.write(buf, 0, r);
+                } finally { fos.close(); }
+                zis.closeEntry();
+                n++;
+            }
+        } finally { zis.close(); }
+        return n;
+    }
+
+    /** Display notifications without inventing a chat write endpoint. */
+    private void handleNotificationIntent(Intent intent) {
+        if (intent == null) return;
+        String title = intent.getStringExtra("notification_title");
+        String content = intent.getStringExtra("notification_content");
+        if (content == null) {
+            title = intent.getStringExtra("auto_session_title");
+            content = intent.getStringExtra("auto_session_content");
+        }
+        intent.removeExtra("notification_title");
+        intent.removeExtra("notification_content");
+        intent.removeExtra("auto_session_title");
+        intent.removeExtra("auto_session_content");
+        if (content == null || content.trim().isEmpty()) return;
+        showNotificationContent(title, content);
+    }
+
+    private void showNotificationContent(String title, String content) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(20), dp(20), dp(16));
+        box.setBackground(cShape(cBg(), 0, 0, 16));
+        box.addView(cText(title == null ? "通知" : title, 18f, cText(), true));
+        ScrollView scroll = new ScrollView(this);
+        TextView body = cText(content, 14f, cText(), false);
+        body.setTextIsSelectable(true);
+        scroll.addView(body);
+        box.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                Math.min(dp(360), getResources().getDisplayMetrics().heightPixels / 2)));
+        Button close = cButton("关闭", false);
+        close.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { closeDialogOverlay(); }
+        });
+        box.addView(close, cTop(dp(12)));
+        showDialogOverlay(box);
+    }
+
+    private void showNotificationHistory() {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    final org.json.JSONArray history = NotificationArchive.list(getFilesDir());
+                    ui.post(new Runnable() {
+                        @Override public void run() {
+                            ScrollView scroll = new ScrollView(MainActivity.this);
+                            LinearLayout list = new LinearLayout(MainActivity.this);
+                            list.setOrientation(LinearLayout.VERTICAL);
+                            for (int i = 0; i < history.length(); i++) {
+                                final org.json.JSONObject item = history.optJSONObject(i);
+                                if (item == null) continue;
+                                String label = new java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.US)
+                                        .format(new java.util.Date(item.optLong("time"))) + " · " + item.optString("title");
+                                Button row = cButton(label, false);
+                                row.setOnClickListener(new View.OnClickListener() {
+                                    @Override public void onClick(View v) {
+                                        showNotificationContent(item.optString("title"), item.optString("text"));
+                                    }
+                                });
+                                list.addView(row, cTop(dp(6)));
+                            }
+                            if (history.length() == 0) list.addView(cText("暂无通知", 14f, cSub(), false));
+                            scroll.addView(list);
+                            conDialogView("通知历史（最近 100 条）", scroll, null, null, "关闭");
+                        }
+                    });
+                } catch (final Exception e) {
+                    ui.post(new Runnable() {
+                        @Override public void run() { conToast("读取通知历史失败: " + e.getMessage()); }
+                    });
+                }
+            }
+        }, "notification-history").start();
+    }
+
+    @Override
+    public void onBackPressed() {
+        handleBack();
+    }
+
+    /**
+     * 返回唯一入口（v1.45）：原生浮层 → 控制台 → 问网页 → 根页。
+     * 绝不无脑 goBack()：历史里可能躺着片子留下的 data:/blob: 文档，退上去 Chromium 直接报错页。
+     */
+    /** 升级后插件 bundle 缺失的自愈重试次数（正常页面永不触发，最多 2 次）。 */
+    private int pluginReloads = 0;
+
+    /**
+     * 窗口级返回桥（注入到页面）。前端若实现 window.__dshBack 就由它吃掉返回；
+     * 没实现则壳层兜底。模态框、侧边栏展开都按「看得见的关闭按钮」去找，找不到就返回 false，
+     * 绝不猜着点 —— 宁可退化成弹退出框，也不要误点。
+     *
+     * v2 修的是手机侧栏：手机端抽屉展开时 DOM 里是 div.dsh-mobile-scrim（透明遮罩，点了就收起），
+     * 收起时才是 [data-sidebar-collapsed]（属性存在即收起）。旧版判据写反了，手机侧栏永远匹配不到。
+     */
+    private static final String DSH_BACK_JS =
+        "(function(){if(window.__dshBack&&window.__dshBack.__v===3)return;"
+      + "function lab(re){var a=document.querySelectorAll('button,[role=button]');"
+      + "for(var i=0;i<a.length;i++){var s=(a[i].getAttribute('aria-label')||'')+' '+(a[i].getAttribute('title')||'');"
+      + "if(re.test(s))return a[i];}return null;}"
+      + "var f=function(){try{"
+      + "var d=document.querySelector('[role=dialog][aria-modal=\"true\"],dialog[open]');"
+      + "if(d){var b=d.querySelectorAll('button');for(var i=0;i<b.length;i++){"
+      + "var s=(b[i].getAttribute('aria-label')||'');"
+      + "if(/close|cancel|dismiss|关闭|取消/i.test(s)){b[i].click();return true;}}return false;}"
+      + "var sc=document.querySelector('.dsh-mobile-scrim');"
+      + "if(sc){sc.click();return true;}"
+      + "if(window.innerWidth>700)return false;"
+      + "var r=document.querySelector('[data-sidebar-collapsed]');"
+      + "if(!r){var t=lab(/sidebar|侧栏|侧边栏/i);if(t&&t.offsetParent!==null){t.click();return true;}}"
+      + "return false;}catch(e){return false;}};f.__v=3;window.__dshBack=f;})()";
+
+    /**
+     * 插件 bundle 自愈。升级后 payload 重解包会让 client.js 的 mtime 变化，而 combo rev 是从
+     * mtime/ctime/size 派生的（见 dsh-client-modules README）：启动途中 rev 会换一次，
+     * 早开的页面就会停在「Failed to load plugins」。探测到该文案就 reload，最多两次。
+     */
+    private void schedulePluginFailureProbe(final android.webkit.WebView view) {
+        for (final long d : new long[] { 2500L, 6500L }) {
+            view.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (pluginReloads >= 2) return;
+                    try {
+                        view.evaluateJavascript(
+                            "(function(){try{var t=document.body?document.body.innerText:'';"
+                          + "return t.indexOf('Failed to load plugins')>=0?'1':'0';}catch(e){return '0';}})()",
+                            new android.webkit.ValueCallback<String>() {
+                                @Override public void onReceiveValue(String v) {
+                                    if ("\"1\"".equals(v)) {
+                                        if (pluginReloads < 2) {
+                                            pluginReloads++;
+                                            diagLog("NAV", "plugin bundle missing -> reload #" + pluginReloads);
+                                            try { view.reload(); } catch (Throwable ignored) {}
+                                        }
+                                    } else {
+                                        pluginReloads = 0;
+                                    }
+                                }
+                            });
+                    } catch (Throwable ignored) {}
+                }
+            }, d);
+        }
+    }
+
+    private void handleBack() {
+        // 自绘弹窗优先吃掉返回键（等同“取消”），避免返回键穿透到下层
+        if (dialogOverlay != null) { closeDialogOverlay(); return; }
+        // v1.12：控制台内的返回先回控制台首页，再退出
+        if (consoleVisible) {
+            if (consolePage != 0) { consolePage = 0; renderConsole(); return; }
+            confirmExit();
+            return;
+        }
+        if (webView == null) { confirmExit(); return; }
+
+        // 先问网页：侧边栏/浮层打开时由前端自己吃掉返回（返回 "1" = 已处理）。
+        // 会审两轮（2026-10-27，Gemini 4 Argon + Kimi K3.1 Pro）合并结论：
+        //   · 要一次性仲裁：回调与超时互斥，只走一次（answered CAS），否则网页卡顿时会双退；
+        //   · 但也不能没有兜底 —— 一刀砍掉会让页面卡死时返回键彻底失灵（两家都点了这条）。
+        // 所以：超时 + CAS，两路谁先到谁结清，另一路作废。
+        // 第三轮会审（同两家，审 v1.45 发行包）指出 250ms 太紧：页面在渲染大段 Markdown 时主线程
+        // 阻塞超过 250ms，壳层会先走 onBackUnhandled，等 JS 空出来 __dshBack() 仍会执行一次
+        // ——「退出/回退」和「关侧栏」可能叠在一起。提大到 900ms 降低该竞态触发概率；
+        // 彻底消除需要前端把返回语义做成真契约（见 PATCH-NOTES 已知限制）。
+        final java.util.concurrent.atomic.AtomicBoolean answered =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        try {
+            webView.evaluateJavascript(
+                "(function(){try{return (window.__dshBack && window.__dshBack()) ? '1' : '0';}"
+              + "catch(e){return '0';}})()",
+                new android.webkit.ValueCallback<String>() {
+                    @Override public void onReceiveValue(String value) {
+                        if (!answered.compareAndSet(false, true)) return;
+                        if (!"\"1\"".equals(value)) onBackUnhandled();
+                    }
+                });
+        } catch (Throwable t) {
+            if (answered.compareAndSet(false, true)) onBackUnhandled();
+            return;
+        }
+        webView.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (answered.compareAndSet(false, true)) onBackUnhandled();
+            }
+        }, 900L);
+    }
+
+    /** 网页处理不了：只允许退回主界面这一条历史，data:/blob:/外链一律不认。 */
+    private void onBackUnhandled() {
+        try {
+            if (webView != null) {
+                android.webkit.WebBackForwardList h = webView.copyBackForwardList();
+                if (h != null) {
+                    int idx = h.getCurrentIndex();
+                    if (idx > 0) {
+                        String prev = String.valueOf(h.getItemAtIndex(idx - 1).getUrl());
+                        // 只认 loopback：片子那份文档是 loadDataWithBaseURL(null,…)，URL 恒为 about:blank，
+                        // 退到它 Chromium 就报 ERR_HTTP_RESPONSE_CODE_FAILURE（issue 里那张白屏）。
+                        // 不再比较 cur 与 prev：SPA 会 pushState({}, '', location.href) 压入「同 URL 不同 state」
+                        // 的条目（侧栏/抽屉层），按字符串相等判会把这些合法回退误杀（会审两家一致）。
+                        if (com.hubmobile.app.harness.vscreen.LocalHttpFence.isLoopbackUrl(prev, enginePort)) {
+                            webView.goBack();
+                            return;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        confirmExit();
+    }
+}
