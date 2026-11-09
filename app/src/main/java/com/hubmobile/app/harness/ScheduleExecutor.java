@@ -41,7 +41,7 @@ final class ScheduleExecutor {
         }
     }
 
-    static List<String> history(Context ctx, int limit) {
+    static List<String> history(Context ctx, int limit) throws java.io.IOException {
         List<String> all = new ArrayList<String>();
         try {
             File f = new File(ctx.getFilesDir(), "schedule-history.txt");
