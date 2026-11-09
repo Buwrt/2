@@ -43,6 +43,7 @@ public final class HarnessBridge {
 
     private static volatile Process sProc;
     private static volatile String sTokenUrl;
+    private static volatile int sActivePort = PORT;
     private static final Object LOCK = new Object();
 
     /** zip 不保留 unix 执行位，解压后必须逐项补 —— 与上游 setExecutables() 同一份清单。 */
@@ -74,7 +75,8 @@ public final class HarnessBridge {
     /** 进程仍活着时，重进 Activity 直接走根路径（cookie 已由首次加载下发）。 */
     public static String existingUrl() {
         Process p = sProc;
-        if (p != null && alive(p) && sTokenUrl != null) return BASE + "/";
+        if (p != null && alive(p) && sTokenUrl != null)
+            return "http://127.0.0.1:" + sActivePort + "/";
         return null;
     }
 
@@ -128,19 +130,23 @@ public final class HarnessBridge {
         ZipInputStream zis = new ZipInputStream(new BufferedInputStream(raw, 64 * 1024));
         byte[] buf = new byte[64 * 1024];
         ZipEntry e;
-        int count = 0, written = 0;
+        long scanned = 0, written = 0;
         while ((e = zis.getNextEntry()) != null) {
+            scanned++;
             String name = e.getName();
             if (name.startsWith("/") || name.contains("..")) { zis.closeEntry(); continue; }
             File out = new File(dir, name);
             if (e.isDirectory()) {
                 out.mkdirs();
                 zis.closeEntry();
+                if (scanned % 400 == 0) progress(ui, cb, scanned, written);
                 continue;
             }
             long sz = e.getSize();
+            // 覆盖安装时 files/payload 会保留：大小一致就跳过，不算「新增」
             if (sz >= 0 && out.exists() && out.length() == sz) {
                 zis.closeEntry();
+                if (scanned % 400 == 0) progress(ui, cb, scanned, written);
                 continue;
             }
             File parent = out.getParentFile();
@@ -153,15 +159,11 @@ public final class HarnessBridge {
             if (needExec(name)) out.setExecutable(true, false);
             written++;
             zis.closeEntry();
-            count++;
-            if (count % 400 == 0) {
-                final long k = count, w = written;
-                progress(ui, cb, k, w);
-            }
+            if (scanned % 400 == 0) progress(ui, cb, scanned, written);
         }
         zis.close();
         raw.close();
-        progress(ui, cb, count, written);
+        progress(ui, cb, scanned, written);
 
         // 覆盖升级后执行位可能丢失，每次都补一遍（成本极低）
         for (String p : EXECS) {
@@ -189,10 +191,20 @@ public final class HarnessBridge {
             File tmp = new File(c.getCacheDir(), "tmp");
             if (!tmp.exists()) tmp.mkdirs();
             File log = new File(c.getFilesDir(), "dsh-web.log");
-            // 清空旧日志，避免抓到上一次启动已作废的 token
+            node.setExecutable(true, false);
+
+            // 覆盖安装 / 反复重进时，App 被系统杀掉但上一轮的 node 子进程不一定跟着退，
+            // 会变成孤儿继续占着 3080；新进程 listen EADDRINUSE 立刻退出 —— 这正是
+            // 「引擎进程提前退出」最常见的原因。上游 MainActivity 有 findEnginePid/killEngineNow，
+            // 精简桥这里必须补上等价逻辑，只杀 cmdline 带本 payload 路径的自己的引擎。
+            killStaleEngines(dir, PORT);
+            int port = pickPort(PORT);
+            sActivePort = port;
+            final String base = "http://127.0.0.1:" + port;
+            stage(ui, cb, "本地引擎端口 " + port + "，正在拉起 node…");
+            // 清空旧日志，避免抓到上一次启动已作废的 token（必须在 kill 之后）
             FileOutputStream clr = new FileOutputStream(log, false);
             clr.close();
-            node.setExecutable(true, false);
 
             List<String> cmd = new ArrayList<String>();
             cmd.add(node.getAbsolutePath());
@@ -200,7 +212,7 @@ public final class HarnessBridge {
             cmd.add(binjs.getAbsolutePath());
             cmd.add("web");
             cmd.add("--host"); cmd.add("127.0.0.1");
-            cmd.add("--port"); cmd.add(String.valueOf(PORT));
+            cmd.add("--port"); cmd.add(String.valueOf(port));
 
             ProcessBuilder pb = new ProcessBuilder(cmd);
             Map<String, String> env = pb.environment();
@@ -266,7 +278,14 @@ public final class HarnessBridge {
             String token = null;
             long lastTick = 0;
             while (System.currentTimeMillis() < deadline) {
-                if (!alive(p)) throw new IOException("引擎进程提前退出，日志见 /files/dsh-web.log");
+                if (!alive(p)) {
+                    // 等日志线程把 stdout 写完，再把真实原因显示到开机页
+                    try { Thread.sleep(250); } catch (InterruptedException ignored) {}
+                    String why = tailOf(log, 1200);
+                    if (why.isEmpty()) why = tail.toString();
+                    if (why.length() > 1200) why = why.substring(why.length() - 1200);
+                    throw new IOException("引擎进程提前退出" + (why.isEmpty() ? "" : "：\n" + why));
+                }
                 Matcher m = pat.matcher(tail);
                 while (m.find()) token = m.group(1);
                 if (token != null) break;
@@ -277,12 +296,99 @@ public final class HarnessBridge {
                 }
                 Thread.sleep(300);
             }
-            if (token == null) throw new IOException("引擎 180s 内未返回访问令牌");
+            if (token == null) {
+                String why = tailOf(log, 800);
+                throw new IOException("引擎 180s 内未返回访问令牌"
+                        + (why.isEmpty() ? "" : "：\n" + why));
+            }
 
-            String url = BASE + "/?token=" + token;
+            String url = base + "/?token=" + token;
             sTokenUrl = url;
             return url;
         }
+    }
+
+    /** 读文件尾部，用于把 node 的真实报错显示到开机页。 */
+    private static String tailOf(File f, int max) {
+        try {
+            if (!f.exists()) return "";
+            byte[] all = new byte[(int) f.length()];
+            FileInputStream in = new FileInputStream(f);
+            int off = 0, n;
+            while (off < all.length && (n = in.read(all, off, all.length - off)) > 0) off += n;
+            in.close();
+            String s = new String(all, 0, off, "UTF-8");
+            return s.length() > max ? s.substring(s.length() - max) : s;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private static String readCmdline(int pid) {
+        try {
+            File f = new File("/proc/" + pid + "/cmdline");
+            if (!f.exists()) return null;
+            byte[] b = new byte[8192];
+            FileInputStream in = new FileInputStream(f);
+            int n = in.read(b);
+            in.close();
+            if (n <= 0) return null;
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < n; i++) sb.append(b[i] == 0 ? ' ' : (char) b[i]);
+            return sb.toString();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * 只杀「本应用 payload 目录下、且带 web --port <port>」的残留 node。
+     * 路径锚定保证绝不会误伤别的应用或 Termux 里的 node。
+     */
+    private static void killStaleEngines(File dir, int port) {
+        String marker = dir.getAbsolutePath();
+        File[] pids = new File("/proc").listFiles();
+        if (pids == null) return;
+        int killed = 0;
+        for (File f : pids) {
+            String name = f.getName();
+            if (name.isEmpty() || !Character.isDigit(name.charAt(0))) continue;
+            int pid;
+            try { pid = Integer.parseInt(name); } catch (Throwable t) { continue; }
+            if (pid == android.os.Process.myPid()) continue;
+            String cmd = readCmdline(pid);
+            if (cmd == null || !cmd.contains(marker)) continue;
+            if (!cmd.contains("bin.js") || !cmd.contains("web")) continue;
+            try {
+                android.system.Os.kill(pid, 9);   // SIGKILL：端口必须立刻释放
+                killed++;
+            } catch (Throwable ignored) {}
+        }
+        if (killed > 0) {
+            Log.w(TAG, "清理残留引擎进程 " + killed + " 个");
+            try { Thread.sleep(400); } catch (InterruptedException ignored) {}
+        }
+    }
+
+    private static boolean portBusy(int port) {
+        java.net.Socket s = null;
+        try {
+            s = new java.net.Socket();
+            s.connect(new java.net.InetSocketAddress("127.0.0.1", port), 250);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        } finally {
+            try { if (s != null) s.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** 万一孤儿杀不掉或端口被别的进程占着，顺延找空端口，不让引擎直接崩。 */
+    private static int pickPort(int from) {
+        for (int i = 0; i < 12; i++) {
+            if (!portBusy(from + i)) return from + i;
+        }
+        return from;
     }
 
     /** 把 /system/etc/security/cacerts 合成一份 PEM，供内置 curl / git 走 HTTPS。 */

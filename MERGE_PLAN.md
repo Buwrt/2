@@ -209,3 +209,54 @@ GitHub Contents API 单文件上限 100MB，160MB 的包不能走 `apk/` 回写�
 
 `com.hubmobile.app`、官方签名、`1.2.20 / 1002020`、五环防护链、底座 SPA 全部保持；
 只改了 2 个 Java 类并相应重算 `SRC_SHA256` 与 `assets.sha`。
+
+---
+
+## 九、阶段 D：真机反馈修复（引擎提前退出 + 进度显示误导）
+
+真机截图暴露两个问题，均已修复：
+
+### 1) 「展开 0/41,426 · 新增 0」不是没干活
+
+覆盖安装不会清 `files/payload`。`extract()` 对大小一致的文件直接跳过，
+原实现只在**新写入**时累加计数，于是全量命中缓存时显示 0，看着像解压失败。
+现在改成「已校验 X / 41,426 · 本次新增 Z」，扫描数与新增数分开统计，
+跳过分支也按每 400 项回报进度。
+
+### 2) 「引擎进程提前退出」的根因与三层修复
+
+`start()` 的等待循环里检测到 node 进程已退出。高概率原因是**端口 3080 被占**：
+
+- 覆盖安装时系统杀掉 App，但上一轮 `node` 子进程不跟着退（孤儿进程），继续占端口；
+  上游 `MainActivity` 有 `findEnginePid()` / `killEngineNow()`，精简桥初版漏了这一步
+- 或用户手机上还装着上游原版 `com.deepseek.harness`，它的正式版引擎同样绑 3080
+
+新 node 起来 `listen EADDRINUSE` → 立刻退出 → 报「引擎进程提前退出」。
+
+修复：
+
+| 层 | 做法 |
+|---|---|
+| 清场 | `killStaleEngines()` 扫 `/proc`，按**本 payload 绝对路径** + `bin.js` + `web` 锚定，SIGKILL 掉本应用自己的残留引擎（不会误伤上游原版或 Termux） |
+| 避让 | `pickPort()` 探测 127.0.0.1 从 3080 起 12 个端口，被别的进程占了就顺延；`sActivePort` 让 `existingUrl()` 与 WebView URL 同步跟随 |
+| 可诊断 | 进程退出时把 `dsh-web.log` 尾部 1200 字符**直接显示在开机页红字**里（EADDRINUSE / EACCES / 缺 .so 一眼可见），不再只甩一句「日志见 /files/」 |
+
+另外把清空日志的动作挪到 kill 之后，避免旧进程持有的 fd 继续写进新日志造成 token 串台。
+
+### 3) 桌面为什么有两个图标
+
+不是两个软件。**同一个 APK、同一个包 `com.hubmobile.app`、同一份官方签名**，
+只是 Manifest 里有两个带 `MAIN/LAUNCHER` 的 Activity：底座 `MainActivity`（标签 `githup`）
+与 `HarnessActivity`（标签 `githup AI`）。启动器会把每个 LAUNCHER Activity 各显示成一个图标。
+两者共用同一份私有数据、同一套权限、卸载时一起消失。
+
+当初这么做是为了**不动底座 `assets/web/`**（改前端就要重算源码指纹与 `assets.sha`，
+还会牵连五环防护链）。代价就是看起来像两个 App，容易误解。
+
+若合并成单图标，有三种方向，需要产品上先定：
+
+- A：只留 `githup`，在客户端内加「AI」入口（AI 从属于 GitHub 客户端）
+- B：只留一个图标，冷启动先走品牌启动页 + 四句对话 + 装载进度，进 AI；GitHub 客户端作为二级页面
+- C：保留两个图标但把 `githup AI` 改成快捷方式/小组件语义，避免「两个软件」观感
+
+现阶段保持现状，等明确选择后再动。

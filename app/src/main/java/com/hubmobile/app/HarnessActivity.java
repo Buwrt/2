@@ -222,7 +222,9 @@ public class HarnessActivity extends Activity {
 
         bootErr = new TextView(this);
         bootErr.setTextColor(Color.parseColor("#ff8a80"));
-        bootErr.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        bootErr.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+        bootErr.setTypeface(Typeface.MONOSPACE);
+        bootErr.setLineSpacing(dp(3), 1f);
         bootErr.setVisibility(View.GONE);
         card.addView(bootErr);
 
@@ -299,8 +301,8 @@ public class HarnessActivity extends Activity {
         bootMeta.setText("B O O T   S E Q U E N C E\n"
                 + "P A Y L O A D   " + mb + "   M B\n"
                 + "C O L D   S T A R T\n"
-                + "展 开   " + String.format("%,d", lastEntries) + " / "
-                + String.format("%,d", totalEntries) + "   ·   新增 "
+                + "已 校 验   " + String.format("%,d", lastEntries) + " / "
+                + String.format("%,d", totalEntries) + "   ·   本 次 新 增 "
                 + String.format("%,d", lastWritten) + "\n"
                 + stage);
     }
@@ -327,8 +329,9 @@ public class HarnessActivity extends Activity {
             }
             @Override public void onError(String msg) {
                 if (finished) return;
+                String brief = msg.length() > 900 ? "…" + msg.substring(msg.length() - 900) : msg;
                 bootErr.setVisibility(View.VISIBLE);
-                bootErr.setText("启动失败：" + msg);
+                bootErr.setText("启动失败：" + brief + "\n\n（可重试：退出后重进；若仍失败请清应用数据）");
                 updateMeta("装载中断");
             }
         });
