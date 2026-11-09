@@ -1,0 +1,40 @@
+APK entries: 34
+  assets/payload.zip            1  ['assets/payload.zip']
+  lib/                          0  []
+  classes.dex                   1  ['classes.dex']
+  AndroidManifest.xml           1  ['AndroidManifest.xml']
+  assets/                      17  ['assets/dshroot_kernel_version.txt', 'assets/dshroot_layout.txt', 'assets/dshroot_revision.txt', 'assets/mobile.css']
+payload.zip: file_size=159738098 compress_size=159738098 compress_type=0
+payload bytes read: 159738098
+payload entries: 41426
+  runtime/bin/node                                                         True
+  dshroot/lib/node_modules/@deepseek-ai/dsh/lib/bin.js                     True
+  runtime/lib/libc++_shared.so                                             True
+  dshhome/                                                                 True
+  skills/                                                                  True
+  dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules                   True
+payload ext top: [('.ts', 13530), ('.js', 10017), ('.map', 4613), ('.json', 3487), ('.cjs', 1848), ('.cts', 1578), ('.md', 1531), ('.py', 1023), ('.mjs', 1010), ('(noext)', 824), ('.mts', 678), ('.svg', 356)]
+hardcoded com.deepseek.harness: 28 hits in 22 text files
+    dshhome/skills/dsh-backup/scripts/backup.mjs
+    dshhome/skills/dsh-life/scripts/life.js
+    dshhome/profiles/web/node_modules/dsh-plugin-turn-notify/lib/index-v3.js
+    dshhome/profiles/web/node_modules/dsh-memory-ui/tools/mem-ui.sh
+    dshhome/profiles/web/node_modules/dsh-memory-ui/tools/mem.js
+    dshhome/profiles/web/node_modules/dsh-plugin-another-me/lib/index.js
+    dshhome/profiles/web/node_modules/dsh-settings-extensions/lib/index.js
+    dshhome/profiles/web/node_modules/dsh-tool-gate/lib/index.js
+    dshhome/profiles/web/node_modules/dsh-user-profile/lib/index.js
+    dshhome/skills/dsh-video/scripts/inventory.mjs
+    dshhome/skills/dsh-video/scripts/render.mjs
+    dshhome/skills/dsh-video/scripts/selftest.sh
+    dshhome/profiles/web/node_modules/dsh-plugin-another-me/seed/me-web.mjs
+    dshhome/profiles/web/node_modules/dsh-plugin-another-me/seed/me.mjs
+    dshhome/tools/crew.js
+    dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-deepseek-account-platform/lib/index.js
+    dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-android/lib/index.js
+    dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-shizuku/lib/index.js
+    dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-vscreen/lib/index.js
+    dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/dsh-plugin-turn-notify/lib/index-v3.js
+node header: 7f454c4602010100 elf_class 2
+payload top dirs: ['bin', 'dshhome', 'dshroot', 'git', 'npm', 'pet', 'pnpm', 'python', 'rish', 'runtime']
+dsh bin.js: dshroot/lib/node_modules/@deepseek-ai/dsh/lib/bin.js 11772
