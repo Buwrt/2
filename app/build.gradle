@@ -34,7 +34,10 @@ android {
     defaultConfig {
         applicationId 'com.hubmobile.app'
         minSdk 24
-        targetSdk 34
+        // Android 10+ 的 W^X：targetSdk>=29 的应用不能 exec 私有目录下的 ELF。
+        // 合入的 dsh 引擎要把 node 从 payload.zip 展开到 files/ 再执行，
+        // 因此沿用上游 harness 的 28；compileSdk 仍是 34，底座原有 API 不受影响。
+        targetSdk 28
         versionCode 1002020
         versionName '1.2.20'
     }

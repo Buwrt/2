@@ -6,8 +6,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
+    <!-- 合并版：去掉 maxSdkVersion，配合 requestLegacyExternalStorage 让
+         targetSdk 28 在 Android 10/11+ 上仍能写公共下载目录（底座 DownloadProvider 依赖它） -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <!-- 读取本地文件（上传文件到仓库 / 上传 Release 附件如 APK） -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
@@ -60,7 +61,8 @@
         android:supportsRtl="true"
         android:hardwareAccelerated="true"
         android:theme="@style/AppTheme"
-        android:usesCleartextTraffic="false">
+        android:requestLegacyExternalStorage="true"
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".MainActivity"
@@ -134,6 +136,25 @@
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|uiMode|density|fontScale"
             android:windowSoftInputMode="adjustResize|stateHidden"
             android:label="@string/app_name" />
+
+        <!--
+          合并版：DeepSeek Harness 的 AI 界面，独立桌面入口。
+          用独立 taskAffinity 与底座 MainActivity 隔开，两个图标互不抢栈。
+          引擎桥 HarnessBridge 在私有目录展开 payload.zip 并拉起本地 node 服务。
+        -->
+        <activity
+            android:name=".HarnessActivity"
+            android:exported="true"
+            android:label="githup AI"
+            android:taskAffinity="com.hubmobile.app.ai"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|fontScale"
+            android:windowSoftInputMode="adjustResize|stateHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
         <!--
           从构建产物 ZIP 里解压出的 APK 存在私有目录，

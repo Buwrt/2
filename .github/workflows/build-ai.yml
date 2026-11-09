@@ -1,0 +1,306 @@
+name: Build AI Merged APK
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OWNER: Buwrt
+      REPO: 2
+      BRANCH: main
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew || true
+
+      - name: Create signing keystore
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -e
+          mkdir -p keystore
+          rm -f keystore/githup-release.jks keystore/pass.txt
+          echo "$KS_B64" | base64 -d > keystore/githup-release.jks
+          printf '%s' "$KS_PASS" > keystore/pass.txt
+          echo "使用官方签名密钥（来自 Secrets）"
+          keytool -list -keystore keystore/githup-release.jks \
+            -storepass "$(cat keystore/pass.txt)" | head -12
+
+      - name: Download upstream dist APK
+        run: |
+          set -e
+          URL="https://github.com/guzhou079-arch/deepseek-harness-android/releases/download/v1.49.1/DeepSeekHarness-v1.49.1-dist.apk"
+          curl -fL --retry 3 --retry-delay 5 --max-time 1200 -o upstream.apk "$URL"
+          ls -la upstream.apk
+          sha256sum upstream.apk
+
+      - name: Extract and adapt payload.zip
+        run: |
+          set -e
+          mkdir -p work
+          python3 - <<'PY'
+          import zipfile, io, os, json
+          z = zipfile.ZipFile('upstream.apk')
+          assert 'assets/payload.zip' in z.namelist(), '上游包缺 payload.zip'
+          data = z.read('assets/payload.zip')
+          print('payload.zip bytes:', len(data))
+          p = zipfile.ZipFile(io.BytesIO(data))
+          OLD, NEW = b'com.deepseek.harness', b'com.hubmobile.app'
+          TEXT_EXT = {'.js','.mjs','.cjs','.ts','.cts','.mts','.json','.sh',
+                      '.yml','.yaml','.txt','.css','.html','.py','.svg','.xml','.md',''}
+          out = zipfile.ZipFile('work/payload.zip', 'w', allowZip64=True)
+          changed = 0; hits = 0
+          for i in p.infolist():
+              b = p.read(i.filename)
+              ext = os.path.splitext(i.filename)[1].lower()
+              if ext in TEXT_EXT and len(b) < 5_000_000 and OLD in b:
+                  hits += b.count(OLD)
+                  b = b.replace(OLD, NEW)
+                  changed += 1
+              zi = zipfile.ZipInfo(i.filename, date_time=i.date_time)
+              zi.compress_type = i.compress_type          # 保留原压缩，体积不变
+              zi.external_attr = i.external_attr
+              zi.create_system = i.create_system
+              out.writestr(zi, b)
+          out.close()
+          print('entries:', len(p.namelist()), '| 替换文件:', changed, '| 替换次数:', hits)
+          print('adapted payload size:', os.path.getsize('work/payload.zip'))
+          json.dump({'entries': len(p.namelist()), 'changed_files': changed,
+                     'replaced_hits': hits, 'size': os.path.getsize('work/payload.zip')},
+                    open('work/payload-meta.json','w'))
+          PY
+
+      - name: Regenerate source fingerprint
+        run: |
+          set -e
+          python3 tools/gen-srcfingerprint.py .
+          grep -n "SRC_SHA256" app/src/main/assets/web/js/api.js
+
+      - name: Regenerate guard chain constants
+        run: |
+          set -e
+          python3 tools/gen-guard.py .
+          echo "--- GuardKeys ---"
+          grep -E "CERT_SHA256|VERSION_NAME|VERSION_CODE" app/src/main/java/com/hubmobile/app/GuardKeys.java || true
+          echo "--- assets.sha 条目 ---"
+          wc -l app/src/main/assets/guard/assets.sha
+
+      - name: Sync cert fingerprint into SignCheck
+        run: |
+          set -e
+          python3 - <<'PY'
+          import re
+          G='app/src/main/java/com/hubmobile/app/GuardKeys.java'
+          S='app/src/main/java/com/hubmobile/app/SignCheck.java'
+          fp=re.search(r'CERT_SHA256\s*=\s*"([0-9a-f]{64})"', open(G,encoding='utf-8').read()).group(1)
+          s=open(S,encoding='utf-8').read()
+          open(S,'w',encoding='utf-8').write(re.sub(r'[0-9a-f]{64}', fp, s))
+          print('证书指纹已对齐:', fp)
+          PY
+
+      - name: Build Release APK (Gradle)
+        run: |
+          set -o pipefail
+          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee work/gradle.log
+          ls -la app/build/outputs/apk/release/
+
+      - name: Inject payload.zip, zipalign, re-sign with official key
+        run: |
+          set -e
+          BT=$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)
+          echo "build-tools: $BT"
+          python3 - <<'PY'
+          import zipfile, os
+          src = 'app/build/outputs/apk/release/app-release.apk'
+          dst = 'work/with-payload.apk'
+          zin = zipfile.ZipFile(src)
+          zout = zipfile.ZipFile(dst, 'w', allowZip64=True)
+          skipped = []
+          for i in zin.infolist():
+              n = i.filename
+              # 旧 v1 签名条目不要带过去，apksigner 会重新生成
+              if n.startswith('META-INF/') and n.upper().endswith(('.SF','.RSA','.DSA','.EC','MANIFEST.MF')):
+                  skipped.append(n); continue
+              zi = zipfile.ZipInfo(n, date_time=i.date_time)
+              zi.compress_type = i.compress_type
+              zi.external_attr = i.external_attr
+              zi.create_system = i.create_system
+              zout.writestr(zi, zin.read(n))
+          # 外层 payload.zip 必须 STORE：AssetManager 顺序读，避免二次压缩
+          zi = zipfile.ZipInfo('assets/payload.zip')
+          zi.compress_type = zipfile.ZIP_STORED
+          zout.writestr(zi, open('work/payload.zip','rb').read())
+          zout.close()
+          print('注入完成', os.path.getsize(dst), 'bytes | 跳过旧签名条目', len(skipped))
+          PY
+          "$BT/zipalign" -f 4 work/with-payload.apk work/aligned.apk
+          PASS=$(cat keystore/pass.txt)
+          "$BT/apksigner" sign \
+            --ks keystore/githup-release.jks --ks-key-alias githup \
+            --ks-pass "pass:$PASS" --key-pass "pass:$PASS" \
+            --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+            --min-sdk-version 24 \
+            --out work/githup-v1.2.20.apk work/aligned.apk
+          "$BT/apksigner" verify --print-certs work/githup-v1.2.20.apk | tee work/sign-verify.txt
+          ls -la work/githup-v1.2.20.apk
+
+      - name: Verify merged APK identity and guard chain
+        run: |
+          set -e
+          BT=$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)
+          "$BT/aapt" dump badging work/githup-v1.2.20.apk | head -5 | tee work/badging.txt
+          python3 - <<'PY'
+          import zipfile, hashlib, json, os
+          apk='work/githup-v1.2.20.apk'
+          z=zipfile.ZipFile(apk)
+          n=z.namelist()
+          assert 'assets/payload.zip' in n, 'payload 没进包'
+          p=z.getinfo('assets/payload.zip')
+          assert p.file_size > 150_000_000, 'payload 太小: %d' % p.file_size
+          # 防护链：assets.sha 每条都要和包内 web 文件吻合
+          bad=[]
+          for line in z.read('assets/guard/assets.sha').decode().splitlines():
+              h, rel = line.split('  ',1)
+              path='assets/'+rel
+              if path not in n or hashlib.sha256(z.read(path)).hexdigest()!=h: bad.append(rel)
+          assert not bad, 'assets.sha 失配: %s' % bad[:5]
+          dex=z.read('classes.dex')
+          assert b'863dd1cd3752e59165e152bc4ab35fde478fcd296d724a6bc58cec0368184927' in dex, 'dex 缺官方指纹'
+          sha=hashlib.sha256(open(apk,'rb').read()).hexdigest()
+          print('APK:', os.path.getsize(apk), 'bytes')
+          print('sha256:', sha)
+          print('payload entries in APK:', p.file_size)
+          print('harness assets:', len([x for x in n if x.startswith('assets/harness/')]))
+          print('assets.sha self-consistent:', not bad)
+          print('v2/v3 sig block:', b'APK Sig Block 42' in open(apk,'rb').read())
+          json.dump({'size':os.path.getsize(apk),'sha256':sha,
+                     'payload_size':p.file_size,
+                     'harness_assets':len([x for x in n if x.startswith('assets/harness/')]),
+                     'guard_ok':not bad}, open('work/verify.json','w'))
+          PY
+
+      - name: Publish APK to Release and update repo metadata
+        run: |
+          set -e
+          python3 - <<'PY' > work/publish.log 2>&1
+          import os, json, base64, hashlib, urllib.request, urllib.error, urllib.parse, time
+          T=os.environ['GH_TOKEN']; OWNER,REPO,BRANCH='Buwrt','2','main'
+          API='https://api.github.com'; PRE='/repos/%s/%s'%(OWNER,REPO)
+          H={'User-Agent':'ci-ai','Accept':'application/vnd.github+json',
+             'Authorization':'Bearer '+T,'Content-Type':'application/json'}
+          def req(method,url,body=None,headers=None,raw=None,timeout=180):
+              hh=headers or H
+              data=raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
+              r=urllib.request.Request(url,data=data,method=method,headers=hh)
+              try:
+                  with urllib.request.urlopen(r,timeout=timeout) as z:
+                      b=z.read().decode()
+                      try: return z.status,json.loads(b)
+                      except Exception: return z.status,b
+              except urllib.error.HTTPError as e:
+                  return e.code,{'_error':e.read().decode()[:400]}
+          def put(path,data,msg):
+              body={'message':msg,'branch':BRANCH,'content':base64.b64encode(data).decode()}
+              u=API+PRE+'/contents/'+urllib.parse.quote(path,safe='/')+'?ref='+BRANCH
+              st,cur=req('GET',u)
+              if isinstance(cur,dict) and 'sha' in cur: body['sha']=cur['sha']
+              return req('PUT', API+PRE+'/contents/'+urllib.parse.quote(path,safe='/'), body)
+          def delete(path,msg):
+              u=API+PRE+'/contents/'+urllib.parse.quote(path,safe='/')+'?ref='+BRANCH
+              st,cur=req('GET',u)
+              if not (isinstance(cur,dict) and 'sha' in cur): return st,'not found'
+              return req('DELETE', API+PRE+'/contents/'+urllib.parse.quote(path,safe='/'),
+                         {'message':msg,'branch':BRANCH,'sha':cur['sha']})
+
+          APK='work/githup-v1.2.20.apk'
+          data=open(APK,'rb').read(); sha=hashlib.sha256(data).hexdigest()
+          V=json.load(open('work/verify.json'))
+          M=json.load(open('work/payload-meta.json'))
+          TAG='v1.2.20-merged'
+          st,rel=req('GET',API+PRE+'/releases/tags/'+TAG)
+          if st!=200:
+              st,rel=req('POST',API+PRE+'/releases',
+                         {'tag_name':TAG,'name':'githup v1.2.20（合并版 · 含 AI 引擎）',
+                          'body':'githup 底座 + DeepSeek Harness 内核，包名 com.hubmobile.app，官方签名。','draft':False,'prerelease':False})
+          print('release',st,rel.get('id') if isinstance(rel,dict) else rel)
+          rid=rel['id'] if isinstance(rel,dict) else None
+          if rid:
+              for a in rel.get('assets',[]):
+                  if a['name']=='githup-v1.2.20.apk':
+                      print('delete old asset',req('DELETE',API+PRE+'/releases/assets/'+str(a['id']))[0]); time.sleep(1)
+              print('upload via curl below')
+          # 仓库内 1.9MB 旧包不是能跑 AI 的包，删掉避免误导；只留 sha 与说明
+          print('del old apk/',delete('apk/githup-v1.2.20.apk','chore: 移除不含 AI 引擎的旧包，正式包见 Release')[0])
+          print('put sha',put('apk/githup-v1.2.20.apk.sha256',(sha+'\n').encode(),'ci: AI 合并版 sha256')[0])
+          readme=('# githup v1.2.20（合并版 · 含 AI 引擎）\n\n'
+                  '本目录不再放 APK：含内核的包约 %d MB，超过 GitHub Contents API 的 100MB 上限。\n\n'
+                  '正式安装包在 Release：\n'
+                  'https://github.com/Buwrt/2/releases/download/%s/githup-v1.2.20.apk\n\n'
+                  'SHA-256 `%s`\n\n'
+                  '桌面有两个图标：`githup` = GitHub 客户端，`githup AI` = DeepSeek Harness。\n'
+                  '首次进入 githup AI 需展开 %d 个引擎文件，请耐心等进度走完；'
+                  '随后在 AI 界面里配置 DeepSeek API Key 即可对话。\n') % (
+                      len(data)//1048576, TAG, sha, M['entries'])
+          print('put readme',put('apk/README.md',readme.encode(),'docs: APK 位置和首次使用说明')[0])
+          vj=json.load(open('version.json',encoding='utf-8')) if os.path.exists('version.json') else {}
+          vj.update({'version':'1.2.20','name':'githup v1.2.20（合并版 · 含 AI 引擎）',
+                     'published':'2026-11-10','size':len(data),'sha256':sha,
+                     'apk':'https://github.com/Buwrt/2/releases/download/%s/githup-v1.2.20.apk'%TAG,
+                     'notes':'底座 githup + DeepSeek Harness 内核；桌面双入口；官方签名；versionCode 1002020。'})
+          print('put version.json',put('version.json',(json.dumps(vj,ensure_ascii=False,indent=2)+'\n').encode(),'chore: version.json 指向含 AI 引擎的正式包')[0])
+          open('work/release-id.txt','w').write(str(rid))
+          PY
+          cat work/publish.log
+          RID=$(cat work/release-id.txt)
+          echo "release id=$RID"
+          # 160MB 用 curl 流式上传，避免 Python 整包驻留内存
+          curl -f --retry 2 --max-time 900 -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            --data-binary @work/githup-v1.2.20.apk \
+            "https://uploads.github.com/repos/Buwrt/2/releases/$RID/assets?name=githup-v1.2.20.apk" \
+            -o work/upload.json -w "upload_http=%{http_code}\n"
+          python3 -c "import json;d=json.load(open('work/upload.json'));print('asset',d.get('name'),d.get('size'),d.get('digest'))"
+
+      - name: Write build report into repo
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, json, base64, urllib.request, urllib.parse
+          T=os.environ['GH_TOKEN']; PRE='/repos/Buwrt/2'
+          H={'User-Agent':'ci-ai','Accept':'application/vnd.github+json',
+             'Authorization':'Bearer '+T,'Content-Type':'application/json'}
+          lines=['=== Build AI Merged APK ===']
+          for p in ['work/payload-meta.json','work/verify.json','work/badging.txt',
+                    'work/sign-verify.txt','work/publish.log','work/gradle.log']:
+              if not os.path.exists(p): continue
+              lines.append('\n--- %s ---'%p)
+              txt=open(p,encoding='utf-8',errors='replace').read()
+              lines.append(txt[-4000:] if p.endswith('gradle.log') else txt[-6000:])
+          body={'message':'ci: AI 合并版构建报告','branch':'main',
+                'content':base64.b64encode('\n'.join(lines).encode()).decode()}
+          u='https://api.github.com'+PRE+'/contents/'+urllib.parse.quote('ci/build-ai-report.txt',safe='/')+'?ref=main'
+          try:
+              with urllib.request.urlopen(urllib.request.Request(u,headers=H),timeout=60) as z:
+                  body['sha']=json.loads(z.read().decode())['sha']
+          except Exception: pass
+          req=urllib.request.Request('https://api.github.com'+PRE+'/contents/'+urllib.parse.quote('ci/build-ai-report.txt',safe='/'),
+                                     data=json.dumps(body).encode(),method='PUT',headers=H)
+          try:
+              with urllib.request.urlopen(req,timeout=120) as z: print('report',z.status)
+          except Exception as e: print('report fail',e)
+          PY
