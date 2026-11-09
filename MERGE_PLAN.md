@@ -387,3 +387,60 @@ Manifest 已声明 `SYSTEM_ALERT_WINDOW`、`PACKAGE_USAGE_STATS`、`RECORD_AUDIO
 同理，特权 shell、定时任务里的系统级动作、通知监听的完整链路仍属第三层。
 
 桌面双入口、包名、官方签名、`1.2.20 / 1002020`、底座 SPA 一行未改。
+
+---
+
+## 十二、阶段 G：把「上游能用、本版用不了」逐项补齐
+
+真机确认第二层已生效后，逐条对照上游完整壳与 payload 插件，发现两大类差距：
+
+### A. 桥已开但**协议没对齐**（功能等于没有）
+
+翻 `dsh-tool-shizuku/lib/index.js`、`dsh-native-command/lib/index.js` 等插件源码，
+它们发来的 body 与我阶段 F 写的解析完全不是一套：
+
+| 路由 | 插件实际发的 | 阶段 F 写的 | 本版 |
+|---|---|---|---|
+| `/clipboard` | `{action:read\|write, content}` | `{text}` | ✅ 已对齐，返回 `{ok, content}` |
+| `/setting` | `{key, value}` 写 Settings.System | `?which=` 跳页面 | ✅ 两者都支持，无 WRITE_SETTINGS 时自动引导授权 |
+| `/shell` | `{command, timeout_ms, token}` | 仅 `command` | ✅ 超时/退出码/stdout/stderr 全对齐；探测到 `su` 自动提权并如实标 `privileged` |
+| `/open-file` | dsh-native-command 用这个路径 | 只有 `/open` | ✅ 加了别名 |
+| `/notify` | `{title, text}` | 已一致 | ✅ |
+| `/usage` `/voice` `/tts` `/schedule` `/lan` | 插件真会调用 | 一律回「不支持」 | ✅ 全部实现 |
+
+### B. 上游有、本版缺的原生能力
+
+| 能力 | 上游实现 | 本版 |
+|---|---|---|
+| 语音识别 STT / TTS 播报 / 热词 | `VoiceManager` 874 行 | ✅ 原样移植 + `VoiceBridge` 包装成 `/voice` `/tts` |
+| 应用使用统计 | `UsageStatsHelper` 92 行 | ✅ 移植到 `/usage`，无权限自动跳设置 |
+| 定时任务（增删改查 / 到点拉起引擎） | `ScheduledTaskStore` + `ScheduleAlarms` + `ScheduleBridge` + `AlarmReceiver` + `EngineService` | ✅ 移植 + 自写精简 `ScheduleExecutor`（去 Shizuku，改走 `EngineRpc` 投给 3080） |
+| 引擎前台保活 / 蓝牙耳机按键唤醒 | `EngineService` 156 行 | ✅ 移植，引擎就绪后 `keepAlive()` 拉起 |
+| 分享到 App 的输入框草稿 | `DraftInputBridge` + `ShareInbox` | ✅ 移植，注入 `window.dshinput` + `__DSH_INPUT_TOKEN`，并注册 ACTION_SEND |
+| NFC 读卡 | `NfcStore` + MainActivity reader mode | ✅ `HarnessActivity` 按 arm 状态动态开关 `enableReaderMode`，不长期抢占 NFC |
+| 通知捕获 / 读屏 / 点按 / 手势 / 截图 | `AccessibilityService` 1987 行（阶段 F 已移植） | ✅ 3081 `/notifications*` 现在**代理到 3181** 实时结果，不再只返回空归档 |
+| 日志 / 版本 / 备份清单 | 控制台页 | ✅ `/log` `/update` `/backup` 与 `ctlAct` 十余个动作 |
+| 控制台 `window.dshshell` | 阶段 F 简版 | ✅ 扩展权限、桌宠、语音、NFC、日志、更新、备份动作 |
+
+### C. 仍然做不到（物理限制，不是漏做）
+
+| 能力 | 为什么 |
+|---|---|
+| **虚拟屏 VirtualScreen** | 需 Shizuku `newProcess()` 以 shell uid 起 `app_process`，再反射创建虚拟 Display；`VsreenBridgeService` 2072 行依赖 `moe.shizuku.server.IRemoteProcess` AIDL，纯 framework 做不到 |
+| **Shizuku / root 特权 API 全量** | 没有 Shizuku AAR，也没有用户在 Shizuku App 里的授权；本版只在**检测到 su 时**让 `/shell` 自动提权，其余如实回 `privileged:false` |
+| **完整桌宠面板（4402 行上游 OverlayService）** | 依赖 36 处 R 资源（drawable/dimen/color）与 6 处 MainActivity；本版是 351 行精简实现：悬浮球 + 拖动 + 说话 + 流体云卡片 |
+| **手机内自建编译环境 / 自签名发布** | `BuildEnvInstaller` 673 行要从 GitHub 拉整套工具链；底座签名体系与上游不同，且需网络与大量存储 |
+| **时光机全站备份 / 内核热切换** | `BackupRestore`/`KernelStore` 已搬进源码但需上游 MainActivity 的完整调用链；本版 `/backup` 只给目录清单与体积，不假装能恢复 |
+| **上游原版用户直接升级成我的包** | 包名 `com.deepseek.harness` + 对方签名，与「包名签名以我为准」冲突 |
+
+### D. 需要用户手动开的能力（本轮新增）
+
+- 悬浮窗权限（桌宠）
+- 无障碍 `githup AI 读屏辅助`（读屏/通知）
+- 麦克风 `RECORD_AUDIO`（语音识别，App 启动时申请）
+- 「修改系统设置」`WRITE_SETTINGS`（`/setting` 写值）
+- 「使用情况访问权限」`PACKAGE_USAGE_STATS`（`/usage`）
+- NFC 由 `android_nfc_arm` 工具按需开启，10 分钟 TTL，不长期占用
+
+本轮共新增/移植 20 个 Java 类，`SRC_SHA256` 与 `assets.sha` 重算；
+包名、官方签名、`1.2.20 / 1002020`、底座 SPA、桌面双入口均不动。

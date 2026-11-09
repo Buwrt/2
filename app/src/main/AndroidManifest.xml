@@ -154,6 +154,13 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- 系统「分享到 githup AI」：文本 / 图片 / 文件进入输入框草稿 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
         </activity>
 
         <!--
@@ -218,6 +225,19 @@
         <!-- 悬浮桌宠：WindowManager 悬浮球 + 流体云卡片，由 127.0.0.1:3081/overlay 控制 -->
         <service
             android:name="com.hubmobile.app.harness.OverlayService"
+            android:exported="false"
+            android:enabled="true" />
+
+        <!-- 引擎前台保活：node 在后台/锁屏时不被系统回收，兼蓝牙耳机按键唤醒 -->
+        <service
+            android:name="com.hubmobile.app.harness.EngineService"
+            android:exported="false"
+            android:enabled="true"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- 定时任务：AlarmManager 到点拉起引擎并投递任务文本 -->
+        <receiver
+            android:name="com.hubmobile.app.harness.AlarmReceiver"
             android:exported="false"
             android:enabled="true" />
 

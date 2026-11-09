@@ -79,7 +79,7 @@ public final class NfcStore {
     // ============================ arm / 状态 ============================
 
     /** 幂等初始化：从 prefs 恢复 armedAt / lastJson。MainActivity.onCreate 调一次即可。 */
-    static void init(Context ctx) {
+    public static void init(Context ctx) {
         if (initialized) return;
         synchronized (LOCK) {
             if (initialized) return;
@@ -100,14 +100,14 @@ public final class NfcStore {
         return at > 0L && (System.currentTimeMillis() - at) < ARM_TTL_MS;
     }
 
-    static boolean isArmed() {
+    public static boolean isArmed() {
         synchronized (LOCK) {
             return isArmedLocked();
         }
     }
 
     /** 剩余待命秒数（未待命返回 0）。 */
-    static long armedLeftSec() {
+    public static long armedLeftSec() {
         synchronized (LOCK) {
             if (!isArmedLocked()) return 0L;
             long left = ARM_TTL_MS - (System.currentTimeMillis() - armedAt);
@@ -115,19 +115,19 @@ public final class NfcStore {
         }
     }
 
-    static void setArmListener(ArmListener l) {
+    public static void setArmListener(ArmListener l) {
         listener = l;
     }
 
-    static void setReaderActive(boolean v) {
+    public static void setReaderActive(boolean v) {
         readerActive = v;
     }
 
-    static boolean isReaderActive() {
+    public static boolean isReaderActive() {
         return readerActive;
     }
 
-    static long currentSeq() {
+    public static long currentSeq() {
         return seq;
     }
 
@@ -135,7 +135,7 @@ public final class NfcStore {
      * 开/关待命。返回最新状态 JSON。
      * 会落 prefs（进程被杀后重启仍待命）+ 通知 listener（让前台 Activity 立刻开关 reader mode）。
      */
-    static JSONObject arm(Context ctx, boolean on) throws Exception {
+    public static JSONObject arm(Context ctx, boolean on) throws Exception {
         init(ctx);
         synchronized (LOCK) {
             armedAt = on ? System.currentTimeMillis() : 0L;
@@ -163,7 +163,7 @@ public final class NfcStore {
      * 解析一张标签并记录。由 MainActivity 的 ReaderCallback 在**后台线程**调用
      * （connect/NDEF 读取是阻塞 IO，绝不能放主线程）。
      */
-    static void recordTag(Context ctx, Tag tag) {
+    public static void recordTag(Context ctx, Tag tag) {
         if (tag == null) return;
         init(ctx);
         try {
@@ -398,7 +398,7 @@ public final class NfcStore {
     // ============================ 对外 JSON ============================
 
     /** 桥 /nfc-status 用。 */
-    static JSONObject statusJson(Context ctx) throws Exception {
+    public static JSONObject statusJson(Context ctx) throws Exception {
         init(ctx);
         JSONObject o = new JSONObject();
         o.put("ok", true);
@@ -443,7 +443,7 @@ public final class NfcStore {
     }
 
     /** 桥 /nfc-last 用：sinceSeq < 0 表示"最近一次不管新旧"，否则只认 seq 更大的。 */
-    static JSONObject lastJsonObj(long sinceSeq) throws Exception {
+    public static JSONObject lastJsonObj(long sinceSeq) throws Exception {
         JSONObject o = new JSONObject();
         o.put("ok", true);
         String last = lastJson;
@@ -466,7 +466,7 @@ public final class NfcStore {
     }
 
     /** 桥 /nfc-history 用。 */
-    static JSONArray historyJson() throws Exception {
+    public static JSONArray historyJson() throws Exception {
         JSONArray arr = new JSONArray();
         synchronized (LOCK) {
             for (int i = 0; i < HISTORY.size(); i++) {
@@ -479,7 +479,7 @@ public final class NfcStore {
     }
 
     /** 桥 /nfc-clear 用：清空最近一次 + 历史（不动 arm 状态）。 */
-    static JSONObject clearJson() throws Exception {
+    public static JSONObject clearJson() throws Exception {
         synchronized (LOCK) {
             lastJson = null;
             HISTORY.clear();

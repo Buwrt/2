@@ -20,6 +20,12 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.net.Uri;
+import android.nfc.NfcAdapter;
+import android.nfc.Tag;
+import android.os.Build;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -64,6 +70,10 @@ public class HarnessActivity extends Activity {
     private long totalEntries = 41426L;
     private long payloadBytes = 159794879L;
     private long lastEntries = 0, lastWritten = 0;
+    private com.hubmobile.app.harness.DraftInputBridge draftInput;
+    private volatile boolean trustedDoc = false;
+    private NfcAdapter nfcAdapter;
+    private static final int REQ_MIC = 202;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -94,6 +104,31 @@ public class HarnessActivity extends Activity {
 
         // 第二层：本地桥要在 WebView 加载前就监听，否则设置页一进来就 fetch 3081 失败
         com.hubmobile.app.harness.LocalBridgeServer.start(getApplicationContext());
+
+        // 语音识别 / 听写需要运行时麦克风权限
+        if (Build.VERSION.SDK_INT >= 23
+                && checkSelfPermission("android.permission.RECORD_AUDIO") != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{"android.permission.RECORD_AUDIO"}, REQ_MIC);
+        }
+
+        // NFC：上游 NfcStore 负责状态与历史，这里只在「已 arm」时抢 reader mode，
+        // 避免长期占用导致刷公交卡/门禁被本 App 截胡。
+        com.hubmobile.app.harness.NfcStore.init(getApplicationContext());
+        nfcAdapter = NfcAdapter.getDefaultAdapter(this);
+        com.hubmobile.app.harness.NfcStore.setArmListener(
+                new com.hubmobile.app.harness.NfcStore.ArmListener() {
+                    @Override public void onArmChanged(final boolean armed) {
+                        ui.post(new Runnable() {
+                            @Override public void run() {
+                                if (armed) enableNfc(); else disableNfc();
+                            }
+                        });
+                    }
+                });
+        if (com.hubmobile.app.harness.NfcStore.isArmed()) enableNfc();
+
+        // 接收系统「分享到 githup AI」的文本/文件
+        acceptShare(getIntent());
 
         playDialogue();
         startEngine();
@@ -350,6 +385,7 @@ public class HarnessActivity extends Activity {
                 boot.startAnimation(out);
                 boot.setVisibility(View.GONE);
                 mContent.setVisibility(View.VISIBLE);
+                com.hubmobile.app.harness.EngineService.keepAlive(getApplicationContext());
                 web.loadUrl(url);
             }
         }, 900);
@@ -370,12 +406,97 @@ public class HarnessActivity extends Activity {
         // 控制台页靠 window.dshshell 判断「是不是在安卓 App 内」，不注入整页功能都灰掉
         w.addJavascriptInterface(
                 new com.hubmobile.app.harness.ShellBridge(this), "dshshell");
+        // 聊天输入框的分享/语音草稿桥：只在可信的回环引擎文档里放行
+        draftInput = new com.hubmobile.app.harness.DraftInputBridge(this,
+                new com.hubmobile.app.harness.DraftInputBridge.Guard() {
+                    @Override public boolean allowed() { return trustedDoc; }
+                });
+        w.addJavascriptInterface(draftInput, "dshinput");
         w.setWebViewClient(new WebViewClient() {
+            @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap favicon) {
+                trustedDoc = isEngineUrl(url);
+                if (draftInput != null) draftInput.navigation();
+            }
+            @Override public void onPageFinished(WebView v, String url) {
+                trustedDoc = isEngineUrl(url);
+                if (draftInput != null && trustedDoc && Build.VERSION.SDK_INT >= 19) {
+                    v.evaluateJavascript(draftInput.bootstrap(), null);
+                }
+            }
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                trustedDoc = isEngineUrl(r.getUrl().toString());
                 return false;
             }
         });
         w.setWebChromeClient(new WebChromeClient());
+    }
+
+    private boolean isEngineUrl(String url) {
+        if (url == null) return false;
+        try {
+            Uri u = Uri.parse(url);
+            String h = u.getHost();
+            if (h == null) return false;
+            h = h.toLowerCase(java.util.Locale.US);
+            if (!"127.0.0.1".equals(h) && !"localhost".equals(h)) return false;
+            int p = u.getPort();
+            return p >= 3080 && p < 3092;
+        } catch (Throwable t) { return false; }
+    }
+
+    private void enableNfc() {
+        if (nfcAdapter == null || Build.VERSION.SDK_INT < 19) return;
+        try {
+            nfcAdapter.enableReaderMode(this, new NfcAdapter.ReaderCallback() {
+                @Override public void onTagDiscovered(Tag tag) {
+                    com.hubmobile.app.harness.NfcStore.recordTag(getApplicationContext(), tag);
+                }
+            }, NfcAdapter.FLAG_READER_NFC_A | NfcAdapter.FLAG_READER_NFC_B
+                    | NfcAdapter.FLAG_READER_NFC_F | NfcAdapter.FLAG_READER_NFC_V
+                    | NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK, null);
+            com.hubmobile.app.harness.NfcStore.setReaderActive(true);
+        } catch (Throwable ignored) {}
+    }
+
+    private void disableNfc() {
+        if (nfcAdapter == null || Build.VERSION.SDK_INT < 19) return;
+        try { nfcAdapter.disableReaderMode(this); } catch (Throwable ignored) {}
+        com.hubmobile.app.harness.NfcStore.setReaderActive(false);
+    }
+
+    private void acceptShare(Intent i) {
+        if (draftInput != null && i != null) draftInput.accept(i);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (draftInput != null) draftInput.resume();
+        if (com.hubmobile.app.harness.NfcStore.isArmed()) enableNfc();
+    }
+
+    @Override protected void onPause() {
+        if (draftInput != null) draftInput.pause();
+        disableNfc();
+        super.onPause();
+    }
+
+    @Override protected void onNewIntent(Intent i) {
+        super.onNewIntent(i);
+        setIntent(i);
+        acceptShare(i);
+    }
+
+    @Override protected void onDestroy() {
+        if (draftInput != null) draftInput.destroy();
+        disableNfc();
+        com.hubmobile.app.harness.NfcStore.setArmListener(null);
+        super.onDestroy();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int req, String[] perms, int[] results) {
+        super.onRequestPermissionsResult(req, perms, results);
+        if (req == REQ_MIC && draftInput != null) draftInput.permissionResult(results);
     }
 
     @Override
