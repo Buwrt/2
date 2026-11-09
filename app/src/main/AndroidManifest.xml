@@ -212,6 +212,36 @@
             android:name=".NotifWatchReceiver"
             android:exported="false"
             android:enabled="true" />
+
+        <!-- ===== 第二层：App 本地桥 / 悬浮桌宠 / 无障碍 ===== -->
+
+        <!-- 悬浮桌宠：WindowManager 悬浮球 + 流体云卡片，由 127.0.0.1:3081/overlay 控制 -->
+        <service
+            android:name="com.hubmobile.app.harness.OverlayService"
+            android:exported="false"
+            android:enabled="true" />
+
+        <!-- 读屏 / 点按 / 截图 / 手势：插件经 127.0.0.1:3181 调用，需用户在系统设置里开启 -->
+        <service
+            android:name="com.hubmobile.app.harness.HarnessAccessibilityService"
+            android:exported="true"
+            android:enabled="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:label="@string/a11y_label">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/harness_a11y_config" />
+        </service>
+
+        <!-- /open 路由把私有文件以 content:// 授权给系统应用 -->
+        <provider
+            android:name="com.hubmobile.app.harness.LogShareProvider"
+            android:authorities="${applicationId}.logshare"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 
 

@@ -92,6 +92,9 @@ public class HarnessActivity extends Activity {
         mContent = content;
         setContentView(root);
 
+        // 第二层：本地桥要在 WebView 加载前就监听，否则设置页一进来就 fetch 3081 失败
+        com.hubmobile.app.harness.LocalBridgeServer.start(getApplicationContext());
+
         playDialogue();
         startEngine();
     }
@@ -364,6 +367,9 @@ public class HarnessActivity extends Activity {
         CookieManager cm = CookieManager.getInstance();
         cm.setAcceptCookie(true);
         cm.setAcceptThirdPartyCookies(w, true);
+        // 控制台页靠 window.dshshell 判断「是不是在安卓 App 内」，不注入整页功能都灰掉
+        w.addJavascriptInterface(
+                new com.hubmobile.app.harness.ShellBridge(this), "dshshell");
         w.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
                 return false;

@@ -311,3 +311,79 @@ linker 按 DT_NEEDED 顺序解析，第一个 `libz.so.1` 就断链，直接退�
 阶段 D 那句「已校验 41,426 / 41,426 · 本次新增 0」是正常命中缓存，不是没干活。
 
 只改 1 个 Java 文件，`SRC_SHA256` 与 `assets.sha` 相应重算；包名、签名、版本、双入口均不动。
+
+---
+
+## 十一、阶段 F：第二层能力（App 本地桥 + 悬浮桌宠 + 无障碍）
+
+真机进到 Web UI 后，「大肥鱼 / 桌宠设置」整片报
+`连不上 App 本地桥，刷新页面再试` / `状态读不到：Failed to fetch`。
+
+### 根因
+
+翻 payload 里的前端源码，`dsh-android-console/lib/client.js` 写死了：
+
+```js
+const OVERLAY_BRIDGE = 'http://127.0.0.1:3081/overlay';
+```
+
+`dsh-doc-actions` 用 `127.0.0.1:3081/open`；控制台页靠
+`window.dshshell.ctlState()` / `ctlAct()` 判断是不是在安卓 App 内。
+这些全部由**上游原生壳在 App 进程里**提供，node 引擎（3080）只负责 Web UI 与 AI 对话。
+精简桥初版只有 3080 → 3081 无人监听 → fetch 直接拒绝连接。刷新多少次都没用。
+
+无障碍插件走 `127.0.0.1:3181`，Shizuku 系插件还要 `APP_LOCAL_TOKEN` /
+`APP_NOTIFY_PORT` / `APP_A11Y_PORT` / `SHIZUKU_DEX` 等环境变量——缺了整类能力静默失效。
+
+### 实施方式：不移植 525KB 的 MainActivity
+
+上游 `MainActivity` 里本地桥、桌宠、虚拟屏、Shizuku 全搅在一起，硬塞进来要引入
+Shizuku AAR 与 20+ R 资源。改为移植**能独立编译的部分** + 自写精简实现：
+
+| 文件 | 来源 | 作用 |
+|---|---|---|
+| `LocalFence.java` | 上游 `vscreen/LocalHttpFence` 改造 | Host/Origin/Referer 回环围栏，端口放宽到 3080–3091 以兼容引擎顺延 |
+| `LocalBridgeAuth.java` | 新写 | `APP_LOCAL_TOKEN` 共享密钥，敏感路由鉴权 |
+| `LocalBridgeServer.java` | 新写 | 127.0.0.1:3081 的 HTTP 服务 + CORS + 路由分发 |
+| `OverlayService.java` | 新写 | WindowManager 悬浮桌宠（拖动/说话/长按进 AI）、流体云卡片 |
+| `ShellBridge.java` | 新写 | `window.dshshell` 的 `ctlState` / `ctlAct` |
+| `HarnessAccessibilityService.java` | 上游 `AccessibilityService` 1987 行移植 | 读屏 / 点按 / 手势 / 截图 / 通知捕获，监听 3181 |
+| `NfcStore.java` / `LogShareProvider.java` | 上游移植 | 无障碍服务依赖的 NFC 状态中转、content:// 文件分享 |
+
+**上游源码可直接搬的原因**：这两个类零 Shizuku 依赖、零 R 资源、零 MainActivity 引用
+（`NfcStore` 只有 `MainActivity.appForeground` 两处，改成 `false`）。
+`VsreenBridgeService` 依赖 `moe.shizuku.server.IRemoteProcess` AIDL，**不移植**。
+
+### 现在各路由的行为
+
+| 路由 | 状态 |
+|---|---|
+| `/overlay?action=status\|show\|hide\|fluid&on=\|vscreen&on=\|panel` | ✅ 真悬浮窗；`fluid` 飘卡片；`vscreen` 给明确的降级提示 |
+| `/open` | ✅ 经 `LogShareProvider` 的 content:// 授权给系统应用打开/分享/定位目录 |
+| `/status` `/changelog` | ✅ 返回壳状态、无障碍与桌宠状态 |
+| `/notify` `/clipboard` `/setting` | ✅ 通知、剪贴板、跳悬浮窗/无障碍/电池设置 |
+| `/shell` | ⚠️ 只在 App 自己的 uid 下跑，返回 `privileged:false`，不冒充 Shizuku |
+| `/usage` `/schedule` `/voice` `/tts` `/lan` | ⚠️ 明确回「需 Shizuku 或上游壳」，不假装成功 |
+| `window.dshshell` | ✅ 控制台页不再整片灰掉，能做的动作真做，不能做的给原因 |
+
+### 权限与用户操作
+
+Manifest 已声明 `SYSTEM_ALERT_WINDOW`、`PACKAGE_USAGE_STATS`、`RECORD_AUDIO` 等，
+并注册了 `OverlayService`、`HarnessAccessibilityService`、`LogShareProvider` 与
+`res/xml/harness_a11y_config.xml`。两个能力要**用户手动开一次**：
+
+- 桌宠：点「显示桌宠」→ 若未授权会 Toast 提示，去系统设置开「显示在其他应用上层」
+- 读屏：系统设置 → 无障碍 → `githup AI 读屏辅助` → 开启
+
+`HarnessBridge` 现在给 node 注入 `APP_LOCAL_TOKEN`（首次生成并持久化到 `dsh_prefs`）、
+`APP_NOTIFY_PORT=3081`、`APP_A11Y_PORT=3181`，并把 `engine_port` / `a11y_port`
+写回 prefs 供无障碍服务读取。
+
+### 仍未做的（诚实边界）
+
+**虚拟屏（VirtualScreen Server）没有真做**。它要靠 Shizuku 的
+`newProcess()` 以 shell uid 起一个 `app_process` 特权进程、再反射创建虚拟 Display，
+纯 Android framework 做不到。本版把「悬浮屏预览」开关降级成一张说明卡片。
+同理，特权 shell、定时任务里的系统级动作、通知监听的完整链路仍属第三层。
+
+桌面双入口、包名、官方签名、`1.2.20 / 1002020`、底座 SPA 一行未改。

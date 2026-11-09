@@ -350,6 +350,22 @@ public final class HarnessBridge {
             env.put("SHIZUKU_APP_ID", c.getPackageName());
             env.put("SHIZUKU_AVAILABLE", "0");
             env.put("ROOT_AVAILABLE", "0");
+            // 第二层：本地桥 3081 / 无障碍 3181 的端口与共享密钥。
+            // 插件（dsh-tool-android / dsh-tool-accessibility / dsh-tool-shizuku 等）
+            // 靠这几个环境变量定位 App 进程内的桥，缺了就整类能力静默失效。
+            env.put("APP_LOCAL_TOKEN",
+                    com.hubmobile.app.harness.LocalBridgeAuth.token(c));
+            env.put("APP_NOTIFY_PORT", "3081");
+            env.put("APP_A11Y_PORT", "3181");
+            env.put("VS_DEX", "");
+            env.put("SHIZUKU_DEX", "");
+            android.content.SharedPreferences dsh = c.getSharedPreferences(
+                    "dsh_prefs", Context.MODE_PRIVATE);
+            dsh.edit()
+                    .putInt("engine_port", port)
+                    .putInt("a11y_port", 3181)
+                    .putString("shizuku_app_id", c.getPackageName())
+                    .apply();
             File ca = systemCaBundle(c);
             if (ca != null) {
                 env.put("SSL_CERT_FILE", ca.getAbsolutePath());

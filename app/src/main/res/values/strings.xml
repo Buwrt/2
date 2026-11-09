@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">githup</string>
+    <string name="a11y_label">githup AI 读屏辅助</string>
+    <string name="a11y_desc">让 githup AI 读取屏幕内容、执行点按与手势，用于自动化操作。仅在本机 127.0.0.1 提供服务，不上传任何数据。</string>
 </resources>
