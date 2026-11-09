@@ -4,7 +4,7 @@
   "package_adapted_to": "com.hubmobile.app.harness",
   "runtime_data_dir": "/data/user/0/com.hubmobile.app",
   "note": "脚本/插件/技能为随包源码资产；Java 原生模块与 dsh 引擎需按 MERGE_PLAN.md 接入后生效。",
-  "asset_count": 94,
+  "asset_count": 117,
   "java_classes": [
     "AccessibilityService.java",
     "AlarmReceiver.java",
