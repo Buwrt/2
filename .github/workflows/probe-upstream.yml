@@ -6,6 +6,8 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - name: Download upstream dist APK
         run: |
@@ -19,6 +21,7 @@ jobs:
       - name: Inspect APK and payload.zip
         run: |
           set -e
+          {
           python3 - <<'PY'
           import zipfile, io, os, json, hashlib, collections
           z = zipfile.ZipFile('upstream.apk')
@@ -38,12 +41,12 @@ jobs:
           pn = p.namelist()
           print('payload entries:', len(pn))
           key = ['runtime/bin/node', 'dshroot/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
-                 'runtime/lib/libc++_shared.so', 'dshhome/', 'skills/']
+                 'runtime/lib/libc++_shared.so', 'dshhome/', 'skills/',
+                 'dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules']
           for k in key:
-              print('  %-70s %s' % (k, any(k in n for n in pn)))
+              print('  %-72s %s' % (k, any(k in n for n in pn)))
           ext = collections.Counter(os.path.splitext(n)[1].lower() or '(noext)' for n in pn)
           print('payload ext top:', ext.most_common(12))
-          # 统计硬编码旧包名（只扫文本类小文件）
           old = b'com.deepseek.harness'
           hits = 0; files = 0; samples = []
           for n in pn:
@@ -57,15 +60,49 @@ jobs:
               except Exception: continue
               if old in b:
                   hits += b.count(old); files += 1
-                  if len(samples) < 12: samples.append(n)
+                  if len(samples) < 20: samples.append(n)
           print('hardcoded com.deepseek.harness: %d hits in %d text files' % (hits, files))
           for s in samples: print('   ', s)
-          # node 二进制架构
           for n in pn:
-              if n.endswith('/runtime/bin/node') or n == 'runtime/bin/node':
+              if n.endswith('runtime/bin/node'):
                   b = p.read(n)[:20]
                   print('node header:', b[:8].hex(), 'elf_class', b[4])
                   break
-          # 顶层目录
           print('payload top dirs:', sorted(set(n.split('/')[0] for n in pn))[:20])
+          # 找 dsh bin.js 启动入口附近的关键文件
+          for n in pn:
+              if 'dsh/lib/bin.js' in n and 'dshroot' in n:
+                  print('dsh bin.js:', n, p.getinfo(n).file_size)
+                  break
+          PY
+          } 2>&1 | tee probe-report.txt
+
+      - name: Publish report into repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.request, urllib.error, urllib.parse
+          T = os.environ["GH_TOKEN"]
+          OWNER, REPO, BRANCH = "Buwrt", "2", "main"
+          path = "ci/probe-report.txt"
+          data = open("probe-report.txt", "rb").read()
+          body = {"message": "ci: 上游 payload 探针报告", "branch": BRANCH,
+                  "content": base64.b64encode(data).decode()}
+          try:
+              r = urllib.request.Request(
+                  "https://api.github.com/repos/%s/%s/contents/%s?ref=%s" % (OWNER, REPO, path, BRANCH),
+                  headers={"Authorization": "Bearer " + T, "Accept": "application/vnd.github+json",
+                           "User-Agent": "ci-probe"})
+              with urllib.request.urlopen(r, timeout=60) as z:
+                  body["sha"] = json.loads(z.read().decode())["sha"]
+          except Exception as e:
+              print("no existing sha", e)
+          req = urllib.request.Request(
+              "https://api.github.com/repos/%s/%s/contents/%s" % (OWNER, REPO, path),
+              data=json.dumps(body).encode(), method="PUT",
+              headers={"Authorization": "Bearer " + T, "Accept": "application/vnd.github+json",
+                       "Content-Type": "application/json", "User-Agent": "ci-probe"})
+          with urllib.request.urlopen(req, timeout=120) as z:
+              print("published", z.status, len(data))
           PY
