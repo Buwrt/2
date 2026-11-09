@@ -4,7 +4,7 @@
 {"entries": 41426, "changed_files": 29, "replaced_hits": 39, "size": 159794879}
 
 --- work/verify.json ---
-{"size": 161763177, "sha256": "90fe7f8c603108733ea244c3eec7f588cb6cb4a7983f6cd2aaa56d6f971070da", "payload_size": 159794879, "harness_assets": 119, "guard_ok": true}
+{"size": 161763177, "sha256": "2b2295837045879a8abbd5518be87e26e1374a43806059af8c5ecfb52ca52ab8", "payload_size": 159794879, "harness_assets": 119, "guard_ok": true}
 
 --- work/badging.txt ---
 package: name='com.hubmobile.app' versionCode='1002020' versionName='1.2.20' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34' compileSdkVersionCodename='14'
@@ -81,11 +81,11 @@ Warning: SDK processing. This version only understands SDK XML versions up to 3 
 > Task :app:mergeReleaseJavaResource
 > Task :app:mergeReleaseAssets
 > Task :app:processApplicationManifestReleaseForBundle
-> Task :app:collectReleaseDependencies
-> Task :app:sdkReleaseDependencyData
-> Task :app:compressReleaseAssets
-> Task :app:bundleReleaseResources
 > Task :app:processReleaseManifestForPackage
+> Task :app:collectReleaseDependencies
+> Task :app:bundleReleaseResources
+> Task :app:compressReleaseAssets
+> Task :app:sdkReleaseDependencyData
 > Task :app:validateSigningRelease
 > Task :app:writeReleaseAppMetadata
 > Task :app:writeReleaseSigningConfigVersions
@@ -104,7 +104,7 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:createReleaseApkListingFileRedirect
 > Task :app:assembleRelease
 
-BUILD SUCCESSFUL in 53s
+BUILD SUCCESSFUL in 49s
 37 actionable tasks: 36 executed, 1 from cache
 
 
