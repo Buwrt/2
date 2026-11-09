@@ -154,3 +154,58 @@ GitHub Contents API 单文件上限 100MB，160MB 的包不能走 `apk/` 回写�
 - `usesCleartextTraffic=true` 是对整个 App 放开明文，底座自身的 GitHub 请求仍全走 HTTPS
 - 无真机验证 node 在 targetSdk 28 下的实际启动与 WebView cookie 流程；已验证的是
   构建链、包身份、签名与包内结构
+
+---
+
+## 八、阶段 C：把「我的软件」放回主体（品牌启动页 + 开机对话）
+
+阶段 B 打开 `githup AI` 后直接是上游 Harness 的 Web UI（「探索未至之境」），
+整屏只有 DeepSeek 字样，主体感丢了；而上游原版那套 `DEEPSEEK HARNESS / BOOT SEQUENCE / PAYLOAD / COLD START`
+冷启动动画属于它的 `MainActivity`，我们的精简桥里没有。
+
+阶段 C 不动内核、不动上游前端，只在原生层补回品牌：
+
+### 1) 启动页 = githup 版式 + 开机对话设计
+
+`HarnessActivity` 重写成两段式：
+
+- **装载段**：沿用底座启动页的视觉（`#0d1117` 深底、圆形 `ic_launcher`、`githup`、
+  `GitHub 客户端 · AI 引擎装载中`），中部叠一张带四角取景框与点阵底纹的卡片，
+  卡头 `GITHUP × DEEPSEEK / V1.2.20 · BOOT`，左下角 `BOOT SEQUENCE / PAYLOAD … MB / COLD START`
+  —— 视觉语言取自上游开机画面，但**品牌归属 githup**。
+- **对话段**：打字机逐句播放固定四句，主体是「我的软件」，DeepSeek 是被引擎请进来的一方：
+
+  | 谁 | 说什么 |
+  |---|---|
+  | githup → DeepSeek | 你好，DeepSeek |
+  | DeepSeek → githup | 很高兴为您服务 |
+  | githup → DeepSeek | 让我们共同进步 |
+  | DeepSeek | 好 |
+
+- **真实进度进这一页**：`HarnessBridge.Callback` 增加 `onProgress(entries, written, total)`，
+  解压每 400 项回调一次，底部角标实时显示 `展开 12,345 / 41,426 · 新增 …`；
+  启动 node、等待 token、失败原因也都落在同一页，不再是一个裸 TextView + 转圈。
+
+### 2) AI 界面保留 githup 在场
+
+上游 Web UI 在 payload 的 `dsh-web-frontend/dist` 里，改它要动 4 万文件中的前端包、
+还会连带影响引擎的静态资源门禁，风险大。折中：WebView 上方加一条原生品牌条
+`githup AI ｜ 由 DeepSeek Harness 引擎驱动`，任何页面都在场。
+
+### 3) 覆盖安装与包名的真相
+
+- 包名**一直是 `com.hubmobile.app`**，`aapt dump badging` 输出：
+  `package: name='com.hubmobile.app' versionCode='1002020' versionName='1.2.20'`。
+  桌面两个图标是**同一个包的两个 LAUNCHER Activity**，不是两个 App。
+- Android 覆盖规则：同包名 + 同签名证书 + versionCode 不降级。
+  我们的包签名证书 `863dd1cd…927` 与 githup 官方一致 → 可覆盖 githup 官方版、
+  `Buwrt/2` 第一版、`githup-release` 出的包。
+- **不能覆盖上游原版 `com.deepseek.harness`**（包名不同、签名不同），只能卸载后装或并存；
+  想让上游用户「直接升级」成我的软件，必须用对方的包名与签名，那与「包名签名以我为准」冲突。
+  图三那种 `BOOT SEQUENCE / PAYLOAD 963 MB / COLD START` 正是上游原版的开机画面，
+  不是本包的界面 —— 若手机上出现它，说明装的是另一个 App。
+
+### 4) 未改的东西
+
+`com.hubmobile.app`、官方签名、`1.2.20 / 1002020`、五环防护链、底座 SPA 全部保持；
+只改了 2 个 Java 类并相应重算 `SRC_SHA256` 与 `assets.sha`。

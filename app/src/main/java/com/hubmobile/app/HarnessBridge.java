@@ -54,8 +54,13 @@ public final class HarnessBridge {
             "bin/npm", "bin/npx", "bin/pip", "bin/pip3"
     };
 
+    /** 构建期统计：上游 payload.zip 的条目数（见 ci/build-ai-report.txt）。 */
+    private static final long TOTAL_ENTRIES = 41426L;
+
     public interface Callback {
         void onStage(String text);
+        /** 展开进度：已扫描条目 / 本次新写入条目 / 总条目。 */
+        default void onProgress(long entries, long written, long total) {}
         void onReady(String url);
         void onError(String msg);
     }
@@ -106,6 +111,13 @@ public final class HarnessBridge {
         });
     }
 
+    private static void progress(Handler ui, final Callback cb,
+                                 final long entries, final long written) {
+        ui.post(new Runnable() {
+            @Override public void run() { cb.onProgress(entries, written, TOTAL_ENTRIES); }
+        });
+    }
+
     /** 流式展开，避免把 160MB zip 一次性读进内存；已存在且大小一致则跳过。 */
     private static void extract(Context c, Handler ui, Callback cb) throws IOException {
         File dir = payload(c);
@@ -142,13 +154,14 @@ public final class HarnessBridge {
             written++;
             zis.closeEntry();
             count++;
-            if (count % 2000 == 0) {
-                final int k = count, w = written;
-                stage(ui, cb, "正在展开引擎文件 " + k + " 项（新增 " + w + "）…");
+            if (count % 400 == 0) {
+                final long k = count, w = written;
+                progress(ui, cb, k, w);
             }
         }
         zis.close();
         raw.close();
+        progress(ui, cb, count, written);
 
         // 覆盖升级后执行位可能丢失，每次都补一遍（成本极低）
         for (String p : EXECS) {
