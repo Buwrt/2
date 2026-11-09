@@ -29,6 +29,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import com.hubmobile.app.HarnessActivity;
+import com.hubmobile.app.R;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
