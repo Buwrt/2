@@ -1,0 +1,52 @@
+name: Deliver APK to Sandbox
+on:
+  workflow_dispatch:
+
+jobs:
+  deliver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (shallow)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download own Release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          curl -fL --retry 3 --retry-delay 5 --max-time 900 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -o githup-v1.2.20.apk \
+            "https://github.com/Buwrt/2/releases/download/v1.2.20-merged/githup-v1.2.20.apk"
+          ls -la githup-v1.2.20.apk
+          sha256sum githup-v1.2.20.apk | tee apk.sha256
+          echo "--- Release 侧 digest ---"
+          curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/Buwrt/2/releases/tags/v1.2.20-merged" \
+            | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['assets'][0]['size'], d['assets'][0].get('digest'))"
+
+      - name: Split into 32MB parts and push orphan branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          mkdir -p parts
+          split -b 32m -d -a 2 githup-v1.2.20.apk parts/apk.part.
+          ls -la parts/ > parts/manifest.txt
+          sha256sum parts/apk.part.* >> parts/manifest.txt
+          cat parts/manifest.txt
+          git config user.name "apk-delivery-bot"
+          git config user.email "apk-delivery-bot@users.noreply.github.com"
+          git checkout --orphan apk-delivery
+          git rm -rf . >/dev/null 2>&1 || true
+          cp parts/* .
+          rm -rf parts
+          git add apk.part.* manifest.txt
+          git commit -m "tmp: APK parts for sandbox delivery" --quiet
+          git push --force origin apk-delivery
+          echo "✅ 临时分支 apk-delivery 已推送"
