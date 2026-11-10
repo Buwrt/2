@@ -94,7 +94,7 @@ public final class AiPanel {
     private boolean expanded = false;
     private boolean fullHeight = false;
     /** 阶段 R：设置页开关控制的可移动悬浮球显隐，**默认隐藏**。 */
-    private boolean ballEnabled = false;阶段 R：默认不显示，由设置页开关决定
+    private boolean ballEnabled = false;
     private boolean webReady = false;
     private boolean destroyed = false;
     private long totalEntries = 41426L, lastEntries = 0, lastWritten = 0;
