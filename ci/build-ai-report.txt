@@ -4,7 +4,7 @@
 {"entries": 41426, "changed_files": 29, "replaced_hits": 39, "size": 159794879}
 
 --- work/verify.json ---
-{"size": 161890265, "sha256": "063484d174dbbc2207af09fcf418480ed0a5f57d18adf7143742dc528f837a9b", "payload_size": 159794879, "harness_assets": 119, "guard_ok": true}
+{"size": 161890265, "sha256": "bfb61239924fec626c85ff4ee010e7689c2beec9d73bda93420263d146363787", "payload_size": 159794879, "harness_assets": 119, "guard_ok": true}
 
 --- work/badging.txt ---
 package: name='com.hubmobile.app' versionCode='1002020' versionName='1.2.20' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34' compileSdkVersionCodename='14'
@@ -60,42 +60,42 @@ Warning: SDK processing. This version only understands SDK XML versions up to 3 
 > Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
 > Task :app:checkReleaseDuplicateClasses
 > Task :app:generateReleaseBuildConfig
-> Task :app:checkReleaseAarMetadata
 > Task :app:javaPreCompileRelease
+> Task :app:checkReleaseAarMetadata
 > Task :app:generateReleaseResValues
 > Task :app:mapReleaseSourceSetPaths
 > Task :app:generateReleaseResources
-> Task :app:mergeReleaseResources
 > Task :app:packageReleaseResources
+> Task :app:mergeReleaseResources
 > Task :app:createReleaseCompatibleScreenManifests
 > Task :app:extractDeepLinksRelease
 > Task :app:parseReleaseLocalResources
 > Task :app:processReleaseMainManifest
 > Task :app:processReleaseManifest
 > Task :app:extractProguardFiles
-> Task :app:mergeReleaseArtProfile
 > Task :app:processReleaseJavaRes NO-SOURCE
-> Task :app:processReleaseManifestForPackage
-> Task :app:mergeReleaseJavaResource
+> Task :app:mergeReleaseArtProfile
 > Task :app:mergeReleaseShaders FROM-CACHE
 > Task :app:compileReleaseShaders NO-SOURCE
 > Task :app:generateReleaseAssets UP-TO-DATE
-> Task :app:processReleaseResources
+> Task :app:mergeReleaseJavaResource
 > Task :app:mergeReleaseAssets
+> Task :app:processApplicationManifestReleaseForBundle
+> Task :app:collectReleaseDependencies
+> Task :app:compressReleaseAssets
+> Task :app:bundleReleaseResources
+> Task :app:sdkReleaseDependencyData
+> Task :app:validateSigningRelease
+> Task :app:writeReleaseAppMetadata
+> Task :app:writeReleaseSigningConfigVersions
+> Task :app:processReleaseManifestForPackage
+> Task :app:processReleaseResources
 
 > Task :app:compileReleaseJavaWithJavac
 Note: Some input files use or override a deprecated API.
 Note: Recompile with -Xlint:deprecation for details.
 
 > Task :app:mergeReleaseGeneratedProguardFiles
-> Task :app:processApplicationManifestReleaseForBundle
-> Task :app:collectReleaseDependencies
-> Task :app:bundleReleaseResources
-> Task :app:compressReleaseAssets
-> Task :app:sdkReleaseDependencyData
-> Task :app:validateSigningRelease
-> Task :app:writeReleaseAppMetadata
-> Task :app:writeReleaseSigningConfigVersions
 > Task :app:minifyReleaseWithR8
 > Task :app:compileReleaseArtProfile
 > Task :app:shrinkReleaseRes
@@ -104,7 +104,7 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:createReleaseApkListingFileRedirect
 > Task :app:assembleRelease
 
-BUILD SUCCESSFUL in 57s
+BUILD SUCCESSFUL in 38s
 37 actionable tasks: 36 executed, 1 from cache
 
 
