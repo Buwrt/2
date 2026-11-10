@@ -102,6 +102,24 @@ public final class AiPanel {
     private String readyUrl = null;
     private Intent pendingDraft = null;
 
+    /**
+     * 阶段 U：把前端「开新窗口」的三条路全部直接汇到原生外发桥。
+     *
+     * 为什么不只靠 onCreateWindow：真机上部分 WebView 内核即使设了
+     * setSupportMultipleWindows(true)，window.open("about:blank") 也返回 null，
+     * 前端 BrowserLogin 就拿不到 popup，退化成「复制登录链接」→ 不跳浏览器。
+     * 上游壳的 probe 方案在同一台机器上也可能丢掉 location.replace 回调。
+     *
+     * 这里在页面里覆盖 window.open：
+     *   · about:blank 预占页 → 返回一个假 popup，它的 location.replace()
+     *     直接把真正的授权地址交给 githupExternal.open()（立刻 ACTION_VIEW）
+     *   · 真实 http(s) → 直接外发
+     *   · blob:/data:/回环 → 交回 WebView 原生，不破坏文档预览与 DSH 自身页面
+     * 再补两条兜底：复制授权链接（navigator.clipboard.writeText）也自动外发；
+     * <a target="_blank"> 在捕获阶段直接外发，不等 onCreateWindow。
+     */
+    private static final String EXTERNAL_BRIDGE_JS = "(function(){try{\nif(window.__ghExt)return;window.__ghExt=1;\nvar no=window.open;\nfunction mk(u){var o={closed:false,opener:null};o.location={replace:function(x){window.githupExternal.open(String(x||''));},assign:function(x){window.githupExternal.open(String(x||''));}};o.close=function(){o.closed=true;};if(u)window.githupExternal.open(u);return o;}\nwindow.open=function(u){var s=(u==null?'':String(u));if(s===''||s==='about:blank')return mk('');if(/^(blob:|data:|file:|content:)/i.test(s)){try{return no.apply(window,arguments);}catch(e){return null;}}if(/^https?:\\/\\/(127\\.0\\.0\\.1|localhost|\\[::1\\])(:\\d+)?\\//i.test(s)){try{return no.apply(window,arguments);}catch(e){return null;}}return mk(s);};\ntry{if(navigator.clipboard&&navigator.clipboard.writeText){var ow=navigator.clipboard.writeText.bind(navigator.clipboard);navigator.clipboard.writeText=function(t){try{var s=String(t||'');if(/^https?:\\/\\//i.test(s)&&/(deepseek|oauth|authorize|login|signin)/i.test(s))window.githupExternal.open(s);}catch(e){}return ow(t);};}}catch(e){}\ntry{document.addEventListener('click',function(ev){try{var a=ev.target&&ev.target.closest?ev.target.closest('a[target=\"_blank\"]'):null;if(!a)return;if(a.hasAttribute('download'))return;var h=a.getAttribute('href')||'';if(/\\.apk(\\?|$)/i.test(h))return;if(!/^https?:\\/\\//i.test(h))return;if(/^https?:\\/\\/(127\\.0\\.0\\.1|localhost|\\[::1\\])(:\\d+)?\\//i.test(h))return;ev.preventDefault();ev.stopPropagation();window.githupExternal.open(h);}catch(e){}},true);}catch(e){}\n}catch(e){}})()";
+
     public static void setPendingShare(Intent i) { pendingShare = i; }
 
     /** 取走一次（取完即清），避免 MainActivity 复用时重复展开。 */
@@ -618,8 +636,10 @@ public final class AiPanel {
         s.setSupportZoom(false);
         s.setBuiltInZoomControls(false);
         s.setDisplayZoomControls(false);
-        /* 阶段 T：接住 window.open("about:blank")，配合下面的 onCreateWindow。 */
+        /* 阶段 T：接住 window.open("about:blank")，配合下面的 onCreateWindow。
+           阶段 U：连非手势触发的 window.open 也允许，避免内核差异把它静默吞掉。 */
         s.setSupportMultipleWindows(true);
+        s.setJavaScriptCanOpenWindowsAutomatically(true);
         w.setInitialScale(100);
         CookieManager cm = CookieManager.getInstance();
         cm.setAcceptCookie(true);
@@ -629,6 +649,12 @@ public final class AiPanel {
             @Override public boolean allowed() { return trustedDoc; }
         });
         w.addJavascriptInterface(draftInput, "dshinput");
+        /* 阶段 U：原生外发桥。window.open / 复制登录链接 / <a target=_blank>
+           三条路都汇到 openExternalFast()，点登录立刻跳浏览器。 */
+        w.addJavascriptInterface(new Object() {
+            @android.webkit.JavascriptInterface
+            public void open(String url) { openExternalFast(url); }
+        }, "githupExternal");
 
         /* 文件卡片 / APK 链接：WebView 默认会把下载交回系统「文件预览」，
            这里交给 DownloadManager，通知栏点开即装。 */
@@ -648,6 +674,7 @@ public final class AiPanel {
                     try { v.stopLoading(); v.loadUrl(readyUrl); } catch (Throwable ignored) {}
                     return;
                 }
+                injectExternalBridge(v);
                 trustedDoc = isEngineUrl(url);
                 if (draftInput != null) draftInput.navigation();
             }
@@ -656,6 +683,7 @@ public final class AiPanel {
                     try { v.loadUrl(readyUrl); } catch (Throwable ignored) {}
                     return;
                 }
+                injectExternalBridge(v);
                 trustedDoc = isEngineUrl(url);
                 if (draftInput != null && trustedDoc && Build.VERSION.SDK_INT >= 19)
                     v.evaluateJavascript(draftInput.bootstrap(), null);
@@ -704,7 +732,13 @@ public final class AiPanel {
                             if (u == null || u.isEmpty() || "about:blank".equals(u)) return false;
                             if (routed[0]) return true;
                             routed[0] = true;
-                            try { probe.destroy(); } catch (Throwable ignored) {}
+                            /* 别在 probe 自己的回调里 destroy —— 有些内核会
+                               吞掉紧随其后的导航回调。延迟到下一帧再销毁。 */
+                            ui.post(new Runnable() {
+                                @Override public void run() {
+                                    try { probe.destroy(); } catch (Throwable ignored) {}
+                                }
+                            });
                             return routeNewWindow(u);
                         }
                         @Override public boolean shouldOverrideUrlLoading(WebView v,
@@ -874,6 +908,40 @@ public final class AiPanel {
             @Override public void run() {
                 try { Toast.makeText(act, msg, Toast.LENGTH_LONG).show(); }
                 catch (Throwable ignored) {}
+            }
+        });
+    }
+
+    /** 每次页面开始/结束时注入一次；幂等标记防止重复覆盖。 */
+    private void injectExternalBridge(WebView v) {
+        if (v == null) return;
+        try {
+            if (Build.VERSION.SDK_INT >= 19) v.evaluateJavascript(EXTERNAL_BRIDGE_JS, null);
+            else v.loadUrl("javascript:" + android.net.Uri.encode(EXTERNAL_BRIDGE_JS));
+        } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 阶段 U：**快速**外发。对齐上游 ctlAction("open.url") —— 直接
+     * startActivity(ACTION_VIEW)，不等选择器，所以点登录立刻跳浏览器。
+     * 只有直发失败才回落到 openExternally() 的选择器。
+     */
+    private void openExternalFast(final String url) {
+        ui.post(new Runnable() {
+            @Override public void run() {
+                if (destroyed || url == null || url.isEmpty()) return;
+                try {
+                    if (isLoopback(url)) {
+                        if (web != null) web.loadUrl(url);
+                        return;
+                    }
+                    Intent ext = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                    ext.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    act.startActivity(ext);
+                    toast("已跳转到浏览器；完成授权后切回本 App");
+                } catch (Throwable t) {
+                    try { openExternally(Uri.parse(url)); } catch (Throwable ignored) {}
+                }
             }
         });
     }

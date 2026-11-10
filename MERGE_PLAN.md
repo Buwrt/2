@@ -1254,3 +1254,102 @@ UC / 夸克 / QQ浏览器会把 `127.0.0.1` 当危险地址拦掉或当搜索词
 
 未真机跑完整 OAuth 授权链路；已验证前端 `BrowserLogin` 源码与上游
 `MainActivity` 补丁逐条对应、Java 结构、Manifest、包身份、签名与防护链自洽。
+
+
+---
+
+## 二十四、阶段 U：为什么点登录「不会跳转到浏览器」（上游能快速跳）
+
+### 用户口径
+
+> 「我的软件为什么不会跳转到浏览器？上游的 DSH 可以快速的跳转。」
+
+上一轮（阶段 T）已把上游 `MainActivity` 的 `setSupportMultipleWindows(true)` +
+`WebChromeClient.onCreateWindow` probe + `openExternally()` chooser 逐条搬进
+`AiPanel`，但真机点了登录仍然**没有跳浏览器** —— 只停在
+「等待登录 / 没有自动打开新页面？复制登录链接」。
+
+### 根因：前端登录弹窗有两条路，我们只接住了其中一条
+
+前端 `dsh-client-ui-settings-account/lib/client.js` 的 `BrowserLogin`：
+
+```js
+begin(){ this.popup = window.open("about:blank", "_blank"); }   // 预占标签页
+update(){ ... this.popup.location.replace(destination(authorizeUrl)); }
+```
+
+注释写得很直白：`/** Preopen a tab during the user's click; blocked popups need the copy-link route. */`
+文案里也确实有 `browserPrompt: "没有自动打开新页面？"` + `copyLink: "复制登录链接"`。
+
+**`window.open` 返回 null → popup 不存在 → 前端直接退到「复制链接」路线，
+根本不发起任何跳转。**
+
+上游壳为什么能跳？它有**两条**外发通道：
+
+| 通道 | 触发 | 上游实现 | 我们（阶段 T 后） |
+|---|---|---|---|
+| `ctlAct("open.url", url)` | console / 设置页链接 | `startActivity(ACTION_VIEW)`，**直接启动，最快** | `ShellBridge` 已实现，也是直接启动 ✅ |
+| `window.open` / `<a target=_blank>` | 账号登录弹窗 | `onCreateWindow` probe 接住 → `routeNewWindow` → `openExternally()` chooser | 已搬，但**真机没触发** ❌ |
+
+`onCreateWindow` 方案在部分 WebView 内核上不可靠：即使设了
+`setSupportMultipleWindows(true)`，`window.open("about:blank")` 仍可能返回 null；
+probe 是未 attach 的 WebView，`location.replace` 的导航回调也可能被吞；
+而且 `probe.destroy()` 写在 probe 自己的回调里，会进一步放大这个差异。
+上游 v1.39.6 的注释本身就记录了「2026-10-18 账号登录复现」——说明 upstream
+自己也被这条链坑过。
+
+**结论：不能只依赖原生 WebView 的多窗口回调。要在页面层把跳转抓死。**
+
+### 本轮改动（全部在 `AiPanel.java`）
+
+**① 注入 `EXTERNAL_BRIDGE_JS`（onPageStarted + onPageFinished 双注入，幂等）**
+
+覆盖 `window.open`：
+
+- `about:blank` / 空 → 返回一个**假 popup**（`closed:false` / `opener` / `close()` /
+  `location.replace()`），让 `BrowserLogin` 认为 popup 存在 → 不会退到「复制链接」；
+  假 popup 的 `location.replace(authorizeUrl)` **直接调 `githupExternal.open()`**
+- 真实 `http(s)` → 立即 `githupExternal.open()`
+- `blob:` / `data:` / `file:` / 回环 → 交回 WebView 原生（不破坏 PPT presenter、
+  文档预览、DSH 自身页面）
+
+两条兜底：
+
+- `navigator.clipboard.writeText()`：即便用户点了「复制登录链接」，只要内容是
+  http(s) 且含 `deepseek/oauth/authorize/login/signin`，**复制的同时也自动跳浏览器**
+- `document` 捕获阶段监听 `<a target="_blank">`：非回环 http(s) 直接外发，
+  不等 `onCreateWindow`（跳过 `download` 属性和 `.apk` 链接，交给 DownloadListener）
+
+**② 新增原生桥 `githupExternal.open(url)` → `openExternalFast()`**
+
+对齐上游 `ctlAction("open.url")`：**直接 `startActivity(ACTION_VIEW)`，不用选择器**，
+所以点登录是「立刻跳」，而不是先弹一层 chooser。直发失败才回落
+`openExternally()` 的选择器。回环地址仍交回主 WebView。
+
+**③ 补齐 WebView 差异面**
+
+- `setJavaScriptCanOpenWindowsAutomatically(true)`：连非手势 `window.open` 也允许，
+  避免内核静默吞掉
+- `onCreateWindow` 里 `probe.destroy()` 从「回调内自毁」改成 `ui.post` 延迟一帧，
+  保证 `routeNewWindow()` 一定执行完（原生通道继续作为第二条保险）
+
+### 现在用户怎么操作
+
+1. 覆盖安装 → 完全退出 App 再重进
+2. AI 面板 → 设置 → 账号与余额 / Models → 点登录
+3. **立刻跳系统浏览器**（DeepSeek 授权页），完成授权
+4. 回调 `127.0.0.1:<port>/oauth/callback` 由引擎接收 → **切回本 App**，
+   「等待登录」自动收敛成已登录
+5. 若浏览器停在白页 / 一直「等待中」：多半是默认浏览器（UC / 夸克 / QQ浏览器）
+   拦了回环回调 → 去系统设置把 **Chrome / 系统浏览器**设为默认，再点「重试登录」；
+   或点用户可见的「复制登录链接」，本版也会自动外发
+
+### 与上游仍有的差异（如实）
+
+- 上游 `openExternally()` 用 `Intent.createChooser("选择浏览器完成登录")`，
+  让用户主动避开会拦回环的浏览器；本轮为「快速」改成直发，
+  原生 chooser 只作为直发失败和 `<a>`/主框架路由的兜底
+- 上游 `fallback.html` 静态兜底页 + 自动健康探测、`onShowFileChooser`、
+  `shouldInterceptRequest` 逐请求围栏仍不在本版
+- 未真机跑完整 OAuth 授权链路；已验证注入 JS 语法、Java 结构、Manifest、
+  包身份、签名与防护链自洽
