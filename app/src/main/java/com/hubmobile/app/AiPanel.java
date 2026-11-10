@@ -30,7 +30,7 @@ import android.widget.TextView;
 
 import com.hubmobile.app.harness.DraftInputBridge;
 import com.hubmobile.app.harness.EngineService;
-import com.hubmobile.app.harness.HarnessBridge;
+/* HarnessBridge 在 com.hubmobile.app 根包，与本类同包，不需要 import */
 import com.hubmobile.app.harness.LocalBridgeServer;
 import com.hubmobile.app.harness.NfcStore;
 import com.hubmobile.app.harness.ShellBridge;
