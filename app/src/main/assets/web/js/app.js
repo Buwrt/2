@@ -338,6 +338,7 @@
          通道按钮要落在它的左边。 */
       App.appendChannelAction();
       App.appendDownloadAction();
+      App.appendAIAction();
     },
 
     /**
@@ -556,6 +557,26 @@
       box.appendChild(b);
       dlBtn = b;
       App.refreshDownloadBadge();
+    },
+
+    /**
+     * 阶段 K：右上角「githup AI」入口。
+     *
+     * 桌面合并成只留一个图标后，AI 不再是第二个 App，而是从客户端里点开的一页。
+     * 常驻顶栏，任何页面都能一键进去；按系统返回就回到刚才浏览的位置。
+     * 防重复：路由切换时 setActions 会先清空再重建，这里再判一次更稳。
+     */
+    appendAIAction: function () {
+      if (!(window.NativeBridge && typeof window.NativeBridge.openAI === 'function')) return;
+      var box = document.getElementById('appbar-actions');
+      if (!box || box.querySelector('.ai-action')) return;
+      var b = document.createElement('button');
+      b.className = 'icon-btn ai-action';
+      b.setAttribute('aria-label', 'githup AI');
+      b.title = '打开 githup AI · 让 DeepSeek 帮你逛 GitHub';
+      b.innerHTML = window.icon('rocket', 22);
+      b.onclick = function () { window.NativeBridge.openAI(); };
+      box.appendChild(b);
     },
 
     /** 右上角下载入口的角标：还在跑的任务数（成功/失败的不算） */
@@ -1344,6 +1365,14 @@
       var sub = typeof page.subtitle === 'function' ? page.subtitle(r.ctx) : page.subtitle;
       App.title(title, sub);
       App.setTab(page.tab || '');
+      /* 阶段 V：把「当前页面 / 当前仓库」实时写进 App 私有状态。
+         这是 githup 自己进程内的数据 —— 不需要无障碍、悬浮窗、截屏或存储等
+         任何 Android 系统权限；3081 本机桥再把它交给 AI，AI 就不会编造界面。
+         开关未同意时原生层只存不对外返回，完全不越界。 */
+      try {
+        if (window.NativeBridge && window.NativeBridge.reportPage)
+          window.NativeBridge.reportPage(hash, String(title || ''), JSON.stringify(r || {}));
+      } catch (e) {}
       if (page.menu) {
         App.setActions([{
           icon: 'kebab-horizontal', onClick: function () {

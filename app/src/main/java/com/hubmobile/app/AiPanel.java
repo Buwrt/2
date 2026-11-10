@@ -484,11 +484,27 @@ public final class AiPanel {
         if (destroyed) return;
         /* 每次打开都把视口比例拉回 100%，避免上一次被放大/全屏的状态带过来，
            用户再也不会「放大之后缩不小」。configure() 里也已禁掉手势缩放。 */
-        if (web != null) try { web.setInitialScale(100); } catch (Throwable ignored) {}
+        if (web != null) try {
+            /* 阶段 W：展开时面板改变尺寸，WebView 要重新测量视口。
+               把 setInitialScale 落在动画帧里会被内核吞掉或延后，表现就是
+               「点了放大没反应、过一会儿才变」。动画前挂硬件层减少掉帧，
+               布局落定后再复位一次比例并摘掉硬件层，跟手且不残留。 */
+            web.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            web.setInitialScale(100);
+        } catch (Throwable ignored) {}
         expanded = true;
         panel.setVisibility(View.VISIBLE);
         panel.setLayoutParams(panelLp());
         bubble.setVisibility(View.GONE);
+        panel.post(new Runnable() {
+            @Override public void run() {
+                if (destroyed || web == null) return;
+                try {
+                    web.setInitialScale(100);
+                    web.setLayerType(View.LAYER_TYPE_NONE, null);
+                } catch (Throwable ignored) {}
+            }
+        });
         if (webReady && web != null) {
             loading.setVisibility(View.GONE);
             ((FrameLayout) panel.getTag()).setVisibility(View.VISIBLE);

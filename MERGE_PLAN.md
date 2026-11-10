@@ -1353,3 +1353,115 @@ probe 是未 attach 的 WebView，`location.replace` 的导航回调也可能被
   `shouldInterceptRequest` 逐请求围栏仍不在本版
 - 未真机跑完整 OAuth 授权链路；已验证注入 JS 语法、Java 结构、Manifest、
   包身份、签名与防护链自洽
+
+
+---
+
+## 二十五、阶段 V：零系统权限感知页面 + 用户同意后建立同名库
+
+### 用户口径
+
+> 「不给我的软件任何权限他都能知道我的 githup 软件在哪个页面，并且读的是哪个库，
+> 也能给我总结，这个库也能修改，修改之后上传到自己的账号，会建立相同名称的库；
+> 如果用户打开这个按钮就会提出弹窗：有可能会将 token 给予第三方软件或 DeepSeek，
+> 同意或拒绝，此操作与作者无关，同意就会打开此软件。」
+
+### 为什么「零权限」是可行的（不是读屏）
+
+之前 AI 回答「我看不到实时画面，但我跑在 githup 自己的用户身份下，能直接读到它
+刚写下的界面状态」—— 那段是**编造**：AI 既没有无障碍也没有截图，它把「能调
+GitHub API 读仓库」和「能看到 App 屏幕」混为一谈，还编出了设置页密度/字号/主题/
+路由序列等具体数值。
+
+但这件事**本来就可以真做到**，只是渠道不同：
+
+githup 自己就是 WebView SPA，`Router.render()` 每次渲染都算出了
+`parseHash(location.hash)` → `{name, ctx:{owner, repo, tab, ref, path, ...}}`。
+「当前在哪个页面、看哪个库」是 **App 自己进程内写下的状态**，不是屏幕像素、
+不是控件树。把它上报到原生层、再由 3081 回环桥交给 DSH，
+**不需要无障碍 / 悬浮窗 / 截屏 / 存储等任何 Android 运行时权限**。
+
+于是 AI 的回答应该改成：「我能通过 `/app/context` 准确知道当前页面与仓库，
+没有屏幕像素和控件树，也不能帮你点按；禁止编造界面数值。」
+
+### 改动清单
+
+**① 新增 `AppContext.java`**（`com.hubmobile.app.harness`）
+
+- `report(Context, hash, title, routeJson)`：把路由 / 仓库 / tab / path / ref /
+  ts 写进 App 私有 `SharedPreferences("ai_repo_ctx")`；前端没给结构化 ctx 时
+  从 hash 兜底认 `owner/repo`（一级路由保留字表排除误认）
+- `consent()/setConsent()`：用户同意闸门，**默认 false**
+- `contextJson()`：`GET /app/context` 的响应。含
+  `consent` / `zero_permission:true` / `screen_pixels_available:false` /
+  `accessibility_tree_available:false`；
+  未同意时 `page:null` 并附「请如实告知、禁止编造」的 hint
+- `cloneRepo()`：`POST /app/clone-repo`。校验 consent → `GET /user` 拿当前
+  login → `POST /user/repos` 建**同名**库（同名已存在 422 时不覆盖、直接写文件）
+  → 逐文件 `PUT /repos/{login}/{name}/contents/{path}`（已存在则补 sha 再写）。
+  全程复用 `GhBridge.proxy()`，**权限跟随当前登录令牌**，只写自己账号下的库，
+  **不改原仓库**；单文件 ≤900KB、单次 ≤50 文件、路径过滤 `..`
+
+**② 底座前端**（`assets/web/js/app.js`）
+
+`Router.render()` 里 `App.setTab(...)` 之后加一行上报：
+
+```js
+if (window.NativeBridge && window.NativeBridge.reportPage)
+  window.NativeBridge.reportPage(hash, String(title||''), JSON.stringify(r||{}));
+```
+
+不动 SPA 业务逻辑，只把已经算好的状态交出去。
+
+**③ `JsBridge.java` 新接口**：`reportPage` / `aiRepoConsent` /
+`setAiRepoConsent` / `aiRepoStatus` / `openAiPanel`
+
+**④ 设置页**（`page-user.js`）新增开关「**AI 感知与克隆**」，默认关
+
+- 打开 → 自定义 `UI.sheet` 弹窗，按钮精确为「**拒绝**」「**同意**」，
+  正文含用户原文要点：零系统权限感知页面与仓库、可总结/修改、
+  同名库上传到当前登录账号、**有可能将 token 给予第三方软件或 DeepSeek**、
+  **此操作与作者无关**
+- 同意 → 写 consent、`openAiPanel()`（**「同意就会打开此软件」**：展开 AI 面板
+  并让悬浮球入口常驻）、刷新设置页
+- 拒绝 / 点遮罩 → 什么都不做，开关保持关
+- 关闭时不弹窗
+
+**⑤ `MainActivity.openAiPanel()`**：主线程展开面板 + 打开球入口。
+这是用户主动同意后的行为，不违背悬浮球「初始默认关」。
+
+**⑥ 3081 本地桥**（`LocalBridgeServer.java`）
+
+- 免密白名单与 `dispatch` 增加 `/app/`
+- `appRoute()`：`GET /app/context` → `AppContext.contextJson()`；
+  `POST /app/clone-repo` → `AppContext.cloneRepo()`
+- `/gh/help` 增加 `zero_permission_page` 与 `clone` 两条自描述
+
+**⑦ 工作区说明**（`GhBridgeDocs.text()`，写入 `AGENTS.md` / `CLAUDE.md` /
+`GITHUP.md` / `README.md`）
+
+新增三节，专门纠正上一轮幻觉：
+
+- 「你能知道用户现在在哪个页面、看哪个库 —— 而且不需要任何系统权限」：
+  先 `curl /app/context`，如实说明渠道，**不是**截图、**不是**控件树
+- 「严格禁止编造」：没调 `/app/context` 不许声称知道页面；`consent:false` 时
+  禁止编造设置页/主题/字号/密度/浏览历史/路由序列；没有像素与点按能力
+- 「总结当前库 / 修改后建立同名库」：完整 curl 流程，且必须已点同意
+
+**⑧ 阶段 W 顺带修**：`AiPanel.expand()` 展开动画前给 WebView 挂硬件层，
+布局落定后（`panel.post`）再复位 `setInitialScale(100)` 并摘掉硬件层 ——
+修「点 AI 放大没反应 / 有延迟」（上一轮承诺但只做了诊断，这轮落地）。
+
+### 安全与边界（如实）
+
+- **零权限**指 Android 运行时权限；`INTERNET` 是安装时声明的普通权限，
+  「把代码发给 DeepSeek 总结 / 修改」必然联网，内容会离开设备 —— 这正是弹窗
+  要告知的风险，不是能绕过的
+- 令牌**仍锁在 Keystore**，不进 DSH 的 env / 文件 / 工作区；`/app/clone-repo`
+  与 `/gh/api/*` 都只是经 App 进程把令牌附加到 `api.github.com`，
+  弹窗文案按用户要求保守写成「有可能将 token 给予第三方软件或 DeepSeek」
+- 未同意时 `/app/context` 返回 `page:null`，AI 拿不到页面也不会建库；
+  但 `/gh/api/*` 仍跟随登录令牌（这是用户上一轮定的「权限跟随令牌」口径，
+  本次未收窄）
+- 未真机跑完整 OAuth + 克隆写链路；已验证 Java 结构、JS 语法、Manifest、
+  包身份、签名与防护链自洽

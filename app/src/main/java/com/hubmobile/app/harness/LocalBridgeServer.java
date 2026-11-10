@@ -197,7 +197,7 @@ public final class LocalBridgeServer {
             // 免密路由：网页设置页直连的三个 /overlay 开关、只读状态、文件打开
             boolean open = path.startsWith("/overlay") || path.startsWith("/status")
                     || path.startsWith("/changelog") || path.startsWith("/open")
-                    || path.startsWith("/gh/");
+                    || path.startsWith("/gh/") || path.startsWith("/app/");
             /* /gh/ 是给 DSH 的 node 侧 curl 用的本机代理（阶段 O 起全方法放行）。
                权限 = githup 当前登录令牌的权限；由 GhBridge.enabled() 跟随登录态。 */
             if (!open && !LocalBridgeAuth.authorized(h, body.toString(), app)) {
@@ -260,6 +260,7 @@ public final class LocalBridgeServer {
                 return kernel(path, query, body);
             if (path.startsWith("/buildenv")) return buildenv(path, query, body);
             if (path.startsWith("/gh/")) return gh(path, query, body, method);
+            if (path.startsWith("/app/")) return appRoute(path, body, method);
             return "{\"ok\":false,\"error\":\"unknown route: " + path + "\"}";
         } catch (Throwable t) {
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
@@ -913,6 +914,31 @@ public final class LocalBridgeServer {
      *   POST /gh/workspace {"repo":…} → 选中仓库并展开成镜像
      *   ANY  /gh/api/<GitHub REST 路径> → 全方法透传
      */
+    /**
+     * 阶段 V：零权限页面感知 + 同名库克隆。
+     *
+     * GET  /app/context     → githup 当前页面 / 当前仓库（App 自己写下的状态，
+     *                        不需要无障碍/截屏等任何 Android 系统权限）
+     * POST /app/clone-repo  → 把改好的文件以同名仓库上传到当前登录账号
+     *
+     * 两条都以 AppContext.consent() 为闸门：用户没在设置页风险弹窗点「同意」，
+     * 一律拒绝，AI 拿不到页面也不会建库。
+     */
+    private String appRoute(String path, String body, String method) {
+        try {
+            if (path.equals("/app/context")) return AppContext.contextJson(app);
+            if (path.equals("/app/clone-repo")) {
+                if (!"POST".equalsIgnoreCase(method))
+                    return "{\"ok\":false,\"error\":\"请用 POST /app/clone-repo\"}";
+                return AppContext.cloneRepo(app,
+                        new org.json.JSONObject(body.isEmpty() ? "{}" : body));
+            }
+            return "{\"ok\":false,\"error\":\"未知的 /app 路由\"}";
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
+        }
+    }
+
     private String gh(String path, String query, String body, String method) {
         if (!GhBridge.enabled(app))
             return "{\"ok\":false,\"error\":\"还没有 GitHub 令牌：请先在 githup 里登录或粘贴令牌；AI 只用当前登录的那一份\"}";
@@ -948,6 +974,8 @@ public final class LocalBridgeServer {
         return "{\"ok\":true,\"name\":\"githup GitHub bridge\","
                 + "\"auth\":\"令牌由 githup 客户端保管在设备 Keystore；本地址不含任何凭据\","
                 + "\"scope\":\"你的权限 = githup 当前登录令牌的权限（含私有库与写操作）；换账号或退出登录后即时变化，没有任何固定令牌\","
+                + "\"zero_permission_page\":\"GET /app/context 可零系统权限读到 githup 当前页面与仓库；须用户已在设置页同意\","
+                + "\"clone\":\"POST /app/clone-repo 把改好的文件以同名仓库上传到当前登录账号\","
                 + "\"active_token\":\"由 /gh/selftest 的 token_head 字段给出当前生效令牌的前 6 位\","
                 + "\"important\":\"不要检查 gh CLI / GITHUB_TOKEN / GH_TOKEN / hosts.yml —— 它们本来就不存在，直接调用下面的通道即可\","
                 + "\"endpoints\":["

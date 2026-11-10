@@ -1506,6 +1506,13 @@ var ed = UI.$('#edit', host);
         /* 阶段 R：真实连通自检 —— 用户能亲手确认 AI 到底看不看得到、改不改得动 */
         setItem('chart', window.I18n.t('GitHub 连通自检'),
           window.I18n.t('点一下，实测令牌能读/写哪些仓库'), 'ghSelfTest') +
+        /* 阶段 V：这个开关是「AI 零权限感知页面 + 同名库克隆」的总闸。
+           打开时必须先弹风险确认，用户点「同意」才生效并展开 AI 面板。 */
+        switchItem('eye', window.I18n.t('AI 感知与克隆'),
+          (window.NativeBridge && window.NativeBridge.aiRepoStatus && window.NativeBridge.aiRepoStatus())
+            || window.I18n.t('未开启 · AI 不会读取当前页面'),
+          'aiRepo',
+          !!(window.NativeBridge && window.NativeBridge.aiRepoConsent && window.NativeBridge.aiRepoConsent())) +
         setItem('typography', L('settings.codeFont'), (s.codeFont || 13) + 'px', 'font') +
         setItem('device-desktop', window.I18n.t('设备类型'), window.App.deviceSummary(), 'device') +
         setItem('home', L('settings.startTab'), { home: L('settings.startTab.home'), notifications: L('settings.startTab.notifications'), explore: L('settings.startTab.explore'), profile: L('settings.startTab.profile') }[s.startTab], 'start') +
@@ -1656,6 +1663,49 @@ var ed = UI.$('#edit', host);
                 foot: '<button class="btn primary" data-close="1">' + window.I18n.t('知道了') + '</button>'
               });
             } catch (e) { UI.toast(window.I18n.t('自检结果解析失败')); }
+            return;
+          }
+          /* 阶段 V：打开开关 → 先弹「同意 / 拒绝」风险确认；
+             同意才写入 consent 并打开 AI 面板，拒绝则什么都不做。 */
+          if (k === 'aiRepo') {
+            if (!window.NativeBridge || !window.NativeBridge.setAiRepoConsent)
+              return UI.toast(window.I18n.t('当前版本不支持'));
+            var cur = !!(window.NativeBridge.aiRepoConsent && window.NativeBridge.aiRepoConsent());
+            if (cur) {
+              window.NativeBridge.setAiRepoConsent(false);
+              UI.toast(window.I18n.t('已关闭，AI 不再感知页面，也不会建立同名库'));
+              window.Router.reload();
+              return;
+            }
+            var msg = [
+              window.I18n.t('开启后，AI 无需任何 Android 系统权限（不用无障碍、不用截图、不用悬浮窗），'),
+              window.I18n.t('就能准确知道 githup 当前所在的页面、正在阅读的仓库，并可总结、修改代码，'),
+              window.I18n.t('再把修改后的内容以「相同名称」的仓库上传到你当前登录的 GitHub 账号。'),
+              '',
+              window.I18n.t('注意：此过程有可能将 token 给予第三方软件或 DeepSeek，仓库内容也会离开设备。'),
+              window.I18n.t('是否同意？此操作与作者无关。')
+            ].join('\n');
+            new Promise(function (resolve) {
+              var decided = false;
+              UI.sheet({
+                title: window.I18n.t('AI 感知与克隆 · 风险确认'),
+                body: '<div style="font-size:14px;line-height:1.75;color:var(--fg-muted);white-space:pre-wrap">' + U.esc(msg) + '</div>',
+                foot: '<button class="btn" data-no>' + window.I18n.t('拒绝') + '</button>' +
+                      '<button class="btn primary" data-yes>' + window.I18n.t('同意') + '</button>',
+                onMount: function (b, close) {
+                  var root = document.getElementById('sheet-root');
+                  root.querySelector('[data-yes]').onclick = function () { decided = true; close(); resolve(true); };
+                  root.querySelector('[data-no]').onclick = function () { decided = true; close(); resolve(false); };
+                },
+                onClose: function () { if (!decided) { decided = true; resolve(false); } }
+              });
+            }).then(function (ok) {
+              if (!ok) return UI.toast(window.I18n.t('已拒绝，未开启任何能力'));
+              window.NativeBridge.setAiRepoConsent(true);
+              try { if (window.NativeBridge.openAiPanel) window.NativeBridge.openAiPanel(); } catch (e) {}
+              UI.toast(window.I18n.t('已同意，AI 面板已打开；可让它总结当前库或建立同名库'));
+              window.Router.reload();
+            });
             return;
           }
           if (k === 'font') UI.choose(L('settings.codeFont'), [

@@ -898,6 +898,25 @@ public class MainActivity extends Activity {
         if (aiPanel != null) aiPanel.setBubbleEnabled(on);
     }
 
+    /**
+     * 阶段 V：用户在「AI 感知与克隆」风险弹窗点了「同意」。
+     * 直接展开 AI 面板（"同意就会打开此软件"），并把悬浮球入口打开，
+     * 否则收起面板后球仍是隐藏的，用户会找不到入口。
+     * 这是用户主动同意后的行为，不违背悬浮球「默认关闭」的初始状态。
+     */
+    public void openAiPanel() {
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                if (aiPanel == null) return;
+                try {
+                    com.hubmobile.app.harness.GhBridge.setBallOn(MainActivity.this, true);
+                    aiPanel.setBubbleEnabled(true);
+                    aiPanel.expand();
+                } catch (Throwable ignored) {}
+            }
+        });
+    }
+
     @Override
     public void onBackPressed() {
         /*

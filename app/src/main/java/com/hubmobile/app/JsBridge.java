@@ -8112,6 +8112,43 @@ public class JsBridge {
      * 真正的 GitHub 访问仍走 3081 桥的 /gh/* 代理：令牌锁在 SecurePrefs
      * （Android Keystore），不进 WebView / DSH 环境 / payload 文件。 */
 
+    /* ==================== 阶段 V：零权限页面感知 + 同名库克隆 ====================
+     *
+     * 这里只做「把前端已渲染好的状态写进 App 私有区」，不读屏幕、不申请
+     * 无障碍/悬浮窗/截屏/存储权限。对外暴露由 3081 的 /app/* 路由负责，
+     * 且以 AppContext.consent() 为闸门 —— 用户没在设置页点「同意」就不返回。
+     */
+    @JavascriptInterface
+    public void reportPage(String hash, String title, String routeJson) {
+        try { com.hubmobile.app.harness.AppContext.report(activity, hash, title, routeJson); }
+        catch (Throwable ignored) {}
+    }
+
+    @JavascriptInterface
+    public boolean aiRepoConsent() {
+        try { return com.hubmobile.app.harness.AppContext.consent(activity); }
+        catch (Throwable t) { return false; }
+    }
+
+    @JavascriptInterface
+    public boolean setAiRepoConsent(boolean on) {
+        try { com.hubmobile.app.harness.AppContext.setConsent(activity, on); return on; }
+        catch (Throwable t) { return false; }
+    }
+
+    @JavascriptInterface
+    public String aiRepoStatus() {
+        try { return com.hubmobile.app.harness.AppContext.status(activity); }
+        catch (Throwable t) { return ""; }
+    }
+
+    /** 「同意就会打开此软件」：展开 AI 面板，并让入口常驻，用户能立刻用。 */
+    @JavascriptInterface
+    public void openAiPanel() {
+        try { if (activity instanceof MainActivity) ((MainActivity) activity).openAiPanel(); }
+        catch (Throwable ignored) {}
+    }
+
     @JavascriptInterface
     public boolean aiGithubEnabled() {
         try { return com.hubmobile.app.harness.GhBridge.ballOn(activity); }
