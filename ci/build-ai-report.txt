@@ -4,7 +4,7 @@
 {"entries": 41426, "changed_files": 29, "replaced_hits": 39, "size": 159794879}
 
 --- work/verify.json ---
-{"size": 161890265, "sha256": "bfb61239924fec626c85ff4ee010e7689c2beec9d73bda93420263d146363787", "payload_size": 159794879, "harness_assets": 119, "guard_ok": true}
+{"size": 161890265, "sha256": "3e72444f90d2aedd2cb161a8f0acc5239695cd27758ca417ff884604e90b77ff", "payload_size": 159794879, "harness_assets": 119, "guard_ok": true}
 
 --- work/badging.txt ---
 package: name='com.hubmobile.app' versionCode='1002020' versionName='1.2.20' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34' compileSdkVersionCodename='14'
@@ -73,8 +73,8 @@ Warning: SDK processing. This version only understands SDK XML versions up to 3 
 > Task :app:processReleaseMainManifest
 > Task :app:processReleaseManifest
 > Task :app:extractProguardFiles
-> Task :app:processReleaseJavaRes NO-SOURCE
 > Task :app:mergeReleaseArtProfile
+> Task :app:processReleaseJavaRes NO-SOURCE
 > Task :app:mergeReleaseShaders FROM-CACHE
 > Task :app:compileReleaseShaders NO-SOURCE
 > Task :app:generateReleaseAssets UP-TO-DATE
@@ -82,13 +82,13 @@ Warning: SDK processing. This version only understands SDK XML versions up to 3 
 > Task :app:mergeReleaseAssets
 > Task :app:processApplicationManifestReleaseForBundle
 > Task :app:collectReleaseDependencies
-> Task :app:compressReleaseAssets
-> Task :app:bundleReleaseResources
 > Task :app:sdkReleaseDependencyData
+> Task :app:processReleaseManifestForPackage
+> Task :app:bundleReleaseResources
 > Task :app:validateSigningRelease
 > Task :app:writeReleaseAppMetadata
 > Task :app:writeReleaseSigningConfigVersions
-> Task :app:processReleaseManifestForPackage
+> Task :app:compressReleaseAssets
 > Task :app:processReleaseResources
 
 > Task :app:compileReleaseJavaWithJavac
@@ -104,7 +104,7 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:createReleaseApkListingFileRedirect
 > Task :app:assembleRelease
 
-BUILD SUCCESSFUL in 38s
+BUILD SUCCESSFUL in 50s
 37 actionable tasks: 36 executed, 1 from cache
 
 
