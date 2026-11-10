@@ -237,11 +237,16 @@ public final class AppContext {
         if (repo.isEmpty()) return err("当前不在仓库页；请用 ?repo=owner/name 指定");
         String full = RepoBrief.cachedBrief(c, repo);
         if (full.isEmpty()) {
-            return new org.json.JSONObject().put("ok", true).put("repo", repo)
-                    .put("cached", false)
-                    .put("text", "该仓库速览尚未生成（通常会在你打开仓库页几秒内自动完成）。"
-                            + "请稍后再试一次本端点；不要改为逐文件读取整个仓库。")
-                    .toString();
+            /* org.json.JSONException 在 Android 上是 checked exception，
+               不能像上面 cloneRepo 那样裸链式 put（CI 编译报
+               "unreported exception JSONException"）。这里包一层再返回。 */
+            try {
+                return new JSONObject().put("ok", true).put("repo", repo)
+                        .put("cached", false)
+                        .put("text", "该仓库速览尚未生成（通常会在你打开仓库页几秒内自动完成）。"
+                                + "请稍后再试一次本端点；不要改为逐文件读取整个仓库。")
+                        .toString();
+            } catch (Throwable t) { return err("速览暂不可用"); }
         }
         try {
             JSONObject o = new JSONObject(full);
