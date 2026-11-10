@@ -182,7 +182,8 @@ public final class GhBridge {
     }
 
     public static File workspaceDir(Context c, String fullName) {
-        return new File(workspaceRoot(c), fullName.replace('/', '__').replace('\\', '_'));
+        return new File(workspaceRoot(c),
+                fullName.replace("/", "__").replace("\\", "_"));
     }
 
     public static String workspaceState(Context c) {
