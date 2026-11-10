@@ -1154,3 +1154,103 @@ public static String token(Context c) {
   附加到 `api.github.com` 请求头
 - 未真机验证换号即时生效链路；已验证全链路无硬编码、无缓存副本、
   Java 结构、JS 语法、Manifest、防护链自洽
+
+
+---
+
+## 二十三、阶段 T：点「登录」白屏 —— 对齐上游 WebView 落地逻辑
+
+### 真机现象
+
+用户截图：AI 面板顶部品牌条正常（`githup AI / DeepSeek Harness / 复位 / ⛶`），
+**下面整屏白**。左侧灰色竖条 + 喇叭 + 三点，是**系统音量面板**（用户按了音量键），
+不是 App 内容。「点击登录之后」= 在 DSH Web UI 的账号登录里点登录。
+
+### 前端源码：登录是「先预开空白标签页，再导航」
+
+`dshroot/.../dsh-client-ui-settings-account/lib/client.js`：
+
+```js
+begin() {
+  this.dispose();
+  this.popup = window.open("about:blank", "_blank");   // 预占标签页
+  if (this.popup) this.popup.opener = null;
+}
+update(view) {
+  ...
+  this.navigated = true;
+  if (this.popup && !this.popup.closed)
+    this.popup.location.replace(this.destination(attempt.authorizeUrl));
+}
+```
+
+注释也写清楚了：`/** Preopen a tab during the user's click; blocked popups need the copy-link route. */`
+
+### 我们缺的两件事（上游都有，只看源码）
+
+上游 `harness/android-app/.../MainActivity.java` 的注释直接点名这个坑：
+
+> 账户登录对话框只提供「复制授权链接」（自动拉起浏览器由桌面壳 dshDesktop 负责）。
+> Web 壳没有 dshDesktop……WebView 默认没有 shouldOverrideUrlLoading 时，
+> 点链接会「原地加载」—— 整个 GUI 被平台登录页顶掉。
+
+| 上游 | 我们（修复前） |
+|---|---|
+| `ws.setSupportMultipleWindows(true)` + `WebChromeClient.onCreateWindow`：造 `probe` WebView 接住 `window.open`，`routeOnce()` **忽略 `about:blank` 预占页**，等真正的授权地址再落地 | `WebChromeClient` 是空实现，`setSupportMultipleWindows` 默认 false → `window.open` 拿不到 popup，或空白页把主 WebView 顶成白屏 |
+| Activity 级 `openExternally(Uri)`：非回环链接外发系统浏览器，用 **`Intent.createChooser(..., "选择浏览器完成登录")`** | `shouldOverrideUrlLoading` 恒 `return false` → 平台登录页在 WebView 里原地加载 / 白屏 |
+| `routeNewWindow()`：弹窗 URL 回环 → 主 WebView；其余 → 外发；`file://`/`.apk` → 下载 | 无 |
+| 子框架 `resourceAllowed()`：`blob:` / `data:` 预览放行，只拦本地特权协议 | 无 |
+| `DownloadListener` + `onConsoleMessage` + `onShowFileChooser` | 无 |
+
+**为什么必须用 chooser**（上游 v5 注释）：账户登录回调是
+`http://127.0.0.1:<port>/oauth/callback`，由引擎本地 HTTP 服务接收；
+UC / 夸克 / QQ浏览器会把 `127.0.0.1` 当危险地址拦掉或当搜索词 → 引擎收不到 code →
+登录永远卡「等待中」。Chrome / 系统浏览器能正常跳回环。
+
+### 本轮改动（全部在 `AiPanel.java`）
+
+1. `setSupportMultipleWindows(true)`；`WebChromeClient.onCreateWindow` 照上游 v1.39.6
+   的 probe 写法，`about:blank` 不算落地，真实授权地址来了才 `probe.destroy()`
+   + `routeNewWindow()`
+2. `shouldOverrideMain()`：主框架 `about:` / `data:` / `blob:` / `javascript:`
+   **一律拦**（防白屏）；回环交回 WebView；其余 `openExternally()`
+3. `openExternally()`：`ACTION_VIEW` + `createChooser("选择浏览器完成登录")`，
+   `mqqapi` 直接交 QQ；Toast 提示「完成后切回本 App」
+4. `routeNewWindow()`：回环 → 主 WebView；`file://`/`.apk` → 下载；其余 → 浏览器
+5. `resourceAllowed()` 子框架放行 `blob:` / `data:`（文档预览），只拦
+   `file://` / `content://` / `javascript:`
+6. `DownloadListener`：`http(s)` 走 DownloadManager（通知栏可点），本地 `file://`
+   经 `LogShareProvider.uriForAbs()` 转 `content://` 再 `ACTION_VIEW`（避 FileUriExposedException）
+7. `onConsoleMessage` 把 JS ERROR/WARNING 转进 logcat
+8. **白屏自救**：`onPageStarted` / `onPageFinished` 若主文档竟是 `about:blank`，
+   立刻拉回引擎根路径；「复位」按钮由原来的 `reload()`（白屏页 reload 还是白）
+   改成 `loadUrl(引擎根路径)` 并收回错误装载卡
+
+### 用户侧操作（改完之后）
+
+1. AI 面板 → 设置 → 账号与余额 / Models → 点登录
+2. 弹出 **「选择浏览器完成登录」** → 选 **Chrome 或系统浏览器**
+   （不要用 UC / 夸克 / QQ浏览器，它们会拦回环回调）
+3. 浏览器里完成 DeepSeek 账号授权；回调 `127.0.0.1:<port>/oauth/callback`
+   由引擎接收，浏览器显示什么不用管
+4. **切回本 App**，前端 RPC 会把「等待中」收敛成已登录
+5. 若仍卡住或又白屏 → 点品牌条「**复位**」直接回 AI 首页
+
+（没有 `sk-` API Key 也可以：赠金余额走账号登录；阶段 N 已把新建会话默认路由
+改成账号已登录时用 `deepseek-account`。）
+
+### 仍未对齐上游的部分（如实）
+
+- `onShowFileChooser`：聊天里「添加附件」的系统文件选择器，需要 Activity
+  转发 `onActivityResult`，本轮未接（与白屏无关）
+- 上游 `FALLBACK_URL = file:///android_asset/fallback.html` 静态兜底页 +
+  健康探测自动切回、401 重捞令牌 `authReloadTries`：本版用
+  `showPageError()` + 「重新加载 / 复位」替代，没有自动探测轮询
+- `guardResource()` 的 `shouldInterceptRequest` 403 资源围栏：本版只在
+  导航层判据，未做逐请求拦截（安全面略宽）
+- 虚拟屏 / Shizuku 特权仍不属于本层
+
+### 验证状态
+
+未真机跑完整 OAuth 授权链路；已验证前端 `BrowserLogin` 源码与上游
+`MainActivity` 补丁逐条对应、Java 结构、Manifest、包身份、签名与防护链自洽。

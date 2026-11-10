@@ -1,6 +1,7 @@
 package com.hubmobile.app;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -186,11 +187,31 @@ public final class AiPanel {
     }
 
     /** 一键恢复：比例回 100%，并重新载入当前引擎页。 */
+    /**
+     * 阶段 T：复位不只是「比例回 100%」。以前用 reload()，如果当前已经是
+     * about:blank 白屏页，reload 还是白 —— 用户点了复位也出不来。
+     * 现在直接回到引擎首页 readyUrl，并把白屏兜底亮出来的装载卡收回去。
+     */
     private void resetView() {
         if (web == null) { Toast.makeText(act, "AI 界面还没就绪", Toast.LENGTH_SHORT).show(); return; }
         try { web.setInitialScale(100); } catch (Throwable ignored) {}
-        try { web.reload(); } catch (Throwable ignored) {}
-        Toast.makeText(act, "已恢复界面大小", Toast.LENGTH_SHORT).show();
+        /* 优先走引擎根路径（cookie 已由首次加载下发），别拿带一次性 token 的
+           readyUrl 重放 —— 那串 token 可能已经失效，反而 401 又白一次。 */
+        String home = null;
+        try { home = HarnessBridge.existingUrl(); } catch (Throwable ignored) {}
+        if (home == null || home.isEmpty()) home = readyUrl;
+        try {
+            if (home != null && !home.isEmpty()) web.loadUrl(home);
+            else web.reload();
+        } catch (Throwable ignored) {}
+        try {
+            FrameLayout holder = (FrameLayout) panel.getTag();
+            if (holder != null) holder.setVisibility(View.VISIBLE);
+        } catch (Throwable ignored) {}
+        if (loading != null) loading.setVisibility(View.GONE);
+        if (err != null) err.setVisibility(View.GONE);
+        if (retryTag != null) retryTag.setVisibility(View.GONE);
+        Toast.makeText(act, "已回到 AI 首页并恢复界面大小", Toast.LENGTH_SHORT).show();
     }
 
     private FrameLayout.LayoutParams panelLp() {
@@ -565,6 +586,27 @@ public final class AiPanel {
 
     // ==================== WebView ====================
 
+    /* ==================== 阶段 T：WebView 落地，逐条对齐上游 MainActivity ====================
+     *
+     * 真机复现：点 DSH Web UI 的「登录」→ 整屏白。
+     * 查 dsh-client-ui-settings-account/lib/client.js 的 BrowserLogin：
+     *     begin(){ this.popup = window.open("about:blank", "_blank"); }
+     *     update(){ ... this.popup.location.replace(attempt.authorizeUrl); }
+     * 即「先预开空白标签页，再把它导航到 DeepSeek 授权地址」。
+     *
+     * 上游壳（只看源码）为此做了两件事，我们的精简桥两件都缺：
+     *   ① setSupportMultipleWindows(true) + WebChromeClient.onCreateWindow
+     *      造一个 probe WebView 接住 window.open，忽略 about:blank 预占页，
+     *      等真正的授权地址来了再落地（否则 popup 为 null，前端走「复制链接」，
+     *      或空白页把主 WebView 顶掉 → 整屏白）。
+     *   ② 非本机回环的链接一律外发系统浏览器，且用**选择器**让用户挑浏览器。
+     *      账户登录回调是 http://127.0.0.1:<port>/oauth/callback，引擎本地 HTTP 服务接收；
+     *      UC / 夸克 / QQ浏览器会把 127.0.0.1 当危险地址拦掉或当搜索词，
+     *      导致「等待中」永远不结束。Chrome / 系统浏览器能正常跳回环。
+     *
+     * 顺带补齐：主框架 about:/data:/blob: 一律拦（防白屏）、子框架 blob:/data: 放行
+     * （文档预览用 createObjectURL）、下载走 DownloadManager、JS 错误进日志。
+     */
     private void configure(WebView w) {
         WebSettings s = w.getSettings();
         s.setJavaScriptEnabled(true);
@@ -572,13 +614,12 @@ public final class AiPanel {
         s.setDatabaseEnabled(true);
         s.setUseWideViewPort(true);
         s.setLoadWithOverviewMode(true);
-        /* 阶段 Q：以前允许捏合缩放但没有可见的缩放控件，用户放大后缩不回去，
-           整屏白掉。这里从原生层直接禁掉手势缩放 —— WebSettings 的优先级
-           高于页面 viewport meta，所以即使前端写了 user-scalable=yes 也不生效。
-           需要看大字请用底座设置里的「代码字号」/ 系统字体，不会卡死视口。 */
+        /* 阶段 Q：禁掉手势缩放，避免放大后缩不回去、整屏白掉。 */
         s.setSupportZoom(false);
         s.setBuiltInZoomControls(false);
         s.setDisplayZoomControls(false);
+        /* 阶段 T：接住 window.open("about:blank")，配合下面的 onCreateWindow。 */
+        s.setSupportMultipleWindows(true);
         w.setInitialScale(100);
         CookieManager cm = CookieManager.getInstance();
         cm.setAcceptCookie(true);
@@ -588,22 +629,52 @@ public final class AiPanel {
             @Override public boolean allowed() { return trustedDoc; }
         });
         w.addJavascriptInterface(draftInput, "dshinput");
+
+        /* 文件卡片 / APK 链接：WebView 默认会把下载交回系统「文件预览」，
+           这里交给 DownloadManager，通知栏点开即装。 */
+        w.setDownloadListener(new android.webkit.DownloadListener() {
+            @Override public void onDownloadStart(String url, String userAgent,
+                                                  String contentDisposition, String mimetype,
+                                                  long contentLength) {
+                openDownload(url);
+            }
+        });
+
         w.setWebViewClient(new WebViewClient() {
             @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap favicon) {
+                /* 某些内核仍会把 window.open 的空白页塞进主框架 —— 立刻拉回引擎首页，
+                   不让用户对着白屏。 */
+                if ("about:blank".equals(url) && readyUrl != null) {
+                    try { v.stopLoading(); v.loadUrl(readyUrl); } catch (Throwable ignored) {}
+                    return;
+                }
                 trustedDoc = isEngineUrl(url);
                 if (draftInput != null) draftInput.navigation();
             }
             @Override public void onPageFinished(WebView v, String url) {
+                if ("about:blank".equals(url) && readyUrl != null) {
+                    try { v.loadUrl(readyUrl); } catch (Throwable ignored) {}
+                    return;
+                }
                 trustedDoc = isEngineUrl(url);
                 if (draftInput != null && trustedDoc && Build.VERSION.SDK_INT >= 19)
                     v.evaluateJavascript(draftInput.bootstrap(), null);
             }
             @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
-                trustedDoc = isEngineUrl(r.getUrl().toString());
-                return false;
+                if (r == null) return true;
+                String url = r.getUrl().toString();
+                if (!r.isForMainFrame()) {
+                    /* 子框架拿不到主文档的原生桥：blob:/data: 预览与远程 iframe 放行，
+                       只拦 file:// / content:// 这类能碰本地文件的协议。 */
+                    return !resourceAllowed(url);
+                }
+                return shouldOverrideMain(url);
             }
-            /* 阶段 R：引擎起来了但页面没出来时，别留一片白屏。把装载卡重新亮出来，
-               写明原因 + 「重新加载」按钮。用户不会再对着全白界面以为卡死。 */
+            @Override @SuppressWarnings("deprecation")
+            public boolean shouldOverrideUrlLoading(WebView v, String url) {
+                return shouldOverrideMain(url);
+            }
+            /* 阶段 R：引擎起来了但页面没出来时，把装载卡亮出来 + 重试入口。 */
             @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
                 if (r != null && r.isForMainFrame()) {
                     String d = e == null ? "" : String.valueOf(e.getDescription());
@@ -616,7 +687,195 @@ public final class AiPanel {
                     showPageError("引擎返回 HTTP " + er.getStatusCode());
             }
         });
-        w.setWebChromeClient(new WebChromeClient());
+
+        w.setWebChromeClient(new WebChromeClient() {
+            /** window.open / target=_blank 的落地点。照上游 v1.39.6 的 probe 写法。 */
+            @Override public boolean onCreateWindow(WebView view, boolean isDialog,
+                                                    boolean isUserGesture,
+                                                    android.os.Message resultMsg) {
+                try {
+                    final WebView probe = new WebView(act);
+                    final boolean[] routed = {false};
+                    probe.setWebViewClient(new WebViewClient() {
+                        private boolean routeOnce(String u) {
+                            /* 登录对话框先 window.open("about:blank") 预占标签页，
+                               再 location.replace(授权地址)。空页不能算「已落地」，
+                               否则真正的授权地址会被这道闸挡掉（上游 2026-10-18 复现）。 */
+                            if (u == null || u.isEmpty() || "about:blank".equals(u)) return false;
+                            if (routed[0]) return true;
+                            routed[0] = true;
+                            try { probe.destroy(); } catch (Throwable ignored) {}
+                            return routeNewWindow(u);
+                        }
+                        @Override public boolean shouldOverrideUrlLoading(WebView v,
+                                                                          WebResourceRequest r) {
+                            return routeOnce(r == null ? null : r.getUrl().toString());
+                        }
+                        @Override @SuppressWarnings("deprecation")
+                        public boolean shouldOverrideUrlLoading(WebView v, String url) {
+                            return routeOnce(url);
+                        }
+                    });
+                    WebView.WebViewTransport tr = (WebView.WebViewTransport) resultMsg.obj;
+                    tr.setWebView(probe);
+                    resultMsg.sendToTarget();
+                    return true;
+                } catch (Throwable t) {
+                    return false;
+                }
+            }
+            /** 前端 JS 异常以前完全看不到，这里转发到 logcat，方便下次定位白屏。 */
+            @Override public boolean onConsoleMessage(android.webkit.ConsoleMessage m) {
+                try {
+                    if (m != null && (m.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR
+                            || m.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.WARNING))
+                        android.util.Log.w("GithupAI",
+                                m.messageLevel() + " " + m.sourceId() + ":" + m.lineNumber()
+                                        + " " + m.message());
+                } catch (Throwable ignored) {}
+                return true;
+            }
+        });
+    }
+
+    /** 主框架导航判据：回环放行，空白页拦掉，其余外发浏览器。 */
+    private boolean shouldOverrideMain(String url) {
+        if (url == null || url.isEmpty()) return true;
+        try {
+            Uri u = Uri.parse(url);
+            String scheme = u.getScheme();
+            if (scheme == null) return true;
+            String low = scheme.toLowerCase(java.util.Locale.US);
+            /* 主框架的 about:/data:/blob:/javascript: 一律拦，绝不让它把 GUI 顶成白屏。 */
+            if (low.equals("about") || low.equals("data") || low.equals("blob")
+                    || low.equals("javascript")) return true;
+            if (isLoopback(url)) return false;          // DSH 自己，交回 WebView
+            return openExternally(u);
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    /** 子资源判据：只拦能碰本地文件的协议，blob:/data:/远程 iframe 放行。 */
+    private boolean resourceAllowed(String url) {
+        if (url == null || url.isEmpty()) return false;
+        String low = url.toLowerCase(java.util.Locale.US);
+        if (low.startsWith("file://") || low.startsWith("content://")
+                || low.startsWith("javascript:")) return false;
+        return true;
+    }
+
+    /** 回环地址（含 IPv6），不只看引擎端口。 */
+    private static boolean isLoopback(String url) {
+        try {
+            Uri u = Uri.parse(url);
+            String h = u.getHost();
+            if (h == null) return false;
+            h = h.toLowerCase(java.util.Locale.US);
+            return h.equals("127.0.0.1") || h.equals("localhost")
+                    || h.equals("::1") || h.equals("[::1]");
+        } catch (Throwable t) { return false; }
+    }
+
+    /**
+     * 非回环链接一律外发系统浏览器，并用**选择器**。
+     * 账户登录回调是回环地址，UC/夸克/QQ浏览器常把它拦掉或当搜索词，
+     * 让用户能选 Chrome / 系统浏览器重试，否则会永远卡「等待中」。
+     */
+    private boolean openExternally(android.net.Uri u) {
+        if (u == null) return true;
+        String scheme = u.getScheme();
+        boolean mqq = "mqqapi".equalsIgnoreCase(scheme);
+        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)
+                && !"mailto".equalsIgnoreCase(scheme) && !"tel".equalsIgnoreCase(scheme)
+                && !mqq) return true;
+        try {
+            Intent ext = new Intent(Intent.ACTION_VIEW, u);
+            ext.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            if (mqq) {
+                act.startActivity(ext);
+            } else {
+                Intent chooser = Intent.createChooser(ext, "选择浏览器完成登录");
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                act.startActivity(chooser);
+            }
+            toast("登录链接已在浏览器打开；完成后切回本 App（回环回调由引擎接收）");
+            return true;
+        } catch (Throwable t) {
+            toast("无法打开外部链接");
+            return true;
+        }
+    }
+
+    /** 弹窗 URL 落地：回环回主 WebView；下载走 DownloadManager；其余外发浏览器。 */
+    private boolean routeNewWindow(String u) {
+        if (u == null || u.isEmpty()) return true;
+        if (u.startsWith("file://") || u.contains(".apk")) {
+            openDownload(u);
+            return true;
+        }
+        try {
+            if (isLoopback(u)) {
+                final String dest = u;
+                ui.post(new Runnable() {
+                    @Override public void run() {
+                        if (!destroyed && web != null) web.loadUrl(dest);
+                    }
+                });
+                return true;
+            }
+            openExternally(android.net.Uri.parse(u));
+        } catch (Throwable ignored) {}
+        return true;
+    }
+
+    /** 下载：远程交给 DownloadManager；本地 file:// 直接外发。 */
+    private void openDownload(String url) {
+        if (url == null || url.isEmpty()) return;
+        try {
+            if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                /* 本地 file:// 用 LogShareProvider 暴露 content:// 再交给系统，
+                   避免 Android 7+ 的 FileUriExposedException。 */
+                try {
+                    String path = android.net.Uri.decode(url.substring("file://".length()));
+                    android.net.Uri cu = com.hubmobile.app.harness.LogShareProvider
+                            .uriForAbs(act.getApplicationContext(), path);
+                    if (cu != null) {
+                        boolean apk = path.toLowerCase(java.util.Locale.US).endsWith(".apk");
+                        Intent i = new Intent(Intent.ACTION_VIEW);
+                        i.setDataAndType(cu, apk ? "application/vnd.android.package-archive" : "*/*");
+                        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                | Intent.FLAG_ACTIVITY_NEW_TASK);
+                        act.startActivity(i);
+                        return;
+                    }
+                } catch (Throwable ignored) {}
+                openExternally(android.net.Uri.parse(url));
+                return;
+            }
+            android.app.DownloadManager dm = (android.app.DownloadManager)
+                    act.getSystemService(android.content.Context.DOWNLOAD_SERVICE);
+            if (dm == null) throw new IllegalStateException("系统下载服务不可用");
+            android.app.DownloadManager.Request req =
+                    new android.app.DownloadManager.Request(android.net.Uri.parse(url));
+            req.setNotificationVisibility(
+                    android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            req.setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS,
+                    "githup-" + System.currentTimeMillis());
+            dm.enqueue(req);
+            toast("已开始下载，通知栏可查看");
+        } catch (Throwable t) {
+            openExternally(android.net.Uri.parse(url));
+        }
+    }
+
+    private void toast(final String msg) {
+        ui.post(new Runnable() {
+            @Override public void run() {
+                try { Toast.makeText(act, msg, Toast.LENGTH_LONG).show(); }
+                catch (Throwable ignored) {}
+            }
+        });
     }
 
     /** 白屏兜底：把装载卡亮出来、Web 容器收起、显示错误与重试入口。 */
