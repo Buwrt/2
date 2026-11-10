@@ -4,7 +4,7 @@
 {"entries": 41426, "changed_files": 29, "replaced_hits": 39, "size": 159794879}
 
 --- work/verify.json ---
-{"size": 161890265, "sha256": "fab012e24ad2653ce7e418be3a9c9e8ba1086e5a189ce865e1d2decb0b4408dd", "payload_size": 159794879, "harness_assets": 119, "guard_ok": true}
+{"size": 161890265, "sha256": "063484d174dbbc2207af09fcf418480ed0a5f57d18adf7143742dc528f837a9b", "payload_size": 159794879, "harness_assets": 119, "guard_ok": true}
 
 --- work/badging.txt ---
 package: name='com.hubmobile.app' versionCode='1002020' versionName='1.2.20' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34' compileSdkVersionCodename='14'
@@ -60,13 +60,13 @@ Warning: SDK processing. This version only understands SDK XML versions up to 3 
 > Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
 > Task :app:checkReleaseDuplicateClasses
 > Task :app:generateReleaseBuildConfig
-> Task :app:javaPreCompileRelease
 > Task :app:checkReleaseAarMetadata
+> Task :app:javaPreCompileRelease
 > Task :app:generateReleaseResValues
 > Task :app:mapReleaseSourceSetPaths
 > Task :app:generateReleaseResources
-> Task :app:packageReleaseResources
 > Task :app:mergeReleaseResources
+> Task :app:packageReleaseResources
 > Task :app:createReleaseCompatibleScreenManifests
 > Task :app:extractDeepLinksRelease
 > Task :app:parseReleaseLocalResources
@@ -76,10 +76,10 @@ Warning: SDK processing. This version only understands SDK XML versions up to 3 
 > Task :app:mergeReleaseArtProfile
 > Task :app:processReleaseJavaRes NO-SOURCE
 > Task :app:processReleaseManifestForPackage
+> Task :app:mergeReleaseJavaResource
 > Task :app:mergeReleaseShaders FROM-CACHE
 > Task :app:compileReleaseShaders NO-SOURCE
 > Task :app:generateReleaseAssets UP-TO-DATE
-> Task :app:mergeReleaseJavaResource
 > Task :app:processReleaseResources
 > Task :app:mergeReleaseAssets
 
@@ -104,7 +104,7 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:createReleaseApkListingFileRedirect
 > Task :app:assembleRelease
 
-BUILD SUCCESSFUL in 58s
+BUILD SUCCESSFUL in 57s
 37 actionable tasks: 36 executed, 1 from cache
 
 
