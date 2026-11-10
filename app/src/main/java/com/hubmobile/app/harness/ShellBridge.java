@@ -29,6 +29,8 @@ import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import com.hubmobile.app.HarnessBridge;
+
 /**
  * 注入到 AI WebView 的 window.dshshell —— 阶段 J：对齐上游完整控制台。
  *
