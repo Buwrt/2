@@ -1639,6 +1639,7 @@ var ed = UI.$('#edit', host);
               var r = JSON.parse(raw || '{}');
               if (!r.ok) return UI.toast(window.I18n.t('自检失败：') + (r.error || r.status || '未知'));
               var lines = [
+                window.I18n.t('当前令牌') + '：' + (r.token_head || '') + '…（' + window.I18n.t('仅显示前 6 位') + '）',
                 window.I18n.t('可见仓库') + '：' + r.repos + '（' + window.I18n.t('私有') + ' ' + r.private + '）',
                 window.I18n.t('可写仓库') + '：' + r.writable,
                 window.I18n.t('读取') + '：' + (r.can_read ? '✓' : '✗') + '   ' +

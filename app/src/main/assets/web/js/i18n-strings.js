@@ -866,6 +866,8 @@
     "强制推送了分支": "force-pushed the branch",
     "当前版本不支持": "Not supported in this version",
     "GitHub 连通自检": "GitHub connectivity check",
+    "当前令牌": "Active token",
+    "仅显示前 6 位": "first 6 chars only",
     "点一下，实测令牌能读/写哪些仓库": "Tap to test what the token can read / write",
     "正在实测 GitHub 连通与权限…": "Testing GitHub connectivity and permissions…",
     "自检失败：": "Self-test failed: ",

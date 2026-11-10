@@ -1075,3 +1075,82 @@ DSH 经 `127.0.0.1:3081/gh/api/...` 拿到的就是同一份能力，令牌不�
   但未真机验证模型行为
 - 写操作链路未真机验证；已验证 Java 结构、JS 语法、Manifest、包身份、
   签名与防护链自洽
+
+
+---
+
+## 二十二、阶段 S：令牌严格跟随「当前登录」，去掉 saved 回落
+
+### 用户口径
+
+> 「是这个软件登录什么令牌，AI 就读其他的令牌，而不是固定
+> `ghp_4w…` 这个令牌。」
+
+即：软件里**当前登录哪一份令牌，AI 就用哪一份**；换号跟着换，退出就失效，
+包里不能写死任何一份凭据。
+
+### 核查结论：没有写死，但有一个真实错位
+
+**先排除写死**：整个 `app/src/main` 里 `ghp_4wL…` 全文 **0 处**；
+`HarnessBridge` 起 node 的 env 里**没有** `GITHUB_TOKEN` / `GH_TOKEN`，
+也没有把令牌写进任何文件；`GhBridgeDocs` 写进工作区的只是说明文字。
+`LocalBridgeServer.gh()` 每次请求 → `GhBridge.proxy()` → `headers(c)` →
+`token(c)` → `SecurePrefs.get(c, "gh_token")`，**全链路现读、无缓存、无副本**。
+
+截图里设置页显示「已登录 · ghp_4w…」，是**用户自己把这个令牌登录进了软件**，
+不是包里内置的；`/gh/selftest` 实测到的 `Buwrt` 也是同一份登录态的结果。
+
+**但发现一个违反口径的坑**：`GhBridge.token()` 原来是
+
+```java
+String t = SecurePrefs.get(c, "gh_token", "");
+if (t.isEmpty()) t = SecurePrefs.get(c, "gh_token_saved", "");   // ← 问题
+```
+
+`gh_token_saved` 的语义是「**退出登录也不删**、给登录页一键回填用的记住令牌」
+（见 `JsBridge.TOKEN_SAVED_KEY` 的注释）。底座自己 `getToken()`、`Http.java`、
+通知轮询**都只读 `gh_token`**。于是：
+
+| 用户动作 | 底座 | 修复前 AI |
+|---|---|---|
+| 登录 A | A | A ✅ |
+| 切换账号到 B | B | B ✅（`setToken`/`switchAccount` 都写 `gh_token`） |
+| **退出登录** | 未登录 | ❌ **仍拿记住的旧令牌继续读写 GitHub（含私有库）** |
+
+退出登录时 `remove(gh_token)` 但 `gh_token_saved` 还在 → AI 绕过登录态。
+这正是「不是软件登录什么就用什么」。
+
+### 修法
+
+```java
+public static String token(Context c) {
+    String t = SecurePrefs.get(c, "gh_token", "");   // 只读当前生效
+    return t == null ? "" : t.trim();
+}
+```
+
+与底座完全对齐。于是：
+
+- 登录 PAT / OAuth access_token（都写 `gh_token`）→ AI 立刻用那份
+- 切换账号 / 换令牌 → AI 立刻跟着换，**无需重启引擎**（每次请求现读）
+- 退出登录 → `gh_token` 被清 → `/gh/*` 立刻返回「请先登录」
+- 「记住的令牌」只留在登录页回填，**不参与任何授权**
+
+### 让用户能自己验证
+
+- `/gh/selftest` 增加 `token_head`（当前生效令牌**前 6 位**，脱敏）
+- 设置页「GitHub 连通自检」弹层第一行显示「当前令牌：`ghp_4w…`（仅显示前 6 位）」
+  → 换号后点一下，前缀变了就证明 AI 跟着换了；退出登录后点，会直接提示未登录
+- `/gh/help` 的 `scope` 写明「换账号或退出登录后即时变化，没有任何固定令牌」
+- 工作区 `AGENTS.md` / `CLAUDE.md` / `GITHUP.md` / `README.md` 把原来
+  「你**已经拥有** GitHub 访问权限」改成**条件式**：「只要当前登录着令牌…
+  换账号立刻跟着换，退出登录立刻失效」，并补「记住的令牌不参与授权」
+- `proxy()` 里残留的旧三元错误文案（「请打开开关（会弹确认框）」）清掉，
+  统一成「请先登录；AI 使用的是当前登录的那一份」
+
+### 边界
+
+- 仍是「令牌不出设备」：不进 DSH 的 env / 文件 / 工作区，只在 App 进程内
+  附加到 `api.github.com` 请求头
+- 未真机验证换号即时生效链路；已验证全链路无硬编码、无缓存副本、
+  Java 结构、JS 语法、Manifest、防护链自洽

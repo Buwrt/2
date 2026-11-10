@@ -74,7 +74,10 @@ public final class GhBridgeDocs {
         return "# githup · GitHub 能力说明（AI 请先读这段）\n\n"
                 + where + "\n\n"
                 + "## 别再用 gh CLI / 环境变量判断权限\n\n"
-                + "你**已经拥有 GitHub 访问权限**，但它**不在**这些地方：\n\n"
+                + "只要 githup 里**当前登录着令牌**，你就拥有该令牌的全部 GitHub 权限"
+                + "（含私有库与写操作）。**换账号会立刻跟着换，退出登录会立刻失效**——"
+                + "这里没有任何写死的令牌。\n"
+                + "但它**不在**这些地方：\n\n"
                 + "- `gh` CLI（未安装）\n"
                 + "- `GITHUB_TOKEN` / `GH_TOKEN` 环境变量（故意不注入）\n"
                 + "- `~/.config/gh/hosts.yml`、`~/.netrc`、SSH key、git credential helper\n\n"
@@ -106,7 +109,8 @@ public final class GhBridgeDocs {
                 + "## 边界\n\n"
                 + "- 令牌**不在本目录、不在你的环境变量中**，不要尝试寻找、读取或输出它。\n"
                 + "- 只连 `api.github.com` / `codeload.github.com`，其它域会被拒绝。\n"
-                + "- 退出登录或清空令牌后，这条通道立刻失效。\n"
+                + "- 退出登录或清空令牌后，这条通道立刻失效（「记住的令牌」不参与授权）；"
+                + "切换账号后自动换成新令牌，无需重启引擎。\n"
                 + "- 本目录若是仓库镜像，为快照，不会自动同步；刷新请在设置里重新选工作区。\n";
     }
 

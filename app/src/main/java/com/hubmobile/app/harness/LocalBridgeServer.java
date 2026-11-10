@@ -915,7 +915,7 @@ public final class LocalBridgeServer {
      */
     private String gh(String path, String query, String body, String method) {
         if (!GhBridge.enabled(app))
-            return "{\"ok\":false,\"error\":\"还没有 GitHub 令牌：请先在 githup 里登录或粘贴令牌\"}";
+            return "{\"ok\":false,\"error\":\"还没有 GitHub 令牌：请先在 githup 里登录或粘贴令牌；AI 只用当前登录的那一份\"}";
         try {
             if (path.equals("/gh/help")) return ghHelp();
             if (path.equals("/gh/selftest")) return GhBridge.selfTest(app);
@@ -947,7 +947,8 @@ public final class LocalBridgeServer {
     private String ghHelp() {
         return "{\"ok\":true,\"name\":\"githup GitHub bridge\","
                 + "\"auth\":\"令牌由 githup 客户端保管在设备 Keystore；本地址不含任何凭据\","
-                + "\"scope\":\"你的权限 = githup 当前登录令牌的权限（含私有库与写操作）\","
+                + "\"scope\":\"你的权限 = githup 当前登录令牌的权限（含私有库与写操作）；换账号或退出登录后即时变化，没有任何固定令牌\","
+                + "\"active_token\":\"由 /gh/selftest 的 token_head 字段给出当前生效令牌的前 6 位\","
                 + "\"important\":\"不要检查 gh CLI / GITHUB_TOKEN / GH_TOKEN / hosts.yml —— 它们本来就不存在，直接调用下面的通道即可\","
                 + "\"endpoints\":["
                 + "{\"path\":\"/gh/selftest\",\"method\":\"GET\",\"desc\":\"真实连通自检：返回登录用户、可见仓库数、私有库数、可写仓库数与令牌 scopes\"},"

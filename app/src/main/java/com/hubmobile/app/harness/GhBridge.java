@@ -111,10 +111,25 @@ public final class GhBridge {
 
     // ==================== 令牌（只在 App 进程内可见）====================
 
-    /** 当前生效令牌；用户退出登录时回落到「记住的令牌」。为空表示还没登录。 */
+    /**
+     * 阶段 S：**只读当前登录生效的那一份令牌**（底座 `gh_token`）。
+     *
+     * 之前这里会回落到 `gh_token_saved`（「记住的令牌」），但那个 key 的语义是
+     * 「退出登录也不删、给登录页一键回填用的」—— 于是出现一个真实错位：
+     * 用户在 githup 里**退出登录后底座显示未登录，AI 却仍拿着记住的旧令牌**
+     * 继续读写 GitHub（含私有库）。这不是「软件登录什么 AI 就用什么」。
+     *
+     * 底座 `JsBridge.getToken()`、`Http.java`、通知轮询全都只读 `gh_token`；
+     * 退出登录 = `remove(gh_token)`，切换账号 = 把新令牌写进 `gh_token`。
+     * 这里与它们严格对齐，于是：
+     *   登录 A        → AI 用 A
+     *   换号 / OAuth  → AI 立刻用新令牌（每次请求现读，无缓存、无副本）
+     *   退出登录      → AI 立刻无 GitHub 权限
+     *
+     * `gh_token_saved` 只留在登录页回填，不参与任何授权。
+     */
     public static String token(Context c) {
         String t = SecurePrefs.get(c, "gh_token", "");
-        if (t == null || t.isEmpty()) t = SecurePrefs.get(c, "gh_token_saved", "");
         return t == null ? "" : t.trim();
     }
 
@@ -135,9 +150,7 @@ public final class GhBridge {
      * AI 就能写；token 只能读公开库，AI 也就只能读公开库。
      */
     public static String proxy(Context c, String method, String apiPath, String body) {
-        if (!enabled(c)) return err(GhBridge.switchOn(c)
-                ? "还没有 GitHub 令牌：请先在 githup 里登录或粘贴令牌"
-                : "AI 辅助 githup 未开启：请到 我的 → 设置 打开开关（会弹确认框）");
+        if (!enabled(c)) return err("还没有 GitHub 令牌：请先在 githup 里登录或粘贴令牌；AI 使用的是当前登录的那一份");
         String m = (method == null || method.isEmpty()) ? "GET" : method.toUpperCase(java.util.Locale.US);
         if (!m.matches("GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS"))
             return err("不支持的 HTTP 方法：" + m);
@@ -230,6 +243,8 @@ public final class GhBridge {
             try { login = new JSONObject(me.body).optString("login", ""); } catch (Throwable ignored) {}
             o.put("login", login);
             o.put("scopes", scopes);
+            String tk = token(c);
+            o.put("token_head", tk.length() > 6 ? tk.substring(0, 6) : (tk.isEmpty() ? "" : tk));
 
             com.hubmobile.app.Http.Response rs = com.hubmobile.app.Http.requestBytes("GET",
                     API + "/user/repos?per_page=100&affiliation=owner,collaborator,organization_member", null, h);
