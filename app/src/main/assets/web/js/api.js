@@ -1642,7 +1642,7 @@
      * 拿输出的哈希对「设置 → 关于 → 源码指纹」里显示的那串，
      * 一致就说明手上的包确实来自这份源码。
      */
-    SRC_SHA256: 'bba5e1b9725285cd5fb08100a55aac6156b304edb1cb5edcec40ce582e6bbafe'
+    SRC_SHA256: '1defae0c21ec583804ab4807ad46d01019e559adb0fea235a5e51d8216011dba'
   };
 
   window.API = API;

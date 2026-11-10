@@ -1495,13 +1495,14 @@ var ed = UI.$('#edit', host);
           window.App.navGlass() ? L('settings.glass.on') : L('settings.glass.off'),
           'glass') +
         /*
-          阶段 O：不再是开关。用户登录的令牌有什么权限，AI 对 GitHub 就有什么
-          权限 —— 权限来源是登录态本身，所以这行只做状态展示。
+          阶段 Q：这个开关决定是否显示右下角那颗可拖动的 AI 悬浮球。
+          GitHub 权限不归它管 —— 仍完全跟随当前登录令牌。
         */
-        setItem('key', window.I18n.t('AI 辅助 githup'),
+        switchItem('key', window.I18n.t('AI 辅助 githup'),
           (window.NativeBridge && window.NativeBridge.aiGithubStatus && window.NativeBridge.aiGithubStatus())
             || window.I18n.t('未登录 · AI 无法访问 GitHub'),
-          'aiGithub') +
+          'aiGithub',
+          !!(window.NativeBridge && window.NativeBridge.aiGithubEnabled && window.NativeBridge.aiGithubEnabled())) +
         setItem('typography', L('settings.codeFont'), (s.codeFont || 13) + 'px', 'font') +
         setItem('device-desktop', window.I18n.t('设备类型'), window.App.deviceSummary(), 'device') +
         setItem('home', L('settings.startTab'), { home: L('settings.startTab.home'), notifications: L('settings.startTab.notifications'), explore: L('settings.startTab.explore'), profile: L('settings.startTab.profile') }[s.startTab], 'start') +
@@ -1611,10 +1612,19 @@ var ed = UI.$('#edit', host);
             window.Router.reload();
             return;
           }
-          /* 阶段 O：状态行，点一下只解释口径，不切换任何东西 */
+          /* 阶段 Q：切换可移动 AI 悬浮球显隐，立即生效。
+             权限仍跟随登录令牌，不随这个开关变化。 */
           if (k === 'aiGithub') {
-            return UI.toast(window.I18n.t(
-              '权限跟随当前登录令牌：令牌能读私有库、能写，AI 就有同样权限；退出登录即失效。令牌始终留在设备 Keystore，不交给 AI。'));
+            if (!window.NativeBridge || !window.NativeBridge.setAiGithubEnabled)
+              return UI.toast(window.I18n.t('当前版本不支持'));
+            var cur = !!(window.NativeBridge.aiGithubEnabled && window.NativeBridge.aiGithubEnabled());
+            var next = !cur;
+            window.NativeBridge.setAiGithubEnabled(next);
+            UI.toast(next
+              ? window.I18n.t('已显示 AI 悬浮球，可拖动；点开即可和 AI 对话')
+              : window.I18n.t('已隐藏 AI 悬浮球；GitHub 权限仍跟随登录令牌'));
+            window.Router.reload();
+            return;
           }
           if (k === 'font') UI.choose(L('settings.codeFont'), [
             { key: '12', label: window.I18n.t("小（12px）"), icon: 'typography' },

@@ -1,6 +1,8 @@
 package com.hubmobile.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
 import android.app.DownloadManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -8101,24 +8103,50 @@ public class JsBridge {
         }
     }
 
-    /* ==================== 阶段 M：设置页「AI 辅助 githup」开关 ====================
+    /* ==================== 阶段 Q：「AI 辅助 githup」= 可移动悬浮球显隐开关 =========
      *
-     * 这三个窄接口只负责开关与状态展示。真正的 GitHub 访问走 3081 桥的
-     * /gh/* 只读代理，令牌始终留在 SecurePrefs（Android Keystore）里，
-     * 不会经 WebView 传出去，也不会写进 DSH 的环境变量或文件。 */
+     * 用户明确：这个开关决定是否出现那颗能拖动的 AI 球。它不再控制 GitHub
+     * 权限 —— 权限仍完全跟随登录令牌（GhBridge.enabled() 只看 token）。
+     * 切完立即通知 MainActivity 把球显隐掉，不用等下次进设置页。
+     *
+     * 真正的 GitHub 访问仍走 3081 桥的 /gh/* 代理：令牌锁在 SecurePrefs
+     * （Android Keystore），不进 WebView / DSH 环境 / payload 文件。 */
 
     @JavascriptInterface
     public boolean aiGithubEnabled() {
-        try { return com.hubmobile.app.harness.GhBridge.enabled(activity); }
-        catch (Throwable t) { return false; }
+        try { return com.hubmobile.app.harness.GhBridge.ballOn(activity); }
+        catch (Throwable t) { return true; }
     }
 
     @JavascriptInterface
     public boolean setAiGithubEnabled(boolean on) {
         try {
-            com.hubmobile.app.harness.GhBridge.setEnabled(activity, on);
+            com.hubmobile.app.harness.GhBridge.setBallOn(activity, on);
+            if (activity instanceof MainActivity)
+                ((MainActivity) activity).applyAiBall(on);
             return on;
         } catch (Throwable t) { return false; }
+    }
+
+    /**
+     * 阶段 Q 起不再使用：开关只控制悬浮球显隐，不是「把令牌授权给第三方」的动作，
+     * 不需要确认框。保留空实现是为了兼容可能残留的前端调用。
+     */
+    @JavascriptInterface
+    public void requestAiGithubEnable() {
+        // no-op：显隐由 setAiGithubEnabled() 直接完成
+    }
+
+    private void aiGithubRefresh() {
+        activity.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                try {
+                    if (webView != null)
+                        webView.evaluateJavascript(
+                            "window.AiGithubRefresh && window.AiGithubRefresh()", null);
+                } catch (Throwable ignored) {}
+            }
+        });
     }
 
     @JavascriptInterface
@@ -8127,7 +8155,7 @@ public class JsBridge {
         catch (Throwable t) { return "{}"; }
     }
 
-    /** 阶段 O：设置页状态行用的令牌摘要。权限完全跟随登录令牌，不再是开关。 */
+    /** 设置页副标题：悬浮球状态 + 登录态 + 权限口径。 */
     @JavascriptInterface
     public String aiGithubStatus() {
         try { return com.hubmobile.app.harness.GhBridge.status(activity); }

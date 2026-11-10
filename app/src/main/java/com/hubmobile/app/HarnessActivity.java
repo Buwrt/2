@@ -379,8 +379,10 @@ public class HarnessActivity extends Activity {
         s.setDatabaseEnabled(true);
         s.setUseWideViewPort(true);
         s.setLoadWithOverviewMode(true);
-        s.setBuiltInZoomControls(true);
+        s.setSupportZoom(false);
+        s.setBuiltInZoomControls(false);
         s.setDisplayZoomControls(false);
+        w.setInitialScale(100);
         CookieManager cm = CookieManager.getInstance();
         cm.setAcceptCookie(true);
         cm.setAcceptThirdPartyCookies(w, true);

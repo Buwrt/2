@@ -915,3 +915,80 @@ AI 不知道这条通道存在 → 按常规检查得出「没有凭证」→ �
   不隔离同机 App
 - 未真机验证写方法链路与 AI 是否真的会主动读说明；已验证 Java 结构、
   JS 语法、Manifest、包身份、签名与防护链自洽
+
+
+---
+
+## 二十、阶段 Q：开关回归（管悬浮球）+ 全屏白屏/缩放卡死修复
+
+### 触发
+
+用户截图两处：
+
+1. 设置页「AI 辅助 githup」变成了带 `>` 的状态行（阶段 O 把开关取消了）。
+   用户明确：**「这个开关是决定是否出现可移动的这个 AI 悬浮窗的」**。
+2. 第一张图：整屏白、顶部 `githup AI` 与系统状态栏时间/图标叠成一团；
+   **「用户把这个界面放大就缩不小了」**。
+
+### 开关语义澄清（两轮口径合起来）
+
+| 轮次 | 用户口径 | 落地 |
+|---|---|---|
+| 阶段 O | 「登录令牌有什么权限，AI 对 github 就有什么权限，**而不是开关设置的**」 | GitHub 权限只看 `SecurePrefs.gh_token`，与开关无关；全方法放行 |
+| 阶段 Q | 「这个开关是决定是否出现可移动的 AI 悬浮窗」 | 开关 = 右下角可拖动 AI 球显隐 |
+
+之前我把两句话理解成「取消开关」，错了。正确做法是**保留开关、换掉它管的东西**：
+- `KEY_BALL = "ai_ball_on"`，**默认 true**（用户一直有球，升级后不该突然消失）
+- `GhBridge.ballOn()` / `setBallOn()` / `switchOn()` / `setEnabled()` → 都指向球
+- `GhBridge.enabled()` 仍是 `!token().isEmpty()` → `/gh/*` 代理不随球开关变化
+- `status()` → 「悬浮球已开启/已隐藏 · 已登录 ghp_… · 权限跟随此令牌」
+- `JsBridge.setAiGithubEnabled()` 切完**立即**调 `MainActivity.applyAiBall()`，
+  不用等下次进设置页；`requestAiGithubEnable()` 的授权确认弹窗降为 no-op
+  （开关不再是「把令牌授权给第三方」的动作）
+- `AiPanel.setBubbleEnabled()`：关时若面板展开就收起；`collapse()` 尊重该状态
+
+### 第一张图的两个成因
+
+**① 全屏时品牌条被状态栏压住**
+
+`fullBtn(⛶)` 把面板高度设成 `MATCH_PARENT` + `Gravity.BOTTOM`；App 是
+edge-to-edge（`LAYOUT_FULLSCREEN`），所以面板顶部到 y=0，38dp 的品牌条正好
+落在状态栏那一条上 → `1:08` 和 `githup AI` 叠成 `1:1gitQ…AI`。
+
+修：`applyBarInsets()` 在切全屏时给 bar 加 `statusBarHeight()` 的 top padding，
+并把 bar 高度改成 `dp(38) + statusBarHeight()`。收起全屏时还原为 0。
+状态栏高度走 `android:dimen/status_bar_height`，取不到兜底 `dp(24)`。
+
+**② 捏合放大后缩不回来 → 整屏白**
+
+`configure()` 原来是 `setBuiltInZoomControls(true)` + `setDisplayZoomControls(false)`：
+允许双指放大，但**不显示系统缩放控件**，而 DSH 是 SPA、视口被固定，放大后
+没有可用的复位路径，内容被推出可视区就只剩白屏。
+
+修：
+- `setSupportZoom(false)` / `setBuiltInZoomControls(false)` / `setDisplayZoomControls(false)`
+  从**原生层**禁掉手势缩放（WebSettings 优先级高于页面 viewport meta），
+  并 `setInitialScale(100)`；`HarnessActivity`（旧整屏入口）同样处理
+- 品牌条新增 **`⤾` 复位视图** 按钮：`web.setInitialScale(100) + web.reload()`，
+  给旧状态一个明确的一键恢复入口
+- 切全屏时也顺手 `setInitialScale(100)`，不带着放大状态过去
+
+底座 `WebViewActivity`（看仓库文件/外部网页）保留缩放，那是另一类页面，
+且有可见控件，不受影响。
+
+### 改动文件
+
+| 文件 | 内容 |
+|---|---|
+| `harness/GhBridge.java` | `KEY_BALL` / `ballOn` / `setBallOn`；`enabled()` 只看 token；`status()` 改为球+登录态 |
+| `JsBridge.java` | 开关接口指向球 + 即时通知；授权弹窗 no-op |
+| `MainActivity.java` | `applyAiBall()`；attach 后按 pref 初始化 |
+| `AiPanel.java` | `ballEnabled` / `setBubbleEnabled()` / `collapse()` 尊重开关；`applyBarInsets()` / `statusBarHeight()` / `resetView()` / `⤾` 按钮；禁缩放 |
+| `HarnessActivity.java` | 旧整屏入口同样禁缩放 + initialScale |
+| `page-user.js` / `i18n-strings.js` | 恢复 `switchItem`，点击切换球显隐并即时刷新 |
+
+### 边界
+
+- 球隐藏后，从系统分享 / `open_ai` 显式拉起仍可展开面板（显式意图优先）
+- 未真机验证状态栏高度在挖孔屏 / 分屏下的取值；已验证 Java 结构、JS 语法、
+  Manifest、包身份、签名与防护链自洽

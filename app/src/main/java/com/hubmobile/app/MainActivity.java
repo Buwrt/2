@@ -150,6 +150,10 @@ public class MainActivity extends Activity {
          * 点右下角球展开就能和 AI 对话，收起继续逛仓库，不跳 Activity、不换返回栈。 */
         try {
             aiPanel = AiPanel.attach(this, contentRoot);
+            /* 阶段 Q：按设置页开关初始化悬浮球显隐（默认开）。 */
+            if (aiPanel != null)
+                aiPanel.setBubbleEnabled(
+                        com.hubmobile.app.harness.GhBridge.ballOn(this));
             Intent pending = AiPanel.takePendingShare();
             if (pending != null && aiPanel != null) aiPanel.acceptShare(pending);
             if (getIntent() != null && getIntent().getBooleanExtra("open_ai", false)
@@ -887,6 +891,11 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         if (aiPanel != null) { aiPanel.onDestroy(); aiPanel = null; }
         super.onDestroy();
+    }
+
+    /** 设置页开关切换时即时生效，不用重启 App。 */
+    public void applyAiBall(boolean on) {
+        if (aiPanel != null) aiPanel.setBubbleEnabled(on);
     }
 
     @Override

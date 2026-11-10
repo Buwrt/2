@@ -1779,7 +1779,9 @@
     "已关闭：AI 不再能访问 GitHub，已选工作区已清除": "Off: AI can no longer access GitHub; selected workspace cleared",
     "当前版本不支持": "Not supported in this version",
     "未登录 · AI 无法访问 GitHub": "Not signed in · AI cannot access GitHub",
-    "权限跟随当前登录令牌：令牌能读私有库、能写，AI 就有同样权限；退出登录即失效。令牌始终留在设备 Keystore，不交给 AI。": "Permissions follow the signed-in token: whatever it can read or write, the AI can too. Signing out revokes it. The token stays in the device Keystore and is never handed to the AI."
+    "权限跟随当前登录令牌：令牌能读私有库、能写，AI 就有同样权限；退出登录即失效。令牌始终留在设备 Keystore，不交给 AI。": "Permissions follow the signed-in token: whatever it can read or write, the AI can too. Signing out revokes it. The token stays in the device Keystore and is never handed to the AI.",
+    "已显示 AI 悬浮球，可拖动；点开即可和 AI 对话": "AI bubble shown and draggable; tap it to chat",
+    "已隐藏 AI 悬浮球；GitHub 权限仍跟随登录令牌": "AI bubble hidden; GitHub permissions still follow the signed-in token"
   };
   window.I18N_STRINGS = S;
 })();

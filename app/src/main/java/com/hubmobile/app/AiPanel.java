@@ -27,6 +27,7 @@ import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import com.hubmobile.app.harness.DraftInputBridge;
 import com.hubmobile.app.harness.EngineService;
@@ -89,6 +90,8 @@ public final class AiPanel {
     private volatile boolean trustedDoc = false;
     private boolean expanded = false;
     private boolean fullHeight = false;
+    /** 阶段 Q：设置页开关控制的可移动悬浮球显隐。默认开。 */
+    private boolean ballEnabled = true;
     private boolean webReady = false;
     private boolean destroyed = false;
     private long totalEntries = 41426L, lastEntries = 0, lastWritten = 0;
@@ -129,10 +132,15 @@ public final class AiPanel {
         panel = buildPanel();
         root.addView(panel, panelLp());
 
-        // 3) 右下角悬浮球
+        // 3) 右下角可移动悬浮球（显隐由设置页开关决定）
         bubble = buildBubble();
         root.addView(bubble, bubbleLp());
         makeDraggable(bubble);
+        ballEnabled = com.hubmobile.app.harness.GhBridge.ballOn(act);
+        bubble.setVisibility(ballEnabled ? View.VISIBLE : View.GONE);
+
+        // 全屏时品牌条要避开状态栏，否则「githup AI」会和系统时间/图标叠成一团
+        applyBarInsets();
 
         // 旋转 / 分屏时重算面板高度
         root.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
@@ -145,6 +153,34 @@ public final class AiPanel {
     }
 
     // ==================== 视图 ====================
+
+    /** 状态栏高度：edge-to-edge 下全屏面板会顶到 y=0，品牌条必须让出这段。 */
+    private int statusBarHeight() {
+        try {
+            int id = act.getResources().getIdentifier("status_bar_height", "dimen", "android");
+            if (id > 0) return act.getResources().getDimensionPixelSize(id);
+        } catch (Throwable ignored) {}
+        return dp(24);
+    }
+
+    private void applyBarInsets() {
+        if (bar == null) return;
+        int top = fullHeight ? statusBarHeight() : 0;
+        bar.setPadding(dp(12), top, dp(8), 0);
+        try {
+            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) bar.getLayoutParams();
+            lp.height = dp(38) + top;
+            bar.setLayoutParams(lp);
+        } catch (Throwable ignored) {}
+    }
+
+    /** 一键恢复：比例回 100%，并重新载入当前引擎页。 */
+    private void resetView() {
+        if (web == null) { Toast.makeText(act, "AI 界面还没就绪", Toast.LENGTH_SHORT).show(); return; }
+        try { web.setInitialScale(100); } catch (Throwable ignored) {}
+        try { web.reload(); } catch (Throwable ignored) {}
+        Toast.makeText(act, "已恢复界面大小", Toast.LENGTH_SHORT).show();
+    }
 
     private FrameLayout.LayoutParams panelLp() {
         int h = fullHeight ? ViewGroup.LayoutParams.MATCH_PARENT
@@ -205,6 +241,19 @@ public final class AiPanel {
         sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
         sub.setPadding(0, 0, dp(10), 0);
         bar.addView(sub);
+        /* 「⤾ 复位视图」：以前页面被捏合放大后就再也缩不回去，白屏一片。
+           现在原生层禁掉手势缩放（见 configure()），这里再给一个明确入口，
+           把初始比例和页面一起复位，用户随时能一键回到正常大小。 */
+        TextView resetBtn = new TextView(act);
+        resetBtn.setText("⤾");
+        resetBtn.setTextColor(MUTED);
+        resetBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        resetBtn.setPadding(dp(8), dp(4), dp(6), dp(4));
+        resetBtn.setContentDescription("恢复界面大小");
+        resetBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { resetView(); }
+        });
+        bar.addView(resetBtn);
         fullBtn = new TextView(act);
         fullBtn.setText("⛶");
         fullBtn.setTextColor(ACCENT);
@@ -214,7 +263,10 @@ public final class AiPanel {
             @Override public void onClick(View v) {
                 fullHeight = !fullHeight;
                 panel.setLayoutParams(panelLp());
+                applyBarInsets();
                 fullBtn.setText(fullHeight ? "⤡" : "⛶");
+                /* 切换全屏时也顺手把比例复位，避免带着上一次的放大状态过去 */
+                if (web != null) try { web.setInitialScale(100); } catch (Throwable ignored) {}
             }
         });
         bar.addView(fullBtn);
@@ -339,6 +391,14 @@ public final class AiPanel {
 
     // ==================== 面板状态 ====================
 
+    /** 设置页开关切换时即时生效：关掉就把球藏起来，并收起已展开的面板。 */
+    public void setBubbleEnabled(boolean on) {
+        ballEnabled = on;
+        if (bubble == null) return;
+        if (!on && expanded) collapse();
+        else bubble.setVisibility(expanded ? View.GONE : (on ? View.VISIBLE : View.GONE));
+    }
+
     public void expand() {
         if (destroyed) return;
         expanded = true;
@@ -359,7 +419,7 @@ public final class AiPanel {
     public void collapse() {
         expanded = false;
         panel.setVisibility(View.GONE);
-        bubble.setVisibility(View.VISIBLE);
+        bubble.setVisibility(ballEnabled ? View.VISIBLE : View.GONE);
         disableNfc();
     }
 
@@ -467,8 +527,14 @@ public final class AiPanel {
         s.setDatabaseEnabled(true);
         s.setUseWideViewPort(true);
         s.setLoadWithOverviewMode(true);
-        s.setBuiltInZoomControls(true);
+        /* 阶段 Q：以前允许捏合缩放但没有可见的缩放控件，用户放大后缩不回去，
+           整屏白掉。这里从原生层直接禁掉手势缩放 —— WebSettings 的优先级
+           高于页面 viewport meta，所以即使前端写了 user-scalable=yes 也不生效。
+           需要看大字请用底座设置里的「代码字号」/ 系统字体，不会卡死视口。 */
+        s.setSupportZoom(false);
+        s.setBuiltInZoomControls(false);
         s.setDisplayZoomControls(false);
+        w.setInitialScale(100);
         CookieManager cm = CookieManager.getInstance();
         cm.setAcceptCookie(true);
         cm.setAcceptThirdPartyCookies(w, true);
