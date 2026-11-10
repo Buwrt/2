@@ -296,6 +296,13 @@ public final class HarnessBridge {
             File dir = payload(c);
             File node = new File(dir, "runtime/bin/node");
             File binjs = new File(dir, "dshroot/lib/node_modules/@deepseek-ai/dsh/lib/bin.js");
+            /* 阶段 N：起 node 之前定好「新会话默认走哪条鉴权路由」。
+               账号已登录（截图里能看到充值/赠金余额）时覆盖成 deepseek-account，
+               让赠金真正能花出去；没登录就保持内核默认 deepseek-official。
+               必须在 profile 被引擎读取之前写，且每次启动幂等重写。 */
+            com.hubmobile.app.harness.AccountDefaultRoute.apply(
+                    c, new File(dir, "dshhome"));
+
             File tmp = new File(c.getCacheDir(), "tmp");
             if (!tmp.exists()) tmp.mkdirs();
             File log = new File(c.getFilesDir(), "dsh-web.log");

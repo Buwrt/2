@@ -731,3 +731,98 @@ DSH 装载页，按返回 = 退回 githup。用户明确不要这种「进入 / 
   GitHub（回环 + Host 围栏已挡外部网络，但不隔离同机 App）
 - 未在真机验证 zipball 解压、AlertDialog 列表与 AI 侧 curl 链路；
   已验证 Java 编译、Manifest、JS 语法、包身份、签名与防护链自洽
+
+
+---
+
+## 十八、阶段 N：为什么「赠送余额」在上游能用、我们不能用
+
+### 现象
+
+账号与余额页显示「星空 / 充值余额 ¥1.66 / 赠金余额 ¥0.93」，账号显然已登录；
+但发消息报：
+
+```
+llm-deepseek: no API key for provider route "deepseek-official";
+store DEEPSEEK_API_KEY through the credentials service
+(the web Models page writes it), or export DEEPSEEK_API_KEY in the launching environment
+```
+
+### 根因：两条并列的鉴权路由，钱包不共用
+
+内核 `dsh-base/cordis.patch.yml` 同时挂了两条 provider：
+
+| 路由 | 凭据 | 消费什么 |
+|---|---|---|
+| `deepseek-official` | `DEEPSEEK_API_KEY`（`sk-`） | 官方 API Key 计费 |
+| `deepseek-account` | 系统浏览器登录网页账号后的 `x-dsh-auth-token` | 平台账户的**充值余额 + 赠金余额**（`bonus_wallets`） |
+
+`@deepseek-ai/dsh-llm-deepseek-account` 文档明确写：未登录或目标不允许账号鉴权时
+以 `ACCOUNT_SIGN_IN_REQUIRED` 失败，**不会回退到 API key**。反过来也一样：
+账号里的赠金不能给 `deepseek-official` 用。
+
+截图里的 ¥0.93 赠金来自
+`dsh-deepseek-account-platform` 的 `getUnnotifiedBonuses` / 钱包接口，
+属于 `deepseek-account` 路由。
+
+### 为什么默认是错的
+
+`dsh-base/cordis.patch.yml`：
+
+```yaml
+- id: agent-default-model
+  name: '@deepseek-ai/dsh-agent-default-model'
+  config:
+    provider: deepseek-official
+    model: deepseek-flash
+```
+
+`agent-default-model` 决定**新建会话**用哪条路由。我们的包是从上游发行 payload
+全新展开的干净 `$DSH_HOME`，`dshhome/profiles/web/cordis.patch.yml` 只有两条 UI
+配置，没有任何覆盖 → 每个新会话都落在 `deepseek-official` → 找 `sk-` 找不到 → 报错。
+
+上游能用，是因为那份 `$DSH_HOME` 里已经登录过账号、并在模型选择器里选过
+「DeepSeek 账号」分组；`session/selectModel` 会把选择**持久化进 profile 的
+`agent-default-model`**，之后新建会话一直走账号路由。上游另有
+`patches/account-ui-enable/`（放开 `dshDesktop` 桌面独占门禁以启用账户 UI）
+与 selfbuild/v118 overlay 等运行时补丁，这些历史状态不会随 payload 一起过来。
+
+加剧因素：本版 `dshhome/cordis.patch.yml` 里 `ui-model-selection` 被禁用
+（交给 `dsh-codex-power-slider` 接管 composer 模型槽），而 Models 设置页的
+「DeepSeek 账号」行**只显示「已登录」状态、不提供编辑器/切换**，所以 UI 上
+也不容易找到把会话切到账号路由的入口。
+
+### 修复
+
+新增 `harness/AccountDefaultRoute.java`，在 `HarnessBridge.start()` **起 node 之前**
+调用，往用户层 `dshhome/profiles/web/cordis.patch.yml` 幂等写入：
+
+```yaml
+# githup-account-route begin
+- id: agent-default-model
+  config:
+    provider: deepseek-account
+    model: deepseek-flash
+# githup-account-route end
+```
+
+- **仅当检测到账号已登录**（`$DSH_HOME/.credentials.yaml` 里存在
+  `deepseek-account-platform/default` grant 记录）才写 → 赠金可用
+- 未登录时摘掉该块，回落内核默认 `deepseek-official` → 有 `sk-` 的用户照常用，
+  不会让新会话直接 `ACCOUNT_SIGN_IN_REQUIRED`
+- 只写用户层 patch，**不动 160MB payload**；每次启动幂等重写，覆盖安装 /
+  payload 刷新后自动恢复
+- profile patch 在 bundle layer 之后应用，覆盖 `dsh-base` 的默认值
+
+### 生效条件（必须说清）
+
+- 引擎已在跑时 `start()` 会复用旧 URL 不重进 → 装完**完全退出 App 再重进**
+- `agent-default-model` 只管**新建会话**；报错的那个旧会话已固化成 official，
+  需**新建一个会话**（或在会话内切到「DeepSeek 账号」分组）
+- 账号登录态过期时会提示 `ACCOUNT_SIGN_IN_REQUIRED`，去账号页重新登录即可
+
+### 边界
+
+未真机验证账号 grant 的文本形态与 `/models` 目录拉取；检测采用宽松文本匹配，
+不解析 YAML。若账号记录格式与预期不同，可在设置里手动切模型，或把日志发回调整。
+已验证 Java 编译结构、Manifest、包身份、签名与防护链自洽。
