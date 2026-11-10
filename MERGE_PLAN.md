@@ -599,3 +599,55 @@ hook，本版先覆盖通知与台词/语音结果。桌面双入口、包名、
 
 上游 MainActivity 的原生控制台齿轮与时光机 UI 弹层未搬：功能已全部通过
 网页控制台落地，再套一层原生 View 是重复建设且要动底座 SPA 与防护链。
+
+
+---
+
+## 十六、阶段 L：两个图标合成一个 APP，两个能力同屏共存
+
+### 为什么之前有两个图标
+
+不是装了两个软件，是 `AndroidManifest.xml` 里**两个 Activity 都注册了
+`MAIN` + `LAUNCHER`**：`.MainActivity` 与 `.HarnessActivity`，后者还带
+`android:taskAffinity="com.hubmobile.app.ai"` + `launchMode="singleTask"`。
+启动器给每个 LAUNCHER 各画一个图标；点「githup AI」= 进另一个任务栈的整屏
+DSH 装载页，按返回 = 退回 githup。用户明确不要这种「进入 / 退回」。
+
+仓库里曾经有一份「去掉 LAUNCHER」的本地改动（阶段 K 注释 + disabled alias
+墓碑），但**没有进到发布包**，所以用户装的包仍是双图标。
+
+### 改成什么
+
+用户口径：**一个图标，点开之后 GitHub 客户端与 AI 同时都能用，不跳页面。**
+
+- Manifest：唯一 LAUNCHER = `.MainActivity`；`.HarnessActivity` 摘掉
+  MAIN/LAUNCHER 与 taskAffinity，保留 SEND 分享 filter；
+  `.AiLauncher` 作为 `enabled=false` 的 activity-alias 墓碑，覆盖安装时让
+  启动器移除旧的「githup AI」快捷方式
+- 新增 `AiPanel.java`（559 行）：叠在 `MainActivity.contentRoot` 上的常驻面板
+  - 冷启动**直接就是 GitHub 客户端**，没有任何整屏启动页
+  - 右下角悬浮球（可拖动）展开 / 收起面板，默认 68% 高、可切全屏
+  - 两个 WebView 同进程同界面同时活着：底座 SPA 一直在，DSH WebView 懒创建
+    后保留（保住会话），展开时上层 GitHub 仍可见可点
+  - 引擎 `HarnessBridge.prepare` 在 attach 后 700ms 后台静默装载，
+    3081 本地桥 `LocalBridgeServer.start` 同时起，点开基本秒开
+  - `dshshell` = ShellBridge、`dshinput` = DraftInputBridge，
+    麦克风权限、NFC reader mode、EngineService 保活一并接上
+  - 四句品牌对话保留为**面板装载卡**里的紧凑打字机，不整屏、不阻塞
+  - 返回键：面板开着只收起，不退出、不「退回 githup」
+- `MainActivity`：boot 末尾 `AiPanel.attach`；`onBackPressed` 优先收面板；
+  `onResume/onPause/onDestroy/onNewIntent` 转发；`open_ai` extra 触发自动展开
+- `HarnessActivity`：不再整屏展示 DSH。任何外部启动（旧桌面快捷方式、
+  系统分享）一律 `startActivity(MainActivity)` + `open_ai` + `finish`，
+  分享 intent 经 `AiPanel.setPendingShare` 送进 AI 输入框草稿，
+  避免旧快捷方式变成点不开的死图标
+
+### 保持不变
+
+`com.hubmobile.app` / `1.2.20` / `1002020`、官方签名、底座 SPA、
+五环防护链（已重算）、payload 41,426 个引擎文件、桌宠与控制台全量对齐成果。
+
+### 边界
+
+未在真机验证两个 WebView 同时驻留时的内存占用与输入法叠加；
+已验证 Java 编译、Manifest 合法性、包身份、签名与防护链自洽。

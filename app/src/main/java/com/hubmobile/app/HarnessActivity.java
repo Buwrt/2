@@ -32,7 +32,8 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
- * githup AI —— 第二个桌面入口。
+ * githup AI —— 阶段 K 起不再是独立桌面入口，而是从底座客户端内点开的一页。
+ * 桌面只留一个 githup 图标；这里共用同一个返回栈，按返回或点左上角「‹ githup」回去。
  *
  * 启动页沿用底座 githup 的品牌版式（深色底 / 圆形 logo / githup / GitHub 客户端），
  * 并在其上按「开机对话」的形式呈现引擎装载：主体是 githup，DeepSeek 是被请进来的
@@ -78,60 +79,30 @@ public class HarnessActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(BG);
 
-        // ---------- 1) 品牌启动页（图 2 的版式 + 图 3 的开机对话设计） ----------
-        boot = buildBootPage();
-        root.addView(boot, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-
-        // ---------- 2) AI Web UI + githup 品牌条 ----------
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setVisibility(View.GONE);
-        brandBar = buildBrandBar();
-        content.addView(brandBar, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(38)));
-        web = new WebView(this);
-        configure(web);
-        content.addView(web, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        root.addView(content, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-        mContent = content;
-        setContentView(root);
-
-        // 第二层：本地桥要在 WebView 加载前就监听，否则设置页一进来就 fetch 3081 失败
-        com.hubmobile.app.harness.LocalBridgeServer.start(getApplicationContext());
-
-        // 语音识别 / 听写需要运行时麦克风权限
-        if (Build.VERSION.SDK_INT >= 23
-                && checkSelfPermission("android.permission.RECORD_AUDIO") != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{"android.permission.RECORD_AUDIO"}, REQ_MIC);
+        /* 阶段 L：这里不再是桌面入口，也不再整屏展示 DSH。
+         *
+         * 之前两个图标的根因就是本 Activity 带 MAIN/LAUNCHER 且独立 taskAffinity：
+         * 点「githup AI」= 进入 DSH 装载页，按返回 = 退回 githup，割裂成两个 APP。
+         * 现在桌面只留 MainActivity，AI 是它里面的常驻面板，两个能力同屏共存。
+         *
+         * 但旧版桌面快捷方式、系统「分享到 githup AI」仍可能指向这里 ——
+         * 直接删组件会让它们变成点不开的死图标。所以统一转回唯一主界面，
+         * 并把分享内容交给面板，用户点开就直接看到 AI 展开、草稿已就位。 */
+        Intent incoming = getIntent();
+        if (incoming != null) {
+            String a = incoming.getAction();
+            if (Intent.ACTION_SEND.equals(a) || Intent.ACTION_SEND_MULTIPLE.equals(a)) {
+                AiPanel.setPendingShare(new Intent(incoming));
+            }
         }
+        Intent main = new Intent(this, MainActivity.class);
+        main.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        main.putExtra("open_ai", true);
+        startActivity(main);
+        finish();
+        return;
 
-        // NFC：上游 NfcStore 负责状态与历史，这里只在「已 arm」时抢 reader mode，
-        // 避免长期占用导致刷公交卡/门禁被本 App 截胡。
-        com.hubmobile.app.harness.NfcStore.init(getApplicationContext());
-        nfcAdapter = NfcAdapter.getDefaultAdapter(this);
-        com.hubmobile.app.harness.NfcStore.setArmListener(
-                new com.hubmobile.app.harness.NfcStore.ArmListener() {
-                    @Override public void onArmChanged(final boolean armed) {
-                        ui.post(new Runnable() {
-                            @Override public void run() {
-                                if (armed) enableNfc(); else disableNfc();
-                            }
-                        });
-                    }
-                });
-        if (com.hubmobile.app.harness.NfcStore.isArmed()) enableNfc();
-
-        // 接收系统「分享到 githup AI」的文本/文件
-        acceptShare(getIntent());
-
-        playDialogue();
-        startEngine();
     }
 
     private LinearLayout mContent;
@@ -291,6 +262,16 @@ public class HarnessActivity extends Activity {
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setBackgroundColor(Color.parseColor("#10151f"));
         bar.setPadding(dp(14), 0, dp(14), 0);
+        // 阶段 K：合并成单图标后，AI 是从 githup 里进来的，给一条明确的回程
+        TextView back = new TextView(this);
+        back.setText("‹ githup");
+        back.setTextColor(ACCENT);
+        back.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        back.setPadding(0, 0, dp(14), 0);
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { finish(); }
+        });
+        bar.addView(back);
         TextView l = new TextView(this);
         l.setText("githup AI");
         l.setTextColor(TXT);

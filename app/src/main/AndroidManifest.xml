@@ -138,23 +138,23 @@
             android:label="@string/app_name" />
 
         <!--
-          合并版：DeepSeek Harness 的 AI 界面，独立桌面入口。
-          用独立 taskAffinity 与底座 MainActivity 隔开，两个图标互不抢栈。
+          阶段 L：合并成「一个 APP」，且两个能力同屏共存。
+          · 桌面 LAUNCHER 只剩 .MainActivity，启动器只画一个图标
+          · 本 Activity 不再有任何 MAIN/LAUNCHER，也不再整屏展示 DSH，
+            去掉独立 taskAffinity；外部点进来一律转回 MainActivity + 自动展开 AI 面板
+          · AI 是叠在 MainActivity.contentRoot 上的常驻面板（AiPanel），
+            GitHub WebView 与 DSH WebView 同进程同界面同时活着：
+            点右下角球展开就能对话，收起继续逛仓库，没有「进入 / 退回」
+          · 保留 SEND 分享入口（别的 App 分享文字/文件仍能送进 AI 输入框）
           引擎桥 HarnessBridge 在私有目录展开 payload.zip 并拉起本地 node 服务。
         -->
         <activity
             android:name=".HarnessActivity"
             android:exported="true"
             android:label="githup AI"
-            android:taskAffinity="com.hubmobile.app.ai"
-            android:launchMode="singleTask"
+            android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|fontScale"
             android:windowSoftInputMode="adjustResize|stateHidden">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-            <!-- 系统「分享到 githup AI」：文本 / 图片 / 文件进入输入框草稿 -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <action android:name="android.intent.action.SEND_MULTIPLE" />
@@ -162,6 +162,24 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+
+        <!--
+          阶段 L：旧版第二个桌面图标的「墓碑」。
+          不直接删掉原来的 LAUNCHER 声明，而是保留成一个 enabled=false 的
+          activity-alias —— 覆盖安装时系统会看到这个 component 被明确禁用，
+          桌面启动器会主动移除旧的「githup AI」快捷方式，不留点不开的死图标。
+        -->
+        <activity-alias
+            android:name=".AiLauncher"
+            android:targetActivity=".HarnessActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:label="githup AI">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
 
         <!--
           从构建产物 ZIP 里解压出的 APK 存在私有目录，

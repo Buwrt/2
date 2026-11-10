@@ -50,6 +50,8 @@ public class MainActivity extends Activity {
     /** WebView 挂在这一层上。留成字段是为了渲染进程没了之后能换一个新的上去 */
     private FrameLayout contentRoot;
     private long lastBackPressed = 0;
+    /** 阶段 L：AI 面板。与 GitHub WebView 同屏共存，不再是第二个图标。 */
+    private AiPanel aiPanel;
     // 视频全屏时挂在窗口上的自定义视图（见 enterFullscreen / exitFullscreen）
     private View customView;
     private WebChromeClient.CustomViewCallback customCb;
@@ -142,6 +144,17 @@ public class MainActivity extends Activity {
         /* 上次如果崩过，把记录亮出来。
          * 放在最后：启动流程都走完了才提示，免得和首屏抢注意力。 */
         reportLastCrash();
+
+        /* 阶段 L：桌面只留这一个 Activity。AI 以常驻面板叠在 contentRoot 上，
+         * 引擎在后台静默装载 —— 冷启动直接是 GitHub 客户端，没有整屏启动页；
+         * 点右下角球展开就能和 AI 对话，收起继续逛仓库，不跳 Activity、不换返回栈。 */
+        try {
+            aiPanel = AiPanel.attach(this, contentRoot);
+            Intent pending = AiPanel.takePendingShare();
+            if (pending != null && aiPanel != null) aiPanel.acceptShare(pending);
+            if (getIntent() != null && getIntent().getBooleanExtra("open_ai", false)
+                    && aiPanel != null) aiPanel.expand();
+        } catch (Throwable ignored) { }
     }
 
     /**
@@ -810,6 +823,12 @@ public class MainActivity extends Activity {
            setIntent 让后续 applyExternalUrl 能拿到新链接。 */
         setIntent(intent);
         applyExternalUrl();
+        /* 旧「githup AI」桌面图标 / 系统分享会被 HarnessActivity 转到这里 */
+        if (aiPanel != null) {
+            Intent p = AiPanel.takePendingShare();
+            if (p != null) aiPanel.acceptShare(p);
+            if (intent != null && intent.getBooleanExtra("open_ai", false)) aiPanel.expand();
+        }
     }
 
     @Override
@@ -842,6 +861,7 @@ public class MainActivity extends Activity {
             webView.evaluateJavascript(
                     "(function(){try{if(window.AppOnResume)window.AppOnResume();}catch(e){}})()", null);
         }
+        if (aiPanel != null) aiPanel.onResume();
     }
 
     @Override
@@ -860,6 +880,13 @@ public class MainActivity extends Activity {
 
         if (webView != null) webView.evaluateJavascript(
                 "(function(){try{window.__paused=true;}catch(e){}})()", null);
+        if (aiPanel != null) aiPanel.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (aiPanel != null) { aiPanel.onDestroy(); aiPanel = null; }
+        super.onDestroy();
     }
 
     @Override
@@ -873,6 +900,8 @@ public class MainActivity extends Activity {
           JavascriptInterface 只能用 @JavascriptInterface 方法，
           拿不到即时的布尔结果。
         */
+        // 阶段 L：AI 面板开着时，返回键只收起面板（不退出、也不「退回 githup」）
+        if (aiPanel != null && aiPanel.onBackPressed()) return;
         if (webView == null) {
             super.onBackPressed();
             return;
