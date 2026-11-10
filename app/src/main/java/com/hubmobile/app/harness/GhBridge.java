@@ -129,10 +129,13 @@ public final class GhBridge {
         try {
             // 复用底座的 Http：它基于 Socket 实现，支持 PATCH 等
             // HttpURLConnection 在 Android 上会拒绝的方法，且 CA/超时口径与客户端一致。
+            Map<String, String> h = headers(c);
+            boolean writes = "POST".equals(m) || "PUT".equals(m) || "PATCH".equals(m);
+            if (writes && body != null && !body.isEmpty())
+                h.put("Content-Type", "application/json; charset=utf-8");
             com.hubmobile.app.Http.Response r = com.hubmobile.app.Http.requestBytes(
                     m, API + apiPath,
-                    (body == null || body.isEmpty()) ? null : body.getBytes("UTF-8"),
-                    headers(c));
+                    (body == null || body.isEmpty()) ? null : body.getBytes("UTF-8"), h);
             String text = r.body == null ? "" : r.body;
             JSONObject out = new JSONObject();
             out.put("ok", r.code >= 200 && r.code < 300).put("status", r.code);
