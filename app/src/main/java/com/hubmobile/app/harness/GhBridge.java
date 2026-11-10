@@ -393,9 +393,12 @@ public final class GhBridge {
 
             // 给 AI 的说明书：告诉它这个目录是什么、怎么查 PR/Issue，以及令牌不在它手里
             String doc = GhBridgeDocs.repoText(c, fullName);
+            /* 阶段 X：镜像里也只留 1 份全量说明，其余写指针。
+               同一份 2KB 文档重复 4 份会被 agent 反复读进上下文，白烧 token。 */
             for (String fn : new String[]{"AGENTS.md", "CLAUDE.md", "GITHUP.md", "README.md"}) {
                 FileOutputStream g = new FileOutputStream(new File(dir, fn));
-                g.write(doc.getBytes("UTF-8"));
+                g.write(("AGENTS.md".equals(fn) ? doc : GhBridgeDocs.pointer())
+                        .getBytes("UTF-8"));
                 g.close();
             }
 

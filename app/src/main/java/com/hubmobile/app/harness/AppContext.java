@@ -109,6 +109,18 @@ public final class AppContext {
             o.put("tab", tab);
             o.put("path", path);
             p(c).edit().putString(K_PAGE, o.toString()).commit();
+
+            /* 阶段 X：页面一变就在后台预抓「当前仓库速览」（GitHub REST，零 LLM）。
+               这样用户展开 AI 面板时卡片是热的，/app/context 也一次就能把
+               精简事实交给模型，不用它自己跑好几轮探测去反推用户看的是哪个库。 */
+            final String full = o.optString("repo", "");
+            if (!full.isEmpty() && consent(c)) {
+                RepoBrief.fetch(c, full, new RepoBrief.Callback() {
+                    @Override public void done(String repo, String card, String brief) {
+                        /* 结果已进缓存；面板由 MainActivity.onPageChanged 直接刷新 */
+                    }
+                });
+            }
         } catch (Throwable ignored) {}
     }
 
@@ -116,6 +128,11 @@ public final class AppContext {
             java.util.Arrays.asList("", "feed", "notifications", "explore", "search",
                     "profile", "settings", "downloads", "gists", "starred", "issues",
                     "pulls", "trending", "login", "about", "user", "repo", "changelog"));
+
+    /** 当前页面里的仓库（owner/name），没有则空串。 */
+    public static String currentRepo(Context c) {
+        return page(c).optString("repo", "");
+    }
 
     private static JSONObject page(Context c) {
         try { return new JSONObject(p(c).getString(K_PAGE, "{}")); }
@@ -139,7 +156,16 @@ public final class AppContext {
                 o.put("hint", "用户尚未在 githup「我的 → 设置」里开启「AI 感知与克隆」并同意风险弹窗。"
                         + "请如实告知尚未开启，禁止编造当前界面、仓库名或配置值。");
             } else {
-                o.put("page", page(c));
+                JSONObject pg = page(c);
+                o.put("page", pg);
+                String brief = RepoBrief.cachedBrief(c, pg.optString("repo", ""));
+                o.put("brief_cached", !brief.isEmpty());
+                if (!brief.isEmpty()) {
+                    try { o.put("brief", new JSONObject(brief).optString("brief", "")); }
+                    catch (Throwable ignored) {}
+                    o.put("note", o.optString("note") + " `brief` 是 App 已查好的当前仓库事实，"
+                            + "请直接采用，不要为了确认页面再跑探测工具（省 token）。");
+                }
                 o.put("endpoints", new JSONArray()
                         .put("GET  /app/context     当前页面 / 当前仓库（零权限）")
                         .put("POST /app/clone-repo  把修改后的文件以同名仓库上传到当前登录账号")

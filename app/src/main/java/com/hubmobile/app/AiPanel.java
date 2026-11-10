@@ -1,9 +1,12 @@
 package com.hubmobile.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.Context;
-import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -26,11 +29,14 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.webkit.ValueCallback;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import org.json.JSONObject;
 
 import com.hubmobile.app.harness.DraftInputBridge;
 import com.hubmobile.app.harness.EngineService;
@@ -101,6 +107,13 @@ public final class AiPanel {
     private long totalEntries = 41426L, lastEntries = 0, lastWritten = 0;
     private String readyUrl = null;
     private Intent pendingDraft = null;
+
+    /* 阶段 X：当前仓库卡。原生层渲染，零 LLM token。 */
+    private LinearLayout repoStrip;
+    private TextView repoCard;
+    private TextView repoAction;
+    private String curRepo = "";
+    private String curBrief = "";
 
     /**
      * 阶段 U：把前端「开新窗口」的三条路全部直接汇到原生外发桥。
@@ -330,6 +343,36 @@ public final class AiPanel {
         box.addView(bar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(38)));
 
+        /* ---- 阶段 X：当前仓库卡 ----
+           用户逛到某个库，AI 面板立刻认出来（App 自己写下的路由 + GitHub REST
+           速览，不调 LLM）。以前 AI 是被动的：不主动 curl /app/context，
+           就答「看不到」，或跑好几轮 gh CLI / 列环境 / 翻文件去反推 ——
+           那几轮就是「特别费 token」的来源。 */
+        repoStrip = new LinearLayout(act);
+        repoStrip.setOrientation(LinearLayout.HORIZONTAL);
+        repoStrip.setGravity(Gravity.CENTER_VERTICAL);
+        repoStrip.setBackgroundColor(Color.parseColor("#1b2336"));
+        repoStrip.setPadding(dp(12), dp(5), dp(8), dp(5));
+        repoStrip.setVisibility(View.GONE);
+        repoCard = new TextView(act);
+        repoCard.setTextColor(TXT);
+        repoCard.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        repoCard.setSingleLine(true);
+        repoCard.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        repoStrip.addView(repoCard, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        repoAction = new TextView(act);
+        repoAction.setTextColor(ACCENT);
+        repoAction.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        repoAction.setTypeface(Typeface.DEFAULT_BOLD);
+        repoAction.setPadding(dp(10), dp(3), dp(2), dp(3));
+        repoAction.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { onRepoAction(); }
+        });
+        repoStrip.addView(repoAction);
+        box.addView(repoStrip, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         // ---- 装载卡（引擎没好时才显示）----
         loading = new FrameLayout(act);
         loading.setBackgroundColor(BG);
@@ -472,6 +515,156 @@ public final class AiPanel {
 
     // ==================== 面板状态 ====================
 
+    /* ==================== 阶段 X：当前仓库感知（零 LLM token） ==================== */
+
+    /**
+     * 底座换仓库 / 进仓库页时由 MainActivity 转发。
+     * 只走 GitHub REST 拿元数据 + README，压成一条精简事实；
+     * 卡片常驻显示，用户不说话 AI 面板也「认得」当前库。
+     */
+    public void onRepoChanged(final String repo) {
+        ui.post(new Runnable() {
+            @Override public void run() {
+                if (destroyed) return;
+                curRepo = repo == null ? "" : repo;
+                if (curRepo.isEmpty()) {
+                    curBrief = "";
+                    if (repoStrip != null) repoStrip.setVisibility(View.GONE);
+                    return;
+                }
+                boolean consent;
+                try { consent = com.hubmobile.app.harness.AppContext.consent(act); }
+                catch (Throwable t) { consent = false; }
+                if (repoStrip != null) {
+                    repoStrip.setVisibility(View.VISIBLE);
+                    repoCard.setText(consent
+                            ? "当前：" + curRepo + " · 读取速览…"
+                            : "当前：" + curRepo + " · 点右侧「开启感知」后 AI 才能辅助");
+                }
+                refreshRepoAction();
+                /* 未同意时不预抓、不调 LLM —— 尊重上一轮用户定的闸门，
+                   卡片只给一个显眼的一键开启入口，不再是「点了没反应」。 */
+                if (!consent) { curBrief = ""; return; }
+                com.hubmobile.app.harness.RepoBrief.fetch(act, curRepo,
+                        new com.hubmobile.app.harness.RepoBrief.Callback() {
+                    @Override public void done(String r, final String card, final String brief) {
+                        ui.post(new Runnable() {
+                            @Override public void run() {
+                                if (destroyed || !curRepo.equals(r)) return;
+                                curBrief = brief == null ? "" : brief;
+                                if (repoCard != null)
+                                    repoCard.setText(card.isEmpty()
+                                            ? "当前：" + curRepo + " · 速览不可用（检查登录/网络）"
+                                            : "当前：" + card);
+                                refreshRepoAction();
+                            }
+                        });
+                    }
+                });
+            }
+        });
+    }
+
+    /** consent 未开时按钮是「开启感知」，开了变成「带入对话」。 */
+    private void refreshRepoAction() {
+        if (repoAction == null) return;
+        boolean consent;
+        try { consent = com.hubmobile.app.harness.AppContext.consent(act); }
+        catch (Throwable t) { consent = false; }
+        repoAction.setText(consent ? "带入对话" : "开启感知");
+    }
+
+    private void onRepoAction() {
+        boolean consent;
+        try { consent = com.hubmobile.app.harness.AppContext.consent(act); }
+        catch (Throwable t) { consent = false; }
+        if (!consent) { showConsentDialog(); return; }
+        if (curBrief.isEmpty()) {
+            toast("当前仓库速览还没准备好，稍等一下或检查 GitHub 登录");
+            return;
+        }
+        injectBrief(curBrief);
+    }
+
+    /** 卡片上的一键开启：复用设置页同一份风险文案，不绕过用户上轮定的闸门。 */
+    private void showConsentDialog() {
+        try {
+            String msg = "开启后，AI 无需任何 Android 系统权限（不用无障碍、不用截图、"
+                    + "不用悬浮窗），就能准确知道 githup 当前所在的页面、正在阅读的仓库，"
+                    + "并可总结、修改代码，再把修改后的内容以「相同名称」的仓库上传到"
+                    + "你当前登录的 GitHub 账号。\n\n"
+                    + "注意：此过程有可能将 token 给予第三方软件或 DeepSeek，"
+                    + "仓库内容也会离开设备。\n"
+                    + "是否同意？此操作与作者无关。";
+            new AlertDialog.Builder(act)
+                    .setTitle("AI 感知与克隆 · 风险确认")
+                    .setMessage(msg)
+                    .setNegativeButton("拒绝", null)
+                    .setPositiveButton("同意", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) {
+                            try {
+                                com.hubmobile.app.harness.AppContext.setConsent(act, true);
+                                refreshRepoAction();
+                                toast("已开启感知，正在准备当前仓库速览；点「带入对话」即可，不会自动消耗 AI 调用");
+                                if (!curRepo.isEmpty()) onRepoChanged(curRepo);
+                            } catch (Throwable ignored) {}
+                        }
+                    })
+                    .show();
+        } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 把「已知事实」预填进 DSH 输入框 —— 不自动发送。
+     *
+     * 这是省 token 的关键：模型不用再跑 N 轮探测去反推用户看的是哪个库，
+     * 用户按一下发送，一轮就能答。React 受控组件要用 prototype 的 native
+     * setter + input 事件，直接赋值会被下一次渲染冲掉。
+     */
+    private void injectBrief(final String text) {
+        if (web == null || text == null || text.isEmpty()) { fallbackCopy(text); return; }
+        final String js = "(function(t){try{"
+                + "window.__GITHUP_NOW__=t;"
+                + "var ns=document.querySelectorAll('textarea,[contenteditable=\"true\"],[role=\"textbox\"]');"
+                + "var el=null;for(var i=0;i<ns.length;i++){var n=ns[i];"
+                + "if(n.offsetParent!==null||(n.getClientRects&&n.getClientRects().length)){el=n;break;}}"
+                + "if(!el)return 'NO_INPUT';"
+                + "if(el.tagName==='TEXTAREA'||el.tagName==='INPUT'){"
+                + "var pr=el.tagName==='TEXTAREA'?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;"
+                + "var d=Object.getOwnPropertyDescriptor(pr,'value');"
+                + "if(d&&d.set)d.set.call(el,t);else el.value=t;"
+                + "}else{el.textContent=t;}"
+                + "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                + "el.dispatchEvent(new Event('change',{bubbles:true}));"
+                + "try{el.focus();}catch(e){}"
+                + "return 'OK';}catch(e){return 'ERR:'+e.message}})(" + JSONObject.quote(text) + ")";
+        ui.post(new Runnable() {
+            @Override public void run() {
+                if (destroyed || web == null) { fallbackCopy(text); return; }
+                try {
+                    if (Build.VERSION.SDK_INT >= 19) {
+                        web.evaluateJavascript(js, new ValueCallback<String>() {
+                            @Override public void onReceiveValue(String v) {
+                                if (v == null || !v.contains("OK")) fallbackCopy(text);
+                                else toast("已带入当前仓库速览，按发送即可（无需 AI 再自己探测）");
+                            }
+                        });
+                    } else fallbackCopy(text);
+                } catch (Throwable t) { fallbackCopy(text); }
+            }
+        });
+    }
+
+    /** 找不到输入框时退化：复制到剪贴板，用户粘贴即可，不静默失败。 */
+    private void fallbackCopy(String text) {
+        if (text == null || text.isEmpty()) return;
+        try {
+            ClipboardManager cm = (ClipboardManager) act.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("githup 当前仓库", text));
+            toast("已复制当前仓库速览，粘贴到 AI 输入框即可");
+        } catch (Throwable ignored) {}
+    }
+
     /** 设置页开关切换时即时生效：关掉就把球藏起来，并收起已展开的面板。 */
     public void setBubbleEnabled(boolean on) {
         ballEnabled = on;
@@ -496,6 +689,14 @@ public final class AiPanel {
         panel.setVisibility(View.VISIBLE);
         panel.setLayoutParams(panelLp());
         bubble.setVisibility(View.GONE);
+        /* 冷启动时底座可能还没上报过页面：主动补一次，卡片不空着。 */
+        if (curRepo.isEmpty()) {
+            try {
+                String r = com.hubmobile.app.harness.AppContext.currentRepo(act);
+                if (r != null && !r.isEmpty()) onRepoChanged(r);
+            } catch (Throwable ignored) {}
+        }
+        refreshRepoAction();
         panel.post(new Runnable() {
             @Override public void run() {
                 if (destroyed || web == null) return;

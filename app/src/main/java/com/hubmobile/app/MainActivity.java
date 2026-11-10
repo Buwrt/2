@@ -899,6 +899,19 @@ public class MainActivity extends Activity {
     }
 
     /**
+     * 阶段 X：底座换到了另一个仓库（或进/出仓库页）。
+     * 让 AI 面板立刻刷新「当前仓库卡」，并预抓速览 —— 用户不用先开口，
+     * 面板就知道现在看的是 gbataille/gitHUD 还是别处。
+     */
+    public void onPageChanged(final String repo) {
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                if (aiPanel != null) aiPanel.onRepoChanged(repo);
+            }
+        });
+    }
+
+    /**
      * 阶段 V：用户在「AI 感知与克隆」风险弹窗点了「同意」。
      * 直接展开 AI 面板（"同意就会打开此软件"），并把悬浮球入口打开，
      * 否则收起面板后球仍是隐藏的，用户会找不到入口。
@@ -912,6 +925,10 @@ public class MainActivity extends Activity {
                     com.hubmobile.app.harness.GhBridge.setBallOn(MainActivity.this, true);
                     aiPanel.setBubbleEnabled(true);
                     aiPanel.expand();
+                    /* 设置页同意后 consent 从 false→true，重新抓一次当前仓库速览 */
+                    String r = com.hubmobile.app.harness.AppContext
+                            .currentRepo(MainActivity.this);
+                    if (r != null && !r.isEmpty()) aiPanel.onRepoChanged(r);
                 } catch (Throwable ignored) {}
             }
         });

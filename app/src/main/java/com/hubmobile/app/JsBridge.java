@@ -8118,10 +8118,21 @@ public class JsBridge {
      * 无障碍/悬浮窗/截屏/存储权限。对外暴露由 3081 的 /app/* 路由负责，
      * 且以 AppContext.consent() 为闸门 —— 用户没在设置页点「同意」就不返回。
      */
+    private volatile String lastReportedRepo = "";
+
     @JavascriptInterface
     public void reportPage(String hash, String title, String routeJson) {
-        try { com.hubmobile.app.harness.AppContext.report(activity, hash, title, routeJson); }
-        catch (Throwable ignored) {}
+        try {
+            com.hubmobile.app.harness.AppContext.report(activity, hash, title, routeJson);
+            /* 阶段 X：Router.render() 同一页会重渲染多次，只在「换仓库」时通知
+               AI 面板刷新，避免每次都去打 GitHub API。 */
+            String repo = com.hubmobile.app.harness.AppContext.currentRepo(activity);
+            if (repo != null && !repo.equals(lastReportedRepo)) {
+                lastReportedRepo = repo;
+                if (activity instanceof MainActivity)
+                    ((MainActivity) activity).onPageChanged(repo);
+            }
+        } catch (Throwable ignored) {}
     }
 
     @JavascriptInterface

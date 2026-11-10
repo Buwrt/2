@@ -1465,3 +1465,105 @@ if (window.NativeBridge && window.NativeBridge.reportPage)
   本次未收窄）
 - 未真机跑完整 OAuth + 克隆写链路；已验证 Java 结构、JS 语法、Manifest、
   包身份、签名与防护链自洽
+
+
+---
+
+## 二十六、阶段 X：打开仓库 AI 不辅助、还特别费 token
+
+### 真机现象
+
+用户截图：正停在 `gbataille/gitHUD` 代码页（.github/app/bench/docs/images 目录、
+76 star、17 fork、HTML、master、已归档），AI 悬浮球在右下角。
+反馈：「AI 不会辅助我的软件，用户已经打开了一个仓库但是他不会分析，还特别费 token」。
+
+### 根因（三条叠加）
+
+**① AI 是被动的，我们只「给了端点」没「喂事实」**
+
+上一轮做了 `GET /app/context` + 工作区说明，但 LLM 不会自己主动去 curl。
+用户不问，它不知道用户在看哪个库；一问，它要么答「我看不到」，
+要么开始跑 `gh` CLI / 检查环境变量 / `ls -R` / 逐个读文件去**反推**当前仓库。
+那几轮无用工具调用，就是「没干活却特别费 token」的直接来源。
+
+**② 面板没有任何页面联动**
+
+`AppContext.report()` 只把路由写进 SharedPreferences，`AiPanel` 完全不知道
+底座换页了。所以用户逛到新库，AI 面板里什么都不会发生。
+
+**③ 工作区说明重复 7 份**
+
+`GhBridgeDocs.install()` 在 workspaceRoot 写 4 份、在 dshHome 写 3 份
+**同一份 ~2.5KB 文档**；`GhBridge.materialize()` 展开镜像时又写 4 份。
+DSH agent 可能把它们重复读进上下文 —— 又是一笔固定开销。
+
+**还有一个用户侧高概率原因**：「AI 辅助 githup」是**悬浮球显隐**开关，
+「AI 感知与克隆」才是上一轮用户自己要求的 consent 闸门。两个开关不同；
+球显示着 ≠ consent 已同意。没同意时 `/app/context` 返回 `page:null`，
+AI 确实拿不到页面 —— 但界面上没有任何提示，看起来就是「不辅助」。
+
+### 改动（核心思路：把「让 AI 自己找」改成「App 先查好直接喂」）
+
+**① 新增 `RepoBrief.java` —— 原生侧预抓，零 LLM token**
+
+换仓库时用当前登录令牌打 **GitHub REST**（`GET /repos/{repo}` +
+`GET /repos/{repo}/readme`），压成 ≤500 字的精简事实：
+仓库名 / 简介 / 主语言 / star / fork / 默认分支 / 归档 / 许可证 / README 前 1200 字。
+缓存 10 分钟、只在 repo 变化时抓。
+**全程不调 DeepSeek**，只是 App 本来就会做的 GitHub GET。
+
+**② 页面联动**
+
+`JsBridge.reportPage()` 去重（同页重渲染不重复）→
+`MainActivity.onPageChanged(repo)` → `AiPanel.onRepoChanged(repo)`。
+冷启动 `expand()` 里也补一次同步，卡片不空着。
+
+**③ AI 面板顶部新增「当前仓库卡」（原生渲染，零 token）**
+
+`当前：gbataille/gitHUD · HTML · ★76 · master · 已归档`
+
+右侧按钮随 consent 变化：
+- 未同意 → 「**开启感知**」，点击弹与设置页同一份风险文案的原生确认框
+  （拒绝 / 同意、有可能将 token 给予第三方软件或 DeepSeek、此操作与作者无关）；
+  同意后刷新卡片，**不自动发 LLM**
+- 已同意 → 「**带入对话**」
+
+**④ 「带入对话」= 把精简事实预填进 DSH 输入框（省 token 的关键）**
+
+`injectBrief()` 用 React 兼容的 prototype native setter + `input`/`change` 事件
+把 brief 写进 composer，并挂 `window.__GITHUP_NOW__`；**不自动发送**。
+模型不用再跑 N 轮探测，用户按一下发送，一轮就能答。
+找不到输入框时退化成复制到剪贴板 + Toast，不静默失败。
+
+**⑤ `/app/context` 附带 `brief`**（`AppContext.contextJson()`）
+
+缓存命中时直接返回已查好的事实，AI 真要 curl 也一次拿全，不用翻文件。
+
+**⑥ 工作区说明瘦身 + 省 token 铁律置顶**
+
+- `text()` 从 ~2.5KB 压到 ~1.4KB，删掉重复的 curl 示例与权限解释
+- 置顶新增「**0. 省 token 铁律**」：当前仓库是已知事实直接采用；
+  **禁止**为确认页面跑 `gh` CLI / 查环境变量 / `ls -R` 全库 / 逐个读文件 /
+  反复试探；需要细节只精确取单个文件；AGENTS.md 读一份即可
+- `install()` 从 7 份全量降到 **3 份全量（workspaceRoot 的 AGENTS.md、
+  dshHome 的 AGENTS.md、加镜像里 1 份）+ 其余一行指针**；
+  `materialize()` 镜像也从 4 份降到 1 全量 + 3 指针
+
+**⑦ 严格尊重 consent 闸门**
+
+未同意时 `AppContext.report()` 不预抓 GitHub 元数据、`AiPanel` 不联网、
+卡片只显示仓库名 + 「点右侧开启感知」引导；同意后才抓。
+不绕过用户上一轮定的弹窗，但再也不会「点了没反应还不知道为什么」。
+
+### 省 token 的边界（如实）
+
+能省的：**无用工具轮次**（N 轮探测 → 1 轮）、**重复上下文**（7 份 → 3 份、
+2.5KB → 1.4KB）、**卡片/速览本身零 LLM 调用**（走 GitHub REST）。
+改不了的：DSH 引擎每次会话自带的系统提示与全量工具描述，在 160MB
+payload 的内核里，本层无法裁剪。所以是「大幅减少浪费」，不是「零消耗」。
+
+### 验证状态
+
+未真机跑完整 composer 预填链路（DSH 的 composer 可能是 contenteditable，
+已加多选择器 + native setter + 剪贴板退化）；已验证 Java 结构、JS 语法、
+Manifest、包身份、签名与防护链自洽。
