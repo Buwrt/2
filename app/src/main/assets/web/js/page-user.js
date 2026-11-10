@@ -1223,6 +1223,11 @@ var ed = UI.$('#edit', host);
         '</div>' +
         '<div class="section"></div>' +
         '<div class="set-group">' +
+        '<button class="set-row" id="openai"><span class="ico">' + window.icon('rocket', 16) + '</span>' +
+        '<span class="k">githup AI</span><span class="v">让 DeepSeek 帮你逛 GitHub</span>' + window.icon('chevron-right', 16) + '</button>' +
+        '</div>' +
+        '<div class="section"></div>' +
+        '<div class="set-group">' +
           setRow('gear', L('me.settings'), '/settings') +
           setRow('graph', L('me.overview'), '/stats') +
           setRow('graph', L('settings.quota'), '/settings?tab=quota') +
@@ -1237,6 +1242,14 @@ var ed = UI.$('#edit', host);
           var v = myuid.getAttribute('data-uid') || '';
           if (!v) return;
           UI.copy(v, window.I18n.t('已复制 ID'));
+        };
+        var oa = UI.$('#openai', host);
+        if (oa) oa.onclick = function () {
+          if (window.NativeBridge && typeof window.NativeBridge.openAI === 'function') {
+            window.NativeBridge.openAI();
+          } else if (window.UI && typeof window.UI.toast === 'function') {
+            window.UI.toast('请在 githup 应用内打开');
+          }
         };
         var ep = UI.$('#editprofile', host);
         if (ep) ep.onclick = function () { editProfile(u, paint); };
@@ -1481,6 +1494,18 @@ var ed = UI.$('#edit', host);
         switchItem('package', L('settings.glass'),
           window.App.navGlass() ? L('settings.glass.on') : L('settings.glass.off'),
           'glass') +
+        /*
+          阶段 M：把 githup 的 GitHub 能力授权给 AI。
+          默认关；打开后 3081 桥才启用 /gh/* 只读代理。令牌始终留在设备
+          Keystore，AI 拿到的只是一个不含凭据的回环 URL —— 所以这行说明
+          要写清楚，别让用户以为是「把令牌交出去了」。
+        */
+        switchItem('key', window.I18n.t('AI 辅助 githup'),
+          (window.NativeBridge && window.NativeBridge.aiGithubEnabled && window.NativeBridge.aiGithubEnabled())
+            ? window.I18n.t('已开启 · AI 只读访问 GitHub 仓库，令牌不出设备')
+            : window.I18n.t('未开启 · AI 与 GitHub 完全隔离'),
+          'aiGithub',
+          !!(window.NativeBridge && window.NativeBridge.aiGithubEnabled && window.NativeBridge.aiGithubEnabled())) +
         setItem('typography', L('settings.codeFont'), (s.codeFont || 13) + 'px', 'font') +
         setItem('device-desktop', window.I18n.t('设备类型'), window.App.deviceSummary(), 'device') +
         setItem('home', L('settings.startTab'), { home: L('settings.startTab.home'), notifications: L('settings.startTab.notifications'), explore: L('settings.startTab.explore'), profile: L('settings.startTab.profile') }[s.startTab], 'start') +
@@ -1587,6 +1612,18 @@ var ed = UI.$('#edit', host);
             var on = !window.App.navGlass();
             window.App.setNavGlass(on);
             UI.toast(on ? window.I18n.t("已开启 iOS风格") : window.I18n.t("已关闭，底栏恢复朴素样式"));
+            window.Router.reload();
+            return;
+          }
+          /* 阶段 M：AI 辅助 githup 授权开关 */
+          if (k === 'aiGithub') {
+            if (!window.NativeBridge || !window.NativeBridge.setAiGithubEnabled)
+              return UI.toast(window.I18n.t('当前版本不支持'));
+            var ghOn = !window.NativeBridge.aiGithubEnabled();
+            window.NativeBridge.setAiGithubEnabled(ghOn);
+            UI.toast(ghOn
+              ? window.I18n.t('已开启：到 AI 面板的设置 → 工作区，即可选择 GitHub 仓库（只读）')
+              : window.I18n.t('已关闭：AI 不再能访问 GitHub，已选工作区已清除'));
             window.Router.reload();
             return;
           }

@@ -1771,7 +1771,13 @@
     "旧": "Old",
     "由": "by",
     "第": "",
-    "译": "Translated"
+    "译": "Translated",
+    "AI 辅助 githup": "AI assists githup",
+    "已开启 · AI 只读访问 GitHub 仓库，令牌不出设备": "On · AI has read-only GitHub access; token stays on device",
+    "未开启 · AI 与 GitHub 完全隔离": "Off · AI is fully isolated from GitHub",
+    "已开启：到 AI 面板的设置 → 工作区，即可选择 GitHub 仓库（只读）": "On: pick a GitHub repo in the AI panel's Settings → Workspace (read-only)",
+    "已关闭：AI 不再能访问 GitHub，已选工作区已清除": "Off: AI can no longer access GitHub; selected workspace cleared",
+    "当前版本不支持": "Not supported in this version"
   };
   window.I18N_STRINGS = S;
 })();

@@ -132,9 +132,8 @@ public final class ShellBridge {
             pm.put("summary", granted + " / " + perms.length + " 项已授权").put("rows", pr);
             o.put("perm", pm);
 
-            // ---- 工作区 ----
-            o.put("workspace", new JSONObject()
-                    .put("path", payload.getAbsolutePath()).put("unset", false));
+            // ---- 工作区：阶段 M 起可以选 GitHub 仓库 ----
+            o.put("workspace", new JSONObject(GhBridge.workspaceState(ctx)));
 
             // ---- 插件 ----
             JSONObject pg = new JSONObject();
@@ -188,9 +187,12 @@ public final class ShellBridge {
             try { o.put("schedules", ScheduleBridge.list(ctx)); }
             catch (Throwable t) { o.put("schedules", new JSONObject().put("items", new JSONArray())); }
 
-            o.put("note", shizukuAvailable()
-                    ? "Shizuku 已授权；虚拟屏仍需要特权服务端 jar"
-                    : "虚拟屏与特权 shell 需安装 Shizuku 并授权；其余功能均可用");
+            o.put("note", (GhBridge.enabled(ctx)
+                    ? "AI 辅助 githup 已开启（只读代理，令牌不出设备）；"
+                    : "AI 辅助 githup 未开启，可在 我的 → 设置 打开；")
+                    + (shizukuAvailable()
+                        ? "Shizuku 已授权；虚拟屏仍需要特权服务端 jar"
+                        : "虚拟屏与特权 shell 需安装 Shizuku 并授权"));
             return o.toString();
         } catch (Throwable t) {
             return "{\"ok\":false,\"error\":" + LocalBridgeServer.q(String.valueOf(t.getMessage())) + "}";
@@ -334,7 +336,14 @@ public final class ShellBridge {
                 return openSettings(a.isEmpty() ? id : a);
             }
             if (id.equals("workspace.change")) {
-                return openSettings("details");
+                /* 阶段 M：上游这里是唤起系统目录选择器选本地文件夹，
+                   改成列 GitHub 仓库，选完由 GhBridge 展开成 App 私有目录的只读镜像。 */
+                if (!GhBridge.enabled(ctx))
+                    return fail("请先在 githup 的「我的 → 设置」打开「AI 辅助 githup」开关");
+                Intent pick = new Intent(ctx, com.hubmobile.app.GhRepoPickerActivity.class);
+                pick.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                try { ctx.startActivity(pick); return ok("已打开 GitHub 仓库选择器"); }
+                catch (Throwable t) { return fail("打不开仓库选择器：" + t.getMessage()); }
             }
             if (id.equals("update.check")) {
                 return new JSONObject().put("ok", true).put("current", "1.2.20")

@@ -129,6 +129,17 @@
             </intent-filter>
         </activity>
 
+        <!--
+          阶段 M：AI 工作区的 GitHub 仓库选择器。
+          不是桌面入口（无 MAIN/LAUNCHER），只在 DSH 控制台点「AI 工作区」
+          时由 ShellBridge 唤起；透明主题 + 不 setContentView，直接弹列表。
+        -->
+        <activity
+            android:name=".GhRepoPickerActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|uiMode|density|fontScale" />
+
         <!-- 应用内浏览器：用于打开 GitHub 网页（如创建访问令牌） -->
         <activity
             android:name=".WebViewActivity"

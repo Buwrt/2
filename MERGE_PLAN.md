@@ -651,3 +651,83 @@ DSH 装载页，按返回 = 退回 githup。用户明确不要这种「进入 / 
 
 未在真机验证两个 WebView 同时驻留时的内存占用与输入法叠加；
 已验证 Java 编译、Manifest 合法性、包身份、签名与防护链自洽。
+
+
+---
+
+## 十七、阶段 M：设置页开关 → 把 GitHub 能力授权给 AI / 工作区能选 GitHub 仓库
+
+### 先回答「现在 AI 能不能辅助 githup」
+
+**不能**。之前两套完全独立：
+
+- githup 的 token 锁在 `SecurePrefs`（Android Keystore AES-GCM），只在 App
+  进程里附加到发往 `api.github.com` 的请求
+- DSH 是另一个进程里的 node，3081 本地桥**没有任何 GitHub 路由**
+- payload 里**没有 `gh` CLI**（只有 `git-remote-https`），自带的
+  `@deepseek-ai/dsh-experimental-forge-github` 明确写着：子进程继承的宿主
+  环境会剥掉名称含 `KEY / PASSWORD / SECRET / TOKEN` 的变量，
+  `GH_TOKEN` / `GITHUB_TOKEN` 不会被转发
+
+所以「把 token 塞进环境变量 / 写进配置文件」这条路**根本走不通**。
+
+### 关键设计：授权 ≠ 交出令牌
+
+底座对用户的承诺是「令牌只保存在设备本机、不会上传到任何服务器」。
+直接把 token 交给 DSH 会同时破坏这条承诺、并让第三方 AI 引擎有可能把
+私有仓库代码或令牌内容发到云端。
+
+因此「授权」实现为 **127.0.0.1:3081 上的一条本机只读代理**：
+
+- token 继续锁在 `SecurePrefs`，只在 App 进程内附加到 `api.github.com`
+- DSH / node 侧拿到的是一个**不含任何凭据**的回环 URL
+  `http://127.0.0.1:3081/gh/api/...`
+- 令牌既不进 DSH 的环境变量，也不进它的任何文件、不写进工作区
+
+三道闸门：① 设置页开关默认关，关着时 `/gh/*` 全部 403；
+② 只放行 GET，POST/PUT/PATCH/DELETE 一律拒绝（AI 改不了仓库）；
+③ 目标域只允许 `api.github.com` 与 `codeload.github.com`（zipball 重定向时
+手动跟随，且只在 api 域带 Authorization）。
+
+### 新增 / 改动
+
+| 文件 | 内容 |
+|---|---|
+| `harness/GhBridge.java`（新，357 行） | 开关状态、`SecurePrefs` 读令牌、只读 REST 代理、仓库列表、工作区镜像展开 |
+| `GhRepoPickerActivity.java`（新，140 行） | 透明 Activity，弹 AlertDialog 列当前令牌可见的仓库 |
+| `harness/LocalBridgeServer.java` | 新增 `/gh/repos` `/gh/workspace` `/gh/api/<REST 路径>`；`/gh/` 免密但受开关控制；dispatch 增加 method 形参 |
+| `harness/ShellBridge.java` | `ctlState().workspace` 改读 `GhBridge.workspaceState()`；`ctlAct("workspace.change")` 改成唤起仓库选择器 |
+| `JsBridge.java` | 新增 `aiGithubEnabled()` / `setAiGithubEnabled(boolean)` / `aiGithubWorkspace()` 三个窄接口 |
+| `assets/web/js/page-user.js` | 设置页新增「AI 辅助 githup」开关行与事件分支 |
+| `assets/web/js/i18n-strings.js` | 补 6 条英文词条 |
+| `AndroidManifest.xml` | 注册 `GhRepoPickerActivity`（非桌面入口） |
+
+### 工作区怎么落地
+
+上游控制台的「AI 工作区（可选）」原是唤起系统目录选择器选本地文件夹。
+现在改成：
+
+1. `GhBridge.repos()` → `GET /user/repos?per_page=100&sort=updated`
+2. 用户在列表里选一个（私有库带 🔒 标记，当前选中带 ✓）
+3. `GhBridge.materialize()` → `GET /repos/{full}/zipball`，手动跟随 302 到
+   `codeload.github.com`，单次下载后解压到
+   `files/gh-workspace/<owner>__<repo>/`（上限 60MB / 4000 项 / 单文件 2MB）
+4. 在目录里写一份 `GITHUP.md`，告诉 AI：这是只读镜像、怎么用
+   `/gh/api/` 查 Issue/PR、令牌不在它手里、不要尝试寻找或输出
+5. `ctlState().workspace.path` 指向该目录，DSH 的 file / bash 工具可直接读代码
+
+### 用户操作路径
+
+我的 → 设置 → 打开「AI 辅助 githup」→ 点右下角 AI 球 → DSH 设置 →
+控制台 →「AI 工作区（可选）」→ 选择 → 挑一个 GitHub 仓库 → 展开完成。
+关闭开关会顺手清掉已选工作区。
+
+### 边界
+
+- **只读**：AI 能读代码、Issue、PR、提交、分支，不能提交、改文件、开 PR
+- 镜像是**快照**，不会自动同步；刷新需重新选择工作区
+- 超过 60MB 的仓库不展开，仍可用 `/gh/api/` 按需读取
+- 开关打开期间，本机任意能连 127.0.0.1:3081 的进程都能经该只读代理访问
+  GitHub（回环 + Host 围栏已挡外部网络，但不隔离同机 App）
+- 未在真机验证 zipball 解压、AlertDialog 列表与 AI 侧 curl 链路；
+  已验证 Java 编译、Manifest、JS 语法、包身份、签名与防护链自洽

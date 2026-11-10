@@ -174,6 +174,23 @@ public class JsBridge {
     }
 
     /**
+     * 阶段 K：从底座客户端进入 githup AI。
+     *
+     * 桌面合并成只留一个 LAUNCHER 图标（MainActivity）后，AI 不再是第二个 App，
+     * 而是客户端内部的一个页面：顶栏常驻按钮和「我的」页入口都走这里。
+     * 因为 HarnessActivity 已去掉独立 taskAffinity 并改成 singleTop，
+     * 它会压进底座同一个返回栈，按系统返回就回到刚才浏览的位置。
+     */
+    @JavascriptInterface
+    public void openAI() {
+        try {
+            Intent i = new Intent(activity, HarnessActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            activity.startActivity(i);
+        } catch (Throwable ignored) {}
+    }
+
+    /**
      * 加入或更新一个账号。同一个 login 视为同一个账号，覆盖旧记录。
      * 不在这里切过去 —— 登录成功时调用方自己决定是否切换，
      * 分开更清楚，也避免「加账号」这个动作产生副作用。
@@ -8082,6 +8099,32 @@ public class JsBridge {
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    /* ==================== 阶段 M：设置页「AI 辅助 githup」开关 ====================
+     *
+     * 这三个窄接口只负责开关与状态展示。真正的 GitHub 访问走 3081 桥的
+     * /gh/* 只读代理，令牌始终留在 SecurePrefs（Android Keystore）里，
+     * 不会经 WebView 传出去，也不会写进 DSH 的环境变量或文件。 */
+
+    @JavascriptInterface
+    public boolean aiGithubEnabled() {
+        try { return com.hubmobile.app.harness.GhBridge.enabled(activity); }
+        catch (Throwable t) { return false; }
+    }
+
+    @JavascriptInterface
+    public boolean setAiGithubEnabled(boolean on) {
+        try {
+            com.hubmobile.app.harness.GhBridge.setEnabled(activity, on);
+            return on;
+        } catch (Throwable t) { return false; }
+    }
+
+    @JavascriptInterface
+    public String aiGithubWorkspace() {
+        try { return com.hubmobile.app.harness.GhBridge.workspaceState(activity); }
+        catch (Throwable t) { return "{}"; }
     }
 
 }

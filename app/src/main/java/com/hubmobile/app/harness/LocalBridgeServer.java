@@ -196,13 +196,21 @@ public final class LocalBridgeServer {
 
             // 免密路由：网页设置页直连的三个 /overlay 开关、只读状态、文件打开
             boolean open = path.startsWith("/overlay") || path.startsWith("/status")
-                    || path.startsWith("/changelog") || path.startsWith("/open");
+                    || path.startsWith("/changelog") || path.startsWith("/open")
+                    || path.startsWith("/gh/");
+            /* /gh/ 是给 DSH 的 node 侧 curl 用的只读通道：免密但要过
+               GhBridge.enabled() 开关，且非 GET 一律挡在路由外。 */
+            if (path.startsWith("/gh/") && !"GET".equals(method) && !"POST".equals(method)) {
+                write(out, 405, cors(origin),
+                        "{\"ok\":false,\"error\":\"只读通道：不允许 " + method + "\"}");
+                s.close(); return;
+            }
             if (!open && !LocalBridgeAuth.authorized(h, body.toString(), app)) {
                 write(out, 403, cors(origin), "{\"ok\":false,\"error\":\"unauthorized\"}");
                 s.close(); return;
             }
 
-            String resp = dispatch(path, query, body.toString());
+            String resp = dispatch(path, query, body.toString(), method);
             write(out, 200, cors(origin), resp);
             s.close();
         } catch (Throwable t) {
@@ -232,7 +240,7 @@ public final class LocalBridgeServer {
         out.flush();
     }
 
-    private String dispatch(String path, String query, String body) {
+    private String dispatch(String path, String query, String body, String method) {
         try {
             if (path.startsWith("/overlay")) return overlay(query);
             if (path.startsWith("/open-file")) return open(body);   // dsh-native-command 用这个路径
@@ -256,6 +264,7 @@ public final class LocalBridgeServer {
             if (path.startsWith("/kernel") || path.startsWith("/kernels"))
                 return kernel(path, query, body);
             if (path.startsWith("/buildenv")) return buildenv(path, query, body);
+            if (path.startsWith("/gh/")) return gh(path, query, body, method);
             return "{\"ok\":false,\"error\":\"unknown route: " + path + "\"}";
         } catch (Throwable t) {
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
@@ -893,6 +902,46 @@ public final class LocalBridgeServer {
             JSONObject o = new JSONObject(ShellBridge.buildEnvJson(app));
             o.put("ok", true).put("storeDir", BuildEnvInstaller.STORE);
             return o.toString();
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
+        }
+    }
+
+    /**
+     * 阶段 M：/gh/* —— 把 githup 的 GitHub 能力以「本机只读代理」的形式给 DSH。
+     *
+     * 令牌始终锁在 App 的 Keystore 里，DSH 只拿到一个不含凭据的回环 URL。
+     * 路由：
+     *   GET  /gh/repos                → 当前令牌可见的仓库清单
+     *   GET  /gh/workspace            → 当前工作区状态（含 GITHUP.md 里的用法说明）
+     *   POST /gh/workspace {"repo":…} → 选中仓库并展开成只读镜像
+     *   GET  /gh/api/<GitHub REST 路径> → 只读取 api.github.com 的内容
+     */
+    private String gh(String path, String query, String body, String method) {
+        if (!GhBridge.enabled(app))
+            return "{\"ok\":false,\"error\":\"AI 辅助 githup 未开启：请到 我的 → 设置 打开开关\"}";
+        try {
+            if (path.equals("/gh/repos")) return GhBridge.repos(app);
+
+            if (path.equals("/gh/workspace")) {
+                if ("POST".equals(method)) {
+                    String repo = new org.json.JSONObject(body.isEmpty() ? "{}" : body)
+                            .optString("repo", "");
+                    if (repo.isEmpty()) return GhBridge.workspaceState(app);
+                    return GhBridge.materialize(app, repo);
+                }
+                return GhBridge.workspaceState(app);
+            }
+
+            if (path.startsWith("/gh/api/")) {
+                if (!"GET".equals(method) && !"HEAD".equals(method))
+                    return GhBridge.proxy(app, method, path.substring("/gh/api".length()), null);
+                String apiPath = path.substring("/gh/api".length());
+                if (!query.isEmpty()) apiPath += "?" + query;
+                return GhBridge.proxy(app, "GET", apiPath, null);
+            }
+
+            return "{\"ok\":false,\"error\":\"未知的 /gh 路由\"}";
         } catch (Throwable t) {
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
