@@ -8127,4 +8127,11 @@ public class JsBridge {
         catch (Throwable t) { return "{}"; }
     }
 
+    /** 阶段 O：设置页状态行用的令牌摘要。权限完全跟随登录令牌，不再是开关。 */
+    @JavascriptInterface
+    public String aiGithubStatus() {
+        try { return com.hubmobile.app.harness.GhBridge.status(activity); }
+        catch (Throwable t) { return ""; }
+    }
+
 }

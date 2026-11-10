@@ -188,8 +188,8 @@ public final class ShellBridge {
             catch (Throwable t) { o.put("schedules", new JSONObject().put("items", new JSONArray())); }
 
             o.put("note", (GhBridge.enabled(ctx)
-                    ? "AI 辅助 githup 已开启（只读代理，令牌不出设备）；"
-                    : "AI 辅助 githup 未开启，可在 我的 → 设置 打开；")
+                    ? "GitHub 权限跟随登录令牌（含私有库与写操作，令牌不出设备）；"
+                    : "未登录 GitHub，AI 无 GitHub 权限；")
                     + (shizukuAvailable()
                         ? "Shizuku 已授权；虚拟屏仍需要特权服务端 jar"
                         : "虚拟屏与特权 shell 需安装 Shizuku 并授权"));
@@ -339,7 +339,7 @@ public final class ShellBridge {
                 /* 阶段 M：上游这里是唤起系统目录选择器选本地文件夹，
                    改成列 GitHub 仓库，选完由 GhBridge 展开成 App 私有目录的只读镜像。 */
                 if (!GhBridge.enabled(ctx))
-                    return fail("请先在 githup 的「我的 → 设置」打开「AI 辅助 githup」开关");
+                    return fail("还没有 GitHub 令牌：请先在 githup 里登录或粘贴令牌");
                 Intent pick = new Intent(ctx, com.hubmobile.app.GhRepoPickerActivity.class);
                 pick.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 try { ctx.startActivity(pick); return ok("已打开 GitHub 仓库选择器"); }

@@ -296,6 +296,11 @@ public final class HarnessBridge {
             File dir = payload(c);
             File node = new File(dir, "runtime/bin/node");
             File binjs = new File(dir, "dshroot/lib/node_modules/@deepseek-ai/dsh/lib/bin.js");
+            /* 阶段 O：把 GitHub 通道说明放进 AI 的默认工作区，并让 bash/file 的
+               cwd 指向它 —— 否则 AI 会去检查 gh CLI / GITHUB_TOKEN，得出
+               「我没有凭证、看不到你的仓库」的错误结论。 */
+            com.hubmobile.app.harness.GhBridgeDocs.install(c);
+
             /* 阶段 N：起 node 之前定好「新会话默认走哪条鉴权路由」。
                账号已登录（截图里能看到充值/赠金余额）时覆盖成 deepseek-account，
                让赠金真正能花出去；没登录就保持内核默认 deepseek-official。
@@ -362,6 +367,11 @@ public final class HarnessBridge {
             // 靠这几个环境变量定位 App 进程内的桥，缺了就整类能力静默失效。
             env.put("APP_LOCAL_TOKEN",
                     com.hubmobile.app.harness.LocalBridgeAuth.token(c));
+            // AI 工作区：选了 GitHub 仓库 → 镜像目录；没选 → 带 GITHUP.md 的说明目录
+            try {
+                env.put("DSH_WORKSPACE",
+                        com.hubmobile.app.harness.GhBridgeDocs.workspaceFor(c).getAbsolutePath());
+            } catch (Throwable ignored) {}
             env.put("APP_NOTIFY_PORT", "3081");
             env.put("APP_A11Y_PORT", "3181");
             env.put("VS_DEX", "");

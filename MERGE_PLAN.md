@@ -826,3 +826,92 @@ store DEEPSEEK_API_KEY through the credentials service
 未真机验证账号 grant 的文本形态与 `/models` 目录拉取；检测采用宽松文本匹配，
 不解析 YAML。若账号记录格式与预期不同，可在设置里手动切模型，或把日志发回调整。
 已验证 Java 编译结构、Manifest、包身份、签名与防护链自洽。
+
+
+---
+
+## 十九、阶段 O：权限跟随登录令牌，取消开关与只读限制
+
+### 触发
+
+用户把 DSH 里 AI 的一段回答贴了回来：
+
+> 「gh 未安装 / GITHUB_TOKEN 无 / hosts.yml 不存在 / 没有 GitHub 专用工具 /
+> api.github.com 未认证请求 200 → **我没有你的身份凭证，看不到你账号下的仓库**」
+
+同时明确要求：**「用户登录的令牌有什么权限，AI 对于 github 就有什么权限，而不是开关设置的」**。
+
+### 为什么 AI 会得出「看不到」
+
+那段回答是 **DSH 里的 AI 检查它自己的运行环境**后给出的，检查项全对：
+
+- `gh` CLI 确实没装（payload 里只有 `git-remote-https`）
+- `GITHUB_TOKEN` / `GH_TOKEN` 确实没有 —— 这是**故意的**：上游
+  `forge-github` 明确会剥掉名称含 TOKEN/KEY/SECRET 的环境变量，
+  阶段 M 也刻意不让凭据进 DSH 的 env 或文件
+- `hosts.yml` / `.netrc` / SSH key / git credential helper 确实不存在
+- 公开根端点 `https://api.github.com` 未认证返回 200，那段 JSON 只是
+  **端点目录**，任何人都能拿，**不代表能看到你账号下的仓库**
+
+它漏掉的是：阶段 M 在 **127.0.0.1:3081 留了一条本机代理**，但那属于
+「**工具型访问**」（要主动 curl），不是「环境型凭据」（不需要调用就存在）。
+AI 不知道这条通道存在 → 按常规检查得出「没有凭证」→ 结论错在前提。
+
+加剧因素：阶段 M 只把 `GITHUP.md` 写进**用户选了 GitHub 仓库之后**的镜像
+目录；没选工作区时，AI 的 cwd 里根本没有说明文件。
+
+### 用户口径要求的三处改动
+
+| 之前（阶段 M） | 现在（阶段 O） |
+|---|---|
+| 设置页独立开关，默认关 | **取消开关**，改成登录态状态行 |
+| 只放行 GET，写操作一律拒绝 | **GET/POST/PUT/PATCH/DELETE 全放行** |
+| 「AI 权限 = 只读代理」 | **AI 权限 = 当前登录令牌的权限**（含私有库、写操作） |
+
+权限来源只有一个：`SecurePrefs` 里的 `gh_token`。退出登录 / 清空令牌 →
+`/gh/*` 立刻 403；换成细粒度 token → AI 也只剩细粒度权限。
+
+### 具体改动
+
+| 文件 | 内容 |
+|---|---|
+| `harness/GhBridge.java` | `enabled()` 改为 `!token().isEmpty()`；`setEnabled()` 退化为 no-op；新增 `status()` 给设置页状态行；`proxy()` 全方法透传 + body 转发；`readonly:false`；下载类端点挡掉（防重定向带令牌） |
+| `harness/LocalBridgeServer.java` | 去掉 `/gh/` 的 405 方法限制；新增 `GET /gh/help` 自描述路由；`/gh/api/` 把 method 与 body 一起传给 proxy |
+| `harness/GhBridgeDocs.java`（新） | 起 node 前往 AI 默认工作区写 `GITHUP.md` + `README.md`，并在 `$DSH_HOME` 根写一份；文案开宗明义写「**别再用 gh CLI / 环境变量判断权限**」 |
+| `HarnessBridge.java` | 启动前调用 `GhBridgeDocs.install()`；env 注入 `DSH_WORKSPACE`（未选仓库 → 说明目录；选了 → 镜像目录），`bash-local` 的 cwd 直接落在说明上 |
+| `JsBridge.java` | 新增 `aiGithubStatus()`；`aiGithubEnabled()` 语义改为登录态 |
+| `page-user.js` / `i18n-strings.js` | 开关行改成状态行，点击只解释口径、不切换 |
+| `ShellBridge.java` / `GhRepoPickerActivity.java` | 错误提示由「请打开开关」改为「请先登录」；note 文案同步 |
+
+`proxy()` 改用底座 `Http.requestBytes()`：它基于 Socket 实现，**支持 PATCH**
+（`HttpURLConnection` 在 Android 上会抛 `Invalid HTTP method: PATCH`），
+且 CA / 超时口径与客户端一致。
+
+### 让 AI「自动看到」的关键
+
+不是靠用户手动说明，而是三路同时铺：
+
+1. **工作区 cwd**：`DSH_WORKSPACE` 指向带 `GITHUP.md` / `README.md` 的目录，
+   AI 用 bash/file 工具一 `ls` 就看见
+2. **`/gh/help`**：AI 只要 curl 一次就拿到完整端点表、示例和「别检查环境」的提示
+3. **已选仓库镜像**：`materialize()` 写同一份文案（统一由
+   `GhBridgeDocs.repoText()` 生成，不再两份各写各的）
+
+不注册新 DSH 工具插件，是为了避开用户层 `node_modules` 对
+`@deepseek-ai/dsh-tools` 的解析不确定性 —— 纯 App 侧文件 + env，零依赖。
+
+### 安全边界（变化要如实说）
+
+- ✅ **令牌仍不出设备**：不进 DSH 的 env / 文件 / 工作区，只在 App 进程内附加到
+  `api.github.com` 请求
+- ✅ 域白名单与 apiPath 校验保留；`zipball/tarball/archive/redirect` 类端点
+  挡在代理外（底座 `Http` 会自动跟随重定向并转发 Authorization，故改由
+  `openWithOfficialRedirect()` 的官方域白名单单独处理）
+- ⚠️ **AI 现在能改仓库了**：建 Issue、提交、开 PR、改设置……token 有
+  `delete_repo` 就能删库。这是用户明确要的「权限等价」，代价是提示词注入
+  或模型误判可能真的产生写操作
+- ⚠️ 开关打开期间（现在是「只要登录着」），本机任意能连 127.0.0.1:3081 的
+  进程都能经该代理以你的令牌访问 GitHub。回环 + Host 围栏挡外部网络，
+  不隔离同机 App
+- 未真机验证写方法链路与 AI 是否真的会主动读说明；已验证 Java 结构、
+  JS 语法、Manifest、包身份、签名与防护链自洽

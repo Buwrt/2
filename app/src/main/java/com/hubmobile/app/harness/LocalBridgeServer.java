@@ -198,13 +198,8 @@ public final class LocalBridgeServer {
             boolean open = path.startsWith("/overlay") || path.startsWith("/status")
                     || path.startsWith("/changelog") || path.startsWith("/open")
                     || path.startsWith("/gh/");
-            /* /gh/ 是给 DSH 的 node 侧 curl 用的只读通道：免密但要过
-               GhBridge.enabled() 开关，且非 GET 一律挡在路由外。 */
-            if (path.startsWith("/gh/") && !"GET".equals(method) && !"POST".equals(method)) {
-                write(out, 405, cors(origin),
-                        "{\"ok\":false,\"error\":\"只读通道：不允许 " + method + "\"}");
-                s.close(); return;
-            }
+            /* /gh/ 是给 DSH 的 node 侧 curl 用的本机代理（阶段 O 起全方法放行）。
+               权限 = githup 当前登录令牌的权限；由 GhBridge.enabled() 跟随登录态。 */
             if (!open && !LocalBridgeAuth.authorized(h, body.toString(), app)) {
                 write(out, 403, cors(origin), "{\"ok\":false,\"error\":\"unauthorized\"}");
                 s.close(); return;
@@ -908,19 +903,21 @@ public final class LocalBridgeServer {
     }
 
     /**
-     * 阶段 M：/gh/* —— 把 githup 的 GitHub 能力以「本机只读代理」的形式给 DSH。
+     * 阶段 O：/gh/* —— GitHub 能力的本机代理，权限完全跟随登录令牌。
      *
      * 令牌始终锁在 App 的 Keystore 里，DSH 只拿到一个不含凭据的回环 URL。
      * 路由：
-     *   GET  /gh/repos                → 当前令牌可见的仓库清单
-     *   GET  /gh/workspace            → 当前工作区状态（含 GITHUP.md 里的用法说明）
-     *   POST /gh/workspace {"repo":…} → 选中仓库并展开成只读镜像
-     *   GET  /gh/api/<GitHub REST 路径> → 只读取 api.github.com 的内容
+     *   GET  /gh/help                 → 自描述用法（AI 一 curl 就知道，不用翻文档）
+     *   GET  /gh/repos                → 当前令牌可见的仓库清单（含私有库）
+     *   GET  /gh/workspace            → 当前工作区状态
+     *   POST /gh/workspace {"repo":…} → 选中仓库并展开成镜像
+     *   ANY  /gh/api/<GitHub REST 路径> → 全方法透传
      */
     private String gh(String path, String query, String body, String method) {
         if (!GhBridge.enabled(app))
-            return "{\"ok\":false,\"error\":\"AI 辅助 githup 未开启：请到 我的 → 设置 打开开关\"}";
+            return "{\"ok\":false,\"error\":\"还没有 GitHub 令牌：请先在 githup 里登录或粘贴令牌\"}";
         try {
+            if (path.equals("/gh/help")) return ghHelp();
             if (path.equals("/gh/repos")) return GhBridge.repos(app);
 
             if (path.equals("/gh/workspace")) {
@@ -934,17 +931,34 @@ public final class LocalBridgeServer {
             }
 
             if (path.startsWith("/gh/api/")) {
-                if (!"GET".equals(method) && !"HEAD".equals(method))
-                    return GhBridge.proxy(app, method, path.substring("/gh/api".length()), null);
                 String apiPath = path.substring("/gh/api".length());
                 if (!query.isEmpty()) apiPath += "?" + query;
-                return GhBridge.proxy(app, "GET", apiPath, null);
+                return GhBridge.proxy(app, method, apiPath, body);
             }
 
             return "{\"ok\":false,\"error\":\"未知的 /gh 路由\"}";
         } catch (Throwable t) {
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
+    }
+
+    /** AI 主动 curl 一下就能拿到完整用法，不必先读工作区里的 GITHUP.md。 */
+    private String ghHelp() {
+        return "{\"ok\":true,\"name\":\"githup GitHub bridge\","
+                + "\"auth\":\"令牌由 githup 客户端保管在设备 Keystore；本地址不含任何凭据\","
+                + "\"scope\":\"你的权限 = githup 当前登录令牌的权限（含私有库与写操作）\","
+                + "\"important\":\"不要检查 gh CLI / GITHUB_TOKEN / GH_TOKEN / hosts.yml —— 它们本来就不存在，直接调用下面的通道即可\","
+                + "\"endpoints\":["
+                + "{\"path\":\"/gh/repos\",\"method\":\"GET\",\"desc\":\"列出当前账号可见的全部仓库（含私有库）\"},"
+                + "{\"path\":\"/gh/workspace\",\"method\":\"GET\",\"desc\":\"当前 AI 工作区状态与本地路径\"},"
+                + "{\"path\":\"/gh/workspace\",\"method\":\"POST\",\"body\":{\"repo\":\"owner/name\"},\"desc\":\"把仓库展开成工作区镜像\"},"
+                + "{\"path\":\"/gh/api/<REST 路径>\",\"method\":\"GET/POST/PUT/PATCH/DELETE\","
+                + "\"desc\":\"透传 api.github.com；路径为 GitHub REST API 去掉 https://api.github.com 后的部分，如 /user、/user/repos、/repos/OWNER/REPO/issues\"}]"
+                + ",\"examples\":["
+                + "\"curl http://127.0.0.1:3081/gh/api/user\","
+                + "\"curl http://127.0.0.1:3081/gh/api/user/repos?per_page=100\","
+                + "\"curl -X POST -H 'Content-Type: application/json' -d '{\\\"title\\\":\\\"hi\\\"}' http://127.0.0.1:3081/gh/api/repos/OWNER/REPO/issues\""
+                + "]}";
     }
 
     private String unsupported(String what) {

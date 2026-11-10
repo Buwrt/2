@@ -1777,7 +1777,9 @@
     "未开启 · AI 与 GitHub 完全隔离": "Off · AI is fully isolated from GitHub",
     "已开启：到 AI 面板的设置 → 工作区，即可选择 GitHub 仓库（只读）": "On: pick a GitHub repo in the AI panel's Settings → Workspace (read-only)",
     "已关闭：AI 不再能访问 GitHub，已选工作区已清除": "Off: AI can no longer access GitHub; selected workspace cleared",
-    "当前版本不支持": "Not supported in this version"
+    "当前版本不支持": "Not supported in this version",
+    "未登录 · AI 无法访问 GitHub": "Not signed in · AI cannot access GitHub",
+    "权限跟随当前登录令牌：令牌能读私有库、能写，AI 就有同样权限；退出登录即失效。令牌始终留在设备 Keystore，不交给 AI。": "Permissions follow the signed-in token: whatever it can read or write, the AI can too. Signing out revokes it. The token stays in the device Keystore and is never handed to the AI."
   };
   window.I18N_STRINGS = S;
 })();

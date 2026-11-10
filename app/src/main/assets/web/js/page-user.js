@@ -1495,17 +1495,13 @@ var ed = UI.$('#edit', host);
           window.App.navGlass() ? L('settings.glass.on') : L('settings.glass.off'),
           'glass') +
         /*
-          阶段 M：把 githup 的 GitHub 能力授权给 AI。
-          默认关；打开后 3081 桥才启用 /gh/* 只读代理。令牌始终留在设备
-          Keystore，AI 拿到的只是一个不含凭据的回环 URL —— 所以这行说明
-          要写清楚，别让用户以为是「把令牌交出去了」。
+          阶段 O：不再是开关。用户登录的令牌有什么权限，AI 对 GitHub 就有什么
+          权限 —— 权限来源是登录态本身，所以这行只做状态展示。
         */
-        switchItem('key', window.I18n.t('AI 辅助 githup'),
-          (window.NativeBridge && window.NativeBridge.aiGithubEnabled && window.NativeBridge.aiGithubEnabled())
-            ? window.I18n.t('已开启 · AI 只读访问 GitHub 仓库，令牌不出设备')
-            : window.I18n.t('未开启 · AI 与 GitHub 完全隔离'),
-          'aiGithub',
-          !!(window.NativeBridge && window.NativeBridge.aiGithubEnabled && window.NativeBridge.aiGithubEnabled())) +
+        setItem('key', window.I18n.t('AI 辅助 githup'),
+          (window.NativeBridge && window.NativeBridge.aiGithubStatus && window.NativeBridge.aiGithubStatus())
+            || window.I18n.t('未登录 · AI 无法访问 GitHub'),
+          'aiGithub') +
         setItem('typography', L('settings.codeFont'), (s.codeFont || 13) + 'px', 'font') +
         setItem('device-desktop', window.I18n.t('设备类型'), window.App.deviceSummary(), 'device') +
         setItem('home', L('settings.startTab'), { home: L('settings.startTab.home'), notifications: L('settings.startTab.notifications'), explore: L('settings.startTab.explore'), profile: L('settings.startTab.profile') }[s.startTab], 'start') +
@@ -1615,17 +1611,10 @@ var ed = UI.$('#edit', host);
             window.Router.reload();
             return;
           }
-          /* 阶段 M：AI 辅助 githup 授权开关 */
+          /* 阶段 O：状态行，点一下只解释口径，不切换任何东西 */
           if (k === 'aiGithub') {
-            if (!window.NativeBridge || !window.NativeBridge.setAiGithubEnabled)
-              return UI.toast(window.I18n.t('当前版本不支持'));
-            var ghOn = !window.NativeBridge.aiGithubEnabled();
-            window.NativeBridge.setAiGithubEnabled(ghOn);
-            UI.toast(ghOn
-              ? window.I18n.t('已开启：到 AI 面板的设置 → 工作区，即可选择 GitHub 仓库（只读）')
-              : window.I18n.t('已关闭：AI 不再能访问 GitHub，已选工作区已清除'));
-            window.Router.reload();
-            return;
+            return UI.toast(window.I18n.t(
+              '权限跟随当前登录令牌：令牌能读私有库、能写，AI 就有同样权限；退出登录即失效。令牌始终留在设备 Keystore，不交给 AI。'));
           }
           if (k === 'font') UI.choose(L('settings.codeFont'), [
             { key: '12', label: window.I18n.t("小（12px）"), icon: 'typography' },

@@ -29,7 +29,7 @@ public class GhRepoPickerActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         if (!GhBridge.enabled(getApplicationContext())) {
-            Toast.makeText(this, "请先在「我的 → 设置」打开「AI 辅助 githup」开关", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "还没有 GitHub 令牌：请先在 githup 里登录或粘贴令牌", Toast.LENGTH_LONG).show();
             finish();
             return;
         }
@@ -98,7 +98,7 @@ public class GhRepoPickerActivity extends Activity {
                                     if (!cur.isEmpty()) {
                                         GhBridge.setCurrent(getApplicationContext(), "");
                                         Toast.makeText(GhRepoPickerActivity.this,
-                                                "已清除 AI 工作区（令牌授权仍保持）", Toast.LENGTH_SHORT).show();
+                                                "已清除 AI 工作区（登录令牌权限不变）", Toast.LENGTH_SHORT).show();
                                     }
                                     close();
                                 }

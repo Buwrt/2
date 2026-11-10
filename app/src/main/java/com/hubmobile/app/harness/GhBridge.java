@@ -22,7 +22,12 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * 阶段 M：把 githup 的 GitHub 能力「授权」给 DSH，但令牌不出设备。
+ * 阶段 O：githup 的 GitHub 能力对 AI **完全跟随登录令牌**。
+ *
+ * 用户口径：「用户登录的令牌有什么权限，AI 对于 github 就有什么权限」——
+ * 不再有独立开关，也不再限制成只读。只要 githup 里登录着某个 token，
+ * AI 经本机代理就拥有该 token 的全部权限（含私有库、写操作）；退出登录
+ * 或清空令牌则立刻失效。
  *
  * 关键设计（为什么不把 token 交给 DSH）：
  *   ① 底座对用户的承诺是「令牌只保存在设备本机、不会上传到任何服务器」；
@@ -35,10 +40,12 @@ import java.util.zip.ZipInputStream;
  * 附加到发往 api.github.com 的请求头；DSH / node 侧拿到的是一个不含任何
  * 凭据的回环 URL。令牌既不进 DSH 的环境变量，也不进它的任何文件。
  *
- * 三道闸门：
- *   · 设置页开关默认关（ai_github_on），关着时 /gh/* 全部 403
- *   · 只放行 GET，POST/PUT/PATCH/DELETE 一律拒绝（AI 改不了仓库）
- *   · 目标域只允许 api.github.com 与 codeload.github.com（zipball 重定向）
+ * 仍然保留的边界：
+ *   · 令牌不出设备（不进 DSH 的 env / 文件 / 工作区）
+ *   · 目标域只允许 api.github.com 与 codeload.github.com（防 SSRF）
+ *   · apiPath 必须是以 / 开头的 GitHub REST 相对路径，禁止 .. / :// 等
+ *
+ * 不再保留：开关、只读限制。权限 = 当前登录令牌的权限。
  */
 public final class GhBridge {
 
@@ -57,15 +64,26 @@ public final class GhBridge {
         return c.getSharedPreferences(PREF, Context.MODE_PRIVATE);
     }
 
-    // ==================== 开关 ====================
+    // ==================== 跟随登录态（阶段 O：取消独立开关）====================
 
+    /** 是否有可用令牌。设置页状态行、工作区选择器、/gh/* 全部以此为准。 */
     public static boolean enabled(Context c) {
-        return prefs(c).getBoolean(KEY_ON, false);
+        return !token(c).isEmpty();
     }
 
+    /** 兼容旧调用：不再写开关状态，只返回当前登录态。 */
     public static void setEnabled(Context c, boolean on) {
-        prefs(c).edit().putBoolean(KEY_ON, on).apply();
-        if (!on) setCurrent(c, "");   // 关掉时顺手清掉已选工作区
+        // no-op：权限来源是登录令牌，不是开关
+    }
+
+    /** 给设置页状态行用：当前生效令牌的脱敏摘要 + 登录名。 */
+    public static String status(Context c) {
+        String t = token(c);
+        if (t.isEmpty()) return "未登录 · AI 无法访问 GitHub";
+        String login = SecurePrefs.get(c, "gh_current", "");
+        String head = t.length() > 6 ? t.substring(0, 6) : t;
+        return (login == null || login.isEmpty() ? "已登录" : "已登录 " + login)
+                + " · " + head + "… · 权限跟随此令牌";
     }
 
     // ==================== 令牌（只在 App 进程内可见）====================
@@ -89,45 +107,35 @@ public final class GhBridge {
     // ==================== 只读 REST 代理 ====================
 
     /**
-     * 只放行 GET。apiPath 形如 "/user/repos?per_page=100" 或
-     * "/repos/owner/name/pulls"。任何写方法都拒绝，避免 AI 被提示词注入后改动仓库。
+     * 阶段 O：全方法透传。apiPath 形如 "/user/repos?per_page=100" 或
+     * "/repos/owner/name/issues"。权限完全由当前登录令牌决定 —— token 能写，
+     * AI 就能写；token 只能读公开库，AI 也就只能读公开库。
      */
     public static String proxy(Context c, String method, String apiPath, String body) {
-        if (!enabled(c)) return err("AI 辅助 githup 未开启：请到「我的 → 设置」打开开关");
-        if (token(c).isEmpty()) return err("还没有 GitHub 令牌：请先在 githup 里登录或粘贴令牌");
-        if (method != null && !"GET".equalsIgnoreCase(method) && !"HEAD".equalsIgnoreCase(method))
-            return err("只读授权：不允许 " + method + " 写入操作");
+        if (!enabled(c)) return err("还没有 GitHub 令牌：请先在 githup 里登录或粘贴令牌");
+        String m = (method == null || method.isEmpty()) ? "GET" : method.toUpperCase(java.util.Locale.US);
+        if (!m.matches("GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS"))
+            return err("不支持的 HTTP 方法：" + m);
         if (apiPath == null || !apiPath.startsWith("/") || apiPath.contains("..")
                 || apiPath.contains("://") || apiPath.contains("\n"))
             return err("非法的 API 路径");
+        /* 底座 Http 会自动跟随重定向并把 Authorization 一并转发。GitHub 的
+           zipball/tarball/archive 端点会 302 到 codeload 等官方域，那条路由
+           由 materialize() 用 openWithOfficialRedirect() 的严格白名单单独处理；
+           这里挡掉，避免令牌被带到重定向目标。其余 REST 端点不重定向。 */
+        if (apiPath.matches("(?i).*(/zipball|/tarball|/archive|/redirect).*"))
+            return err("下载类端点请改用 /gh/workspace（POST {\"repo\":\"owner/name\"}），它会按官方域白名单展开");
 
-        HttpURLConnection conn = null;
         try {
-            conn = (HttpURLConnection) new URL(API + apiPath).openConnection();
-            conn.setRequestMethod("GET");
-            conn.setInstanceFollowRedirects(false);
-            conn.setConnectTimeout(20000);
-            conn.setReadTimeout(30000);
-            for (Map.Entry<String, String> e : headers(c).entrySet())
-                conn.setRequestProperty(e.getKey(), e.getValue());
-            int code = conn.getResponseCode();
-            InputStream in = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
-            ByteArrayOutputStream o = new ByteArrayOutputStream();
-            if (in != null) {
-                byte[] b = new byte[8192];
-                int n;
-                long total = 0;
-                while ((n = in.read(b)) > 0) {
-                    total += n;
-                    if (total > 8L * 1024 * 1024) break;   // 单次响应上限 8MB
-                    o.write(b, 0, n);
-                }
-                in.close();
-            }
-            String text = new String(o.toByteArray(), "UTF-8");
+            // 复用底座的 Http：它基于 Socket 实现，支持 PATCH 等
+            // HttpURLConnection 在 Android 上会拒绝的方法，且 CA/超时口径与客户端一致。
+            com.hubmobile.app.Http.Response r = com.hubmobile.app.Http.requestBytes(
+                    m, API + apiPath,
+                    (body == null || body.isEmpty()) ? null : body.getBytes("UTF-8"),
+                    headers(c));
+            String text = r.body == null ? "" : r.body;
             JSONObject out = new JSONObject();
-            out.put("ok", code >= 200 && code < 300).put("status", code);
-            // 有些 404/403 的 body 不是 JSON，包一层免得前端 parse 炸
+            out.put("ok", r.code >= 200 && r.code < 300).put("status", r.code);
             try { out.put("data", new JSONObject(text)); }
             catch (Throwable t) {
                 try { out.put("data", new JSONArray(text)); }
@@ -136,15 +144,12 @@ public final class GhBridge {
             return out.toString();
         } catch (Throwable t) {
             return err("GitHub 请求失败：" + t.getMessage());
-        } finally {
-            if (conn != null) try { conn.disconnect(); } catch (Throwable ignored) {}
         }
     }
 
     /** 当前令牌能看到的仓库（含私有），供工作区选择器列清单。 */
     public static String repos(Context c) {
-        if (!enabled(c)) return err("AI 辅助 githup 未开启");
-        if (token(c).isEmpty()) return err("还没有 GitHub 令牌，请先在 githup 登录");
+        if (!enabled(c)) return err("还没有 GitHub 令牌，请先在 githup 登录");
         String raw = proxy(c, "GET",
                 "/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member", null);
         try {
@@ -200,7 +205,8 @@ public final class GhBridge {
                     .put("ready", ready)
                     .put("files", files)
                     .put("bridge", "http://127.0.0.1:3081/gh/api/")
-                    .put("readonly", true).toString();
+                    .put("readonly", false)
+                    .put("scope", "跟随登录令牌的全部权限").toString();
         } catch (Throwable t) {
             return err(String.valueOf(t.getMessage()));
         }
@@ -223,8 +229,7 @@ public final class GhBridge {
      * 重定向只跟随 GitHub 官方域，且只在 api.github.com 上带 Authorization。
      */
     public static String materialize(Context c, String fullName) {
-        if (!enabled(c)) return err("AI 辅助 githup 未开启");
-        if (token(c).isEmpty()) return err("还没有 GitHub 令牌");
+        if (!enabled(c)) return err("还没有 GitHub 令牌，请先在 githup 登录");
         if (fullName == null || !fullName.matches("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))
             return err("仓库名格式不对（应为 owner/repo）");
 
@@ -286,20 +291,8 @@ public final class GhBridge {
             z.close();
 
             // 给 AI 的说明书：告诉它这个目录是什么、怎么查 PR/Issue，以及令牌不在它手里
-            File guide = new File(dir, "GITHUP.md");
-            FileOutputStream g = new FileOutputStream(guide);
-            g.write(("# githup 工作区\n\n"
-                    + "本目录是 GitHub 仓库 `" + fullName + "` 的**只读镜像**，由 githup 客户端展开。\n\n"
-                    + "- 用你现有的 file / bash 工具直接读这里的代码即可。\n"
-                    + "- 需要 Issue、Pull Request、分支、提交等仓库元数据时，用 curl 访问：\n"
-                    + "  `http://127.0.0.1:3081/gh/api/repos/" + fullName + "/issues`\n"
-                    + "  `http://127.0.0.1:3081/gh/api/repos/" + fullName + "/pulls`\n"
-                    + "  路径就是 GitHub REST API 去掉 `https://api.github.com` 之后的部分。\n"
-                    + "- 这条通道**只读**：GET 之外的请求会被拒绝。\n"
-                    + "- GitHub 令牌由 githup 客户端保管在设备 Keystore 里，**不在本目录、"
-                    + "也不在你的环境变量中**，不要尝试寻找或输出它。\n"
-                    + "- 镜像是快照，不会自动同步；要刷新请在设置里重新选择工作区。\n"
-            ).getBytes("UTF-8"));
+            FileOutputStream g = new FileOutputStream(new File(dir, "GITHUP.md"));
+            g.write(GhBridgeDocs.repoText(c, fullName).getBytes("UTF-8"));
             g.close();
 
             setCurrent(c, fullName);
