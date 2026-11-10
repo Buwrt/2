@@ -150,7 +150,7 @@ public class MainActivity extends Activity {
          * 点右下角球展开就能和 AI 对话，收起继续逛仓库，不跳 Activity、不换返回栈。 */
         try {
             aiPanel = AiPanel.attach(this, contentRoot);
-            /* 阶段 Q：按设置页开关初始化悬浮球显隐（默认开）。 */
+            /* 阶段 R：按设置页开关初始化悬浮球显隐（**默认隐藏**）。引擎已在上面无条件后台启动，与此处无关。 */
             if (aiPanel != null)
                 aiPanel.setBubbleEnabled(
                         com.hubmobile.app.harness.GhBridge.ballOn(this));

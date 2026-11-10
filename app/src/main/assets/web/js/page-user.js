@@ -1503,6 +1503,9 @@ var ed = UI.$('#edit', host);
             || window.I18n.t('未登录 · AI 无法访问 GitHub'),
           'aiGithub',
           !!(window.NativeBridge && window.NativeBridge.aiGithubEnabled && window.NativeBridge.aiGithubEnabled())) +
+        /* 阶段 R：真实连通自检 —— 用户能亲手确认 AI 到底看不看得到、改不改得动 */
+        setItem('chart', window.I18n.t('GitHub 连通自检'),
+          window.I18n.t('点一下，实测令牌能读/写哪些仓库'), 'ghSelfTest') +
         setItem('typography', L('settings.codeFont'), (s.codeFont || 13) + 'px', 'font') +
         setItem('device-desktop', window.I18n.t('设备类型'), window.App.deviceSummary(), 'device') +
         setItem('home', L('settings.startTab'), { home: L('settings.startTab.home'), notifications: L('settings.startTab.notifications'), explore: L('settings.startTab.explore'), profile: L('settings.startTab.profile') }[s.startTab], 'start') +
@@ -1622,8 +1625,36 @@ var ed = UI.$('#edit', host);
             window.NativeBridge.setAiGithubEnabled(next);
             UI.toast(next
               ? window.I18n.t('已显示 AI 悬浮球，可拖动；点开即可和 AI 对话')
-              : window.I18n.t('已隐藏 AI 悬浮球；GitHub 权限仍跟随登录令牌'));
+              : window.I18n.t('已隐藏 AI 悬浮球；引擎仍在后台运行，GitHub 权限仍跟随登录令牌'));
             window.Router.reload();
+            return;
+          }
+          /* 阶段 R：拿当前登录令牌真打一次 GitHub REST，把结果摆给用户看 */
+          if (k === 'ghSelfTest') {
+            if (!window.NativeBridge || !window.NativeBridge.aiGithubSelfTest)
+              return UI.toast(window.I18n.t('当前版本不支持'));
+            UI.toast(window.I18n.t('正在实测 GitHub 连通与权限…'));
+            try {
+              var raw = window.NativeBridge.aiGithubSelfTest();
+              var r = JSON.parse(raw || '{}');
+              if (!r.ok) return UI.toast(window.I18n.t('自检失败：') + (r.error || r.status || '未知'));
+              var lines = [
+                window.I18n.t('可见仓库') + '：' + r.repos + '（' + window.I18n.t('私有') + ' ' + r.private + '）',
+                window.I18n.t('可写仓库') + '：' + r.writable,
+                window.I18n.t('读取') + '：' + (r.can_read ? '✓' : '✗') + '   ' +
+                  window.I18n.t('改写') + '：' + (r.can_write ? '✓' : '✗') + '   ' +
+                  window.I18n.t('删库权限') + '：' + (r.can_delete ? '✓' : '✗'),
+                'scopes：' + (r.scopes || '(无)'),
+                '',
+                window.I18n.t('本次只发 GET，没有改动任何仓库。AI 经 127.0.0.1:3081 的本机代理拥有同样权限，令牌不离开设备。')
+              ].join('\n');
+              UI.sheet({
+                title: window.I18n.t('GitHub 连通自检') + ' · ' + (r.login || ''),
+                body: '<div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:var(--fg-muted)">' +
+                  U.esc(lines) + '</div>',
+                foot: '<button class="btn primary" data-close="1">' + window.I18n.t('知道了') + '</button>'
+              });
+            } catch (e) { UI.toast(window.I18n.t('自检结果解析失败')); }
             return;
           }
           if (k === 'font') UI.choose(L('settings.codeFont'), [

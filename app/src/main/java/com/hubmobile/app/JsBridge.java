@@ -8115,7 +8115,7 @@ public class JsBridge {
     @JavascriptInterface
     public boolean aiGithubEnabled() {
         try { return com.hubmobile.app.harness.GhBridge.ballOn(activity); }
-        catch (Throwable t) { return true; }
+        catch (Throwable t) { return false; }
     }
 
     @JavascriptInterface
@@ -8153,6 +8153,13 @@ public class JsBridge {
     public String aiGithubWorkspace() {
         try { return com.hubmobile.app.harness.GhBridge.workspaceState(activity); }
         catch (Throwable t) { return "{}"; }
+    }
+
+    /** 阶段 R：真实连通自检结果（JSON 字符串），设置页点了就弹结果。 */
+    @JavascriptInterface
+    public String aiGithubSelfTest() {
+        try { return com.hubmobile.app.harness.GhBridge.selfTest(activity); }
+        catch (Throwable t) { return "{\"ok\":false,\"error\":\"" + t.getMessage() + "\"}"; }
     }
 
     /** 设置页副标题：悬浮球状态 + 登录态 + 权限口径。 */

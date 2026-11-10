@@ -55,7 +55,8 @@ public final class GhBridge {
     public static final String API = "https://api.github.com";
     private static final String PREF = "dsh_prefs";
     private static final String KEY_ON = "ai_github_on";   // 旧 key，保留兼容读取
-    private static final String KEY_BALL = "ai_ball_on";   // 阶段 Q：悬浮球显隐
+    // 阶段 R：换新 key，让「默认关闭」对覆盖安装也生效（旧 key 曾被默认开写过）。
+    private static final String KEY_BALL = "ai_ball_v2";   // 可移动 AI 悬浮球显隐
     private static final String KEY_WS = "gh_workspace";
 
     private static final long MAX_ZIP = 60L * 1024 * 1024;
@@ -71,12 +72,15 @@ public final class GhBridge {
     // ==================== 可移动 AI 悬浮球开关（阶段 Q）====================
 
     /**
-     * 悬浮球是否显示。默认开 —— 用户一直有这颗球，装完不该突然消失。
-     * 用新 key：旧 ai_github_on 曾是「授权总闸」（默认 false），若沿用会让
-     * 老用户升级后球默认隐藏，反而又是一次「开关不见了」。
+     * 悬浮球是否显示。**默认关闭** —— 用户明确要求：这颗可拖动的 AI 球
+     * 由设置页开关决定，装完不该自己冒出来。
+     *
+     * 注意「默认关」只管 UI 入口：引擎仍会在点开 App 后无条件后台完整启动
+     * （AiPanel 构造里的 postDelayed(startEngine, 700) 与本开关无关），
+     * GitHub 代理也仍只看登录令牌。关球 ≠ 关引擎、≠ 关权限。
      */
     public static boolean ballOn(Context c) {
-        return prefs(c).getBoolean(KEY_BALL, true);
+        return prefs(c).getBoolean(KEY_BALL, false);
     }
 
     public static void setBallOn(Context c, boolean on) {
@@ -96,7 +100,7 @@ public final class GhBridge {
 
     /** 设置页副标题：球状态 + 登录态 + 权限口径，一眼看全。 */
     public static String status(Context c) {
-        String ball = ballOn(c) ? "悬浮球已开启" : "悬浮球已隐藏";
+        String ball = ballOn(c) ? "悬浮球已显示" : "悬浮球已隐藏（默认）";
         String t = token(c);
         if (t.isEmpty()) return ball + " · 未登录 · AI 无法访问 GitHub";
         String login = SecurePrefs.get(c, "gh_current", "");
@@ -195,6 +199,60 @@ public final class GhBridge {
             return new JSONObject().put("ok", true).put("repos", out).toString();
         } catch (Throwable t) {
             return err("解析仓库列表失败：" + t.getMessage());
+        }
+    }
+
+    /**
+     * 阶段 R：真实连通自检。用户问「DSH 真的能查到、能改我的库吗」——
+     * 不靠口头保证，直接拿当前登录令牌打一次 GitHub REST，把结果摆出来。
+     *
+     * 全程只读（GET /user、GET /user/repos），不会改动任何仓库；
+     * 写权限由响应头 X-OAuth-Scopes 里的 repo / delete_repo 等 scope 判定。
+     */
+    public static String selfTest(Context c) {
+        if (!enabled(c)) return err("还没有 GitHub 令牌：请先在 githup 里登录或粘贴令牌");
+        try {
+            Map<String, String> h = headers(c);
+            com.hubmobile.app.Http.Response me =
+                    com.hubmobile.app.Http.requestBytes("GET", API + "/user", null, h);
+            JSONObject o = new JSONObject();
+            o.put("ok", me.code >= 200 && me.code < 300).put("status", me.code);
+            String scopes = "";
+            try {
+                JSONObject hs = new JSONObject(me.headers == null ? "{}" : me.headers);
+                java.util.Iterator<String> it = hs.keys();
+                while (it.hasNext()) {
+                    String k = it.next();
+                    if (k.equalsIgnoreCase("X-OAuth-Scopes")) { scopes = hs.optString(k, ""); break; }
+                }
+            } catch (Throwable ignored) {}
+            String login = "";
+            try { login = new JSONObject(me.body).optString("login", ""); } catch (Throwable ignored) {}
+            o.put("login", login);
+            o.put("scopes", scopes);
+
+            com.hubmobile.app.Http.Response rs = com.hubmobile.app.Http.requestBytes("GET",
+                    API + "/user/repos?per_page=100&affiliation=owner,collaborator,organization_member", null, h);
+            int pub = 0, priv = 0, writable = 0;
+            try {
+                JSONArray arr = new JSONArray(rs.body);
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject r = arr.getJSONObject(i);
+                    if (r.optBoolean("private")) priv++; else pub++;
+                    JSONObject p = r.optJSONObject("permissions");
+                    if (p != null && (p.optBoolean("push") || p.optBoolean("admin")
+                            || p.optBoolean("maintain"))) writable++;
+                }
+            } catch (Throwable ignored) {}
+            o.put("repos", pub + priv).put("private", priv).put("writable", writable);
+            o.put("can_read", me.code >= 200 && me.code < 300);
+            o.put("can_write", scopes.contains("repo") || scopes.contains("public_repo")
+                    || writable > 0);
+            o.put("can_delete", scopes.contains("delete_repo"));
+            o.put("note", "令牌未离开设备；本自检只发 GET，没有改动任何仓库");
+            return o.toString();
+        } catch (Throwable t) {
+            return err("自检失败：" + t.getMessage());
         }
     }
 
@@ -319,9 +377,12 @@ public final class GhBridge {
             z.close();
 
             // 给 AI 的说明书：告诉它这个目录是什么、怎么查 PR/Issue，以及令牌不在它手里
-            FileOutputStream g = new FileOutputStream(new File(dir, "GITHUP.md"));
-            g.write(GhBridgeDocs.repoText(c, fullName).getBytes("UTF-8"));
-            g.close();
+            String doc = GhBridgeDocs.repoText(c, fullName);
+            for (String fn : new String[]{"AGENTS.md", "CLAUDE.md", "GITHUP.md", "README.md"}) {
+                FileOutputStream g = new FileOutputStream(new File(dir, fn));
+                g.write(doc.getBytes("UTF-8"));
+                g.close();
+            }
 
             setCurrent(c, fullName);
             return new JSONObject().put("ok", true)

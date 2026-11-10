@@ -992,3 +992,86 @@ edge-to-edge（`LAYOUT_FULLSCREEN`），所以面板顶部到 y=0，38dp 的品�
 - 球隐藏后，从系统分享 / `open_ai` 显式拉起仍可展开面板（显式意图优先）
 - 未真机验证状态栏高度在挖孔屏 / 分屏下的取值；已验证 Java 结构、JS 语法、
   Manifest、包身份、签名与防护链自洽
+
+
+---
+
+## 二十一、阶段 R：默认关悬浮球、白屏/放大修复、GitHub 能力可自检
+
+> 第二十章（阶段 Q）已把开关从「授权总闸」改回「悬浮球显隐」并修了缩放，
+> 但**默认仍是开**，且那一版没有进用户手上的安装包。本章按真机截图收口。
+
+### 用户这轮的四句话
+
+1. 「AI 辅助 githup 为什么没有开关了呢，**这个开关是决定是否出现可移动的 AI 悬浮窗的**」
+2. 「第一张图片的大小不合适，用户把这个界面放大就缩不小了，**默认是关闭**」
+3. 「真的 DSH 可以查看得到 github 里面的东西吗，和改写用户的库」
+4. 「但还是**用户点击软件之后自动启动完整引擎**」
+
+### ① 开关归位 + 默认关闭
+
+| 概念 | 由什么决定 |
+|---|---|
+| 可移动 AI 悬浮球显隐 | **设置页开关**，默认**关闭** |
+| GitHub 读/写权限 | **当前登录令牌**（阶段 O 口径，不变） |
+| 完整引擎是否启动 | **点开 App 就无条件启动**，与上面两者都无关 |
+
+- `GhBridge.KEY_BALL` 换成 `ai_ball_v2`，`ballOn()` 默认 `false`。
+  换新 key 是为了让「默认关」对覆盖安装也生效（旧 key 曾被默认开写过）
+- `JsBridge.aiGithubEnabled()` 异常兜底由 `true` 改 `false`；
+  切完立即 `MainActivity.applyAiBall()` 生效
+- 设置页恢复 `switchItem`，副标题由 `status()` 给出：
+  「悬浮球已隐藏（默认） · 已登录 Buwrt · ghp_4w… · 权限跟随此令牌」
+- `AiPanel.ballEnabled` 字段默认 `false`
+
+### ② 第一张图：整屏白 + 顶部文字糊成一排 + 放大缩不小
+
+| 现象 | 修法 |
+|---|---|
+| 放大后缩不回去 | `configure()` 禁三档缩放；品牌条把 ⤾ 换成醒目的「**复位**」文字按钮；`expand()` 每次自动 `setInitialScale(100)`；全屏切换也顺手复位 |
+| 顶部一排糊字 | `panelLp()` 全屏时把高度扣掉 `statusBarHeight()`、底部对齐，整个面板从状态栏下方开始；`applyBarInsets()` 不再给 bar 叠 padding，避免双重留白 |
+| 整屏白 | 新增 `WebViewClient.onReceivedError / onReceivedHttpError` → `showPageError()`：亮出装载卡、写明原因、给「重新加载 AI 界面」按钮 |
+
+球默认隐藏后用户本来不会误进这个界面；但引擎与 WebView 仍照常准备，
+在设置里打开开关后，点开就是已就绪的 AI 面板。
+
+### ③ 完整引擎无条件启动（硬约束）
+
+`AiPanel` 构造里 `ui.postDelayed(startEngine, 700)` 在**球显隐判定之前**；
+`showWeb()` 无论面板是否收起都会创建 WebView、加载 DSH 首页、
+调 `EngineService.keepAlive()`。
+
+> 关球 ≠ 关引擎、≠ 关 GitHub 权限。注释已写进代码，防止后续再被误删。
+
+### ④ 「DSH 真的能读到 / 改到我的库吗」—— 给可验证的答案
+
+**a. 设置页新增「GitHub 连通自检」**（`GhBridge.selfTest()` + `/gh/selftest`）
+真打一次 `GET /user`、`GET /user/repos`，返回登录用户、可见仓库数、私有库数、
+可写仓库数、`X-OAuth-Scopes`、`can_read / can_write / can_delete`。
+**自检只发 GET，不改任何仓库**。
+
+**b. AI 侧自动感知再加固**：`GhBridgeDocs.install()` 除 `GITHUP.md` /
+`README.md` 外，再写 `AGENTS.md` / `CLAUDE.md` 到工作区根与 `$DSH_HOME`；
+选中仓库的镜像目录同样写这四份。`DSH_WORKSPACE` 指向工作区。
+`/gh/help` 加入 `selftest` 端点说明。
+
+**实测（2026-11-11，用当前登录令牌，只读）**：
+
+- 登录用户 `Buwrt`
+- `X-OAuth-Scopes`：`repo, delete_repo, workflow, admin:org, admin:repo_hook,
+  admin:public_key, admin:ssh_signing_key, gist, notifications, project, user,
+  codespace, copilot, audit_log, write:discussion, write:packages, …`
+- 可见仓库 **19 个**，其中**私有 2 个**
+- `Buwrt/2` 的 `permissions`：`admin / maintain / push / triage / pull` 全 true
+
+结论：**能读（含私有库），能改（push/admin），甚至能删库（delete_repo）**。
+DSH 经 `127.0.0.1:3081/gh/api/...` 拿到的就是同一份能力，令牌不出设备。
+
+### 风险（如实）
+
+- 这个 token **权限过大**（含 `delete_repo` / `admin:org`），且明文出现在对话里。
+  强烈建议撤销并换 fine-grained、只授所需仓库的最小权限
+- AI 是否「主动」调代理仍取决于它读不读工作区说明；已多铺几路，
+  但未真机验证模型行为
+- 写操作链路未真机验证；已验证 Java 结构、JS 语法、Manifest、包身份、
+  签名与防护链自洽

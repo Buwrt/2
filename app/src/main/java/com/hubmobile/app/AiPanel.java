@@ -20,7 +20,9 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -83,6 +85,7 @@ public final class AiPanel {
     private TextView dialogue;
     private TextView meta;
     private TextView err;
+    private TextView retryTag;
     private LinearLayout bar;
     private TextView fullBtn;
     private DraftInputBridge draftInput;
@@ -90,8 +93,8 @@ public final class AiPanel {
     private volatile boolean trustedDoc = false;
     private boolean expanded = false;
     private boolean fullHeight = false;
-    /** 阶段 Q：设置页开关控制的可移动悬浮球显隐。默认开。 */
-    private boolean ballEnabled = true;
+    /** 阶段 R：设置页开关控制的可移动悬浮球显隐，**默认隐藏**。 */
+    private boolean ballEnabled = false;阶段 R：默认不显示，由设置页开关决定
     private boolean webReady = false;
     private boolean destroyed = false;
     private long totalEntries = 41426L, lastEntries = 0, lastWritten = 0;
@@ -115,7 +118,10 @@ public final class AiPanel {
         act = a;
         root = contentRoot;
 
-        // 1) 本地桥 + 引擎：后台静默启动，绝不阻塞 GitHub 首屏
+        /* 1) 本地桥 + 完整引擎：点开 App 后**无条件**后台启动。
+           这一行与悬浮球开关完全无关 —— 球默认隐藏时引擎照样解压、起 node、
+           建 WebView、加载 DSH 首页；开关只管「有没有那个可拖动的入口」。 */
+        // 本地桥 + 引擎：后台静默启动，绝不阻塞 GitHub 首屏
         try { LocalBridgeServer.start(a.getApplicationContext()); } catch (Throwable ignored) {}
         try { NfcStore.init(a.getApplicationContext()); } catch (Throwable ignored) {}
         nfcAdapter = NfcAdapter.getDefaultAdapter(a);
@@ -132,7 +138,7 @@ public final class AiPanel {
         panel = buildPanel();
         root.addView(panel, panelLp());
 
-        // 3) 右下角可移动悬浮球（显隐由设置页开关决定）
+        // 3) 右下角可移动悬浮球（显隐由设置页开关决定，**默认隐藏**）
         bubble = buildBubble();
         root.addView(bubble, bubbleLp());
         makeDraggable(bubble);
@@ -163,13 +169,18 @@ public final class AiPanel {
         return dp(24);
     }
 
+    /**
+     * 阶段 R：全屏时整个面板从「状态栏下方」开始，而不是只给品牌条加 padding。
+     * 之前只抬 bar，底座 SPA 顶栏 / 系统时间 / AI 品牌条会挤在同一行叠成一团，
+     * 再加上面板顶到 y=0 的 edge-to-edge，看起来就是「一排糊掉的字 + 整屏白」。
+     * 现在 panelLp() 在全屏时把高度扣掉状态栏，bar 的 padding 归 0，不双重留白。
+     */
     private void applyBarInsets() {
         if (bar == null) return;
-        int top = fullHeight ? statusBarHeight() : 0;
-        bar.setPadding(dp(12), top, dp(8), 0);
+        bar.setPadding(dp(12), 0, dp(8), 0);
         try {
             LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) bar.getLayoutParams();
-            lp.height = dp(38) + top;
+            lp.height = dp(38);
             bar.setLayoutParams(lp);
         } catch (Throwable ignored) {}
     }
@@ -183,9 +194,15 @@ public final class AiPanel {
     }
 
     private FrameLayout.LayoutParams panelLp() {
-        int h = fullHeight ? ViewGroup.LayoutParams.MATCH_PARENT
-                : (int) (root.getHeight() * 0.68f);
-        if (h <= 0) h = ViewGroup.LayoutParams.MATCH_PARENT;
+        int avail = root.getHeight();
+        int h;
+        if (fullHeight) {
+            /* 全屏但**不顶到状态栏**：底部对齐，顶部让出状态栏高度。 */
+            h = avail > 0 ? Math.max(dp(200), avail - statusBarHeight())
+                          : ViewGroup.LayoutParams.MATCH_PARENT;
+        } else {
+            h = avail > 0 ? (int) (avail * 0.68f) : ViewGroup.LayoutParams.MATCH_PARENT;
+        }
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, h, Gravity.BOTTOM);
         return lp;
@@ -245,9 +262,10 @@ public final class AiPanel {
            现在原生层禁掉手势缩放（见 configure()），这里再给一个明确入口，
            把初始比例和页面一起复位，用户随时能一键回到正常大小。 */
         TextView resetBtn = new TextView(act);
-        resetBtn.setText("⤾");
+        resetBtn.setText("复位");
         resetBtn.setTextColor(MUTED);
-        resetBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        resetBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        resetBtn.setTypeface(Typeface.DEFAULT_BOLD);
         resetBtn.setPadding(dp(8), dp(4), dp(6), dp(4));
         resetBtn.setContentDescription("恢复界面大小");
         resetBtn.setOnClickListener(new View.OnClickListener() {
@@ -312,6 +330,30 @@ public final class AiPanel {
         err.setPadding(0, dp(12), 0, 0);
         err.setVisibility(View.GONE);
         lc.addView(err);
+        /* 阶段 R：白屏兜底。引擎起来了但 WebView 加载失败时，不能只剩一片白 ——
+           给一个明确的重试入口，把 loading 卡重新亮出来。 */
+        final TextView retry = new TextView(act);
+        retry.setText("重新加载 AI 界面");
+        retry.setTextColor(ACCENT);
+        retry.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        retry.setTypeface(Typeface.DEFAULT_BOLD);
+        retry.setPadding(0, dp(14), 0, 0);
+        retry.setVisibility(View.GONE);
+        retry.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                retry.setVisibility(View.GONE);
+                err.setVisibility(View.GONE);
+                if (web != null) {
+                    try { web.setInitialScale(100); } catch (Throwable ignored) {}
+                    try { if (readyUrl != null) web.loadUrl(readyUrl); else web.reload(); }
+                    catch (Throwable ignored) {}
+                } else {
+                    startEngine();
+                }
+            }
+        });
+        lc.addView(retry);
+        retryTag = retry;
         loading.addView(lc, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER_HORIZONTAL | Gravity.TOP));
@@ -401,6 +443,9 @@ public final class AiPanel {
 
     public void expand() {
         if (destroyed) return;
+        /* 每次打开都把视口比例拉回 100%，避免上一次被放大/全屏的状态带过来，
+           用户再也不会「放大之后缩不小」。configure() 里也已禁掉手势缩放。 */
+        if (web != null) try { web.setInitialScale(100); } catch (Throwable ignored) {}
         expanded = true;
         panel.setVisibility(View.VISIBLE);
         panel.setLayoutParams(panelLp());
@@ -557,8 +602,38 @@ public final class AiPanel {
                 trustedDoc = isEngineUrl(r.getUrl().toString());
                 return false;
             }
+            /* 阶段 R：引擎起来了但页面没出来时，别留一片白屏。把装载卡重新亮出来，
+               写明原因 + 「重新加载」按钮。用户不会再对着全白界面以为卡死。 */
+            @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
+                if (r != null && r.isForMainFrame()) {
+                    String d = e == null ? "" : String.valueOf(e.getDescription());
+                    showPageError("页面加载失败：" + d);
+                }
+            }
+            @Override public void onReceivedHttpError(WebView v, WebResourceRequest r,
+                                                      WebResourceResponse er) {
+                if (r != null && r.isForMainFrame() && er != null)
+                    showPageError("引擎返回 HTTP " + er.getStatusCode());
+            }
         });
         w.setWebChromeClient(new WebChromeClient());
+    }
+
+    /** 白屏兜底：把装载卡亮出来、Web 容器收起、显示错误与重试入口。 */
+    private void showPageError(final String msg) {
+        ui.post(new Runnable() {
+            @Override public void run() {
+                if (destroyed) return;
+                try {
+                    FrameLayout holder = (FrameLayout) panel.getTag();
+                    if (holder != null) holder.setVisibility(View.GONE);
+                } catch (Throwable ignored) {}
+                if (loading != null) loading.setVisibility(View.VISIBLE);
+                if (err != null) { err.setText(msg); err.setVisibility(View.VISIBLE); }
+                if (retryTag != null) retryTag.setVisibility(View.VISIBLE);
+                if (meta != null) meta.setText("界面未就绪 · 引擎仍在后台运行");
+            }
+        });
     }
 
     private static boolean isEngineUrl(String url) {

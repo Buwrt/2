@@ -16,7 +16,8 @@ import java.nio.charset.StandardCharsets;
  *
  * 这里做两件纯粹在 App 侧、零依赖的事：
  *
- *  ① 引擎启动前，在 AI 的默认工作区根目录写一份 GITHUP.md。
+ *  ① 引擎启动前，在 AI 的默认工作区根目录写 AGENTS.md / CLAUDE.md /
+ *     GITHUP.md / README.md（这些是 DSH 会自动读的项目指令/说明文件名）。
  *     没选仓库时 DSH_WORKSPACE 就指向这个目录 —— bash / file 工具的 cwd
  *     一进来就是它，ls 就能看到；选了仓库时该仓库镜像里另有一份。
  *  ② 提供 workspaceFor()，由 HarnessBridge 设置 DSH_WORKSPACE。
@@ -36,10 +37,15 @@ public final class GhBridgeDocs {
         try {
             File root = GhBridge.workspaceRoot(c);
             if (!root.exists() && !root.mkdirs()) return;
-            write(new File(root, "GITHUP.md"), text(c, null));
-            write(new File(root, "README.md"), text(c, null));   // 双保险，AI 常读 README
+            String doc = text(c, null);
+            write(new File(root, "AGENTS.md"), doc);   // DSH/Codex 约定：项目指令自动读
+            write(new File(root, "CLAUDE.md"), doc);   // Claude 风格约定，双保险
+            write(new File(root, "GITHUP.md"), doc);
+            write(new File(root, "README.md"), doc);   // AI 常读 README
             File dshHome = new File(c.getFilesDir(), "payload/dshhome");
-            write(new File(dshHome, "GITHUP-BRIDGE.md"), text(c, null));
+            write(new File(dshHome, "AGENTS.md"), doc);
+            write(new File(dshHome, "CLAUDE.md"), doc);
+            write(new File(dshHome, "GITHUP-BRIDGE.md"), doc);
             Log.i(TAG, "docs installed at " + root.getAbsolutePath());
         } catch (Throwable t) {
             Log.w(TAG, "install failed", t);

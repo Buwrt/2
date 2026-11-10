@@ -918,6 +918,7 @@ public final class LocalBridgeServer {
             return "{\"ok\":false,\"error\":\"还没有 GitHub 令牌：请先在 githup 里登录或粘贴令牌\"}";
         try {
             if (path.equals("/gh/help")) return ghHelp();
+            if (path.equals("/gh/selftest")) return GhBridge.selfTest(app);
             if (path.equals("/gh/repos")) return GhBridge.repos(app);
 
             if (path.equals("/gh/workspace")) {
@@ -949,6 +950,7 @@ public final class LocalBridgeServer {
                 + "\"scope\":\"你的权限 = githup 当前登录令牌的权限（含私有库与写操作）\","
                 + "\"important\":\"不要检查 gh CLI / GITHUB_TOKEN / GH_TOKEN / hosts.yml —— 它们本来就不存在，直接调用下面的通道即可\","
                 + "\"endpoints\":["
+                + "{\"path\":\"/gh/selftest\",\"method\":\"GET\",\"desc\":\"真实连通自检：返回登录用户、可见仓库数、私有库数、可写仓库数与令牌 scopes\"},"
                 + "{\"path\":\"/gh/repos\",\"method\":\"GET\",\"desc\":\"列出当前账号可见的全部仓库（含私有库）\"},"
                 + "{\"path\":\"/gh/workspace\",\"method\":\"GET\",\"desc\":\"当前 AI 工作区状态与本地路径\"},"
                 + "{\"path\":\"/gh/workspace\",\"method\":\"POST\",\"body\":{\"repo\":\"owner/name\"},\"desc\":\"把仓库展开成工作区镜像\"},"
