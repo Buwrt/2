@@ -143,6 +143,8 @@ public class MainActivity extends Activity {
 
         /* 上次如果崩过，把记录亮出来。
          * 放在最后：启动流程都走完了才提示，免得和首屏抢注意力。 */
+        /* 阶段 Y：让 3081 桥能反向操作本软件的 WebView（AI 真正辅助本体）。 */
+        com.hubmobile.app.harness.UiBridge.bind(this);
         reportLastCrash();
 
         /* 阶段 L：桌面只留这一个 Activity。AI 以常驻面板叠在 contentRoot 上，
@@ -890,8 +892,16 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         if (aiPanel != null) { aiPanel.onDestroy(); aiPanel = null; }
+        com.hubmobile.app.harness.UiBridge.unbind(this);
         super.onDestroy();
     }
+
+    /**
+     * 阶段 Y：把**底座** WebView 精确交给 /app/ui 桥。
+     * 不能靠遍历 contentRoot 找 WebView —— AI 面板自己也有一个，
+     * 遍历顺序一变就会把动作打到 AI 聊天页上。
+     */
+    public android.webkit.WebView hostWebView() { return webView; }
 
     /** 设置页开关切换时即时生效，不用重启 App。 */
     public void applyAiBall(boolean on) {

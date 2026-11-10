@@ -1679,6 +1679,7 @@ var ed = UI.$('#edit', host);
             }
             var msg = [
               window.I18n.t('开启后，AI 无需任何 Android 系统权限（不用无障碍、不用截图、不用悬浮窗），'),
+              window.I18n.t('就能看懂 githup 当前页面与屏幕上已渲染的内容，并可替你导航、Star、切换翻译、总结与修改代码，'),
               window.I18n.t('就能准确知道 githup 当前所在的页面、正在阅读的仓库，并可总结、修改代码，'),
               window.I18n.t('再把修改后的内容以「相同名称」的仓库上传到你当前登录的 GitHub 账号。'),
               '',

@@ -1655,3 +1655,131 @@ content:[{type:'text',text}] }` 追加到 `decision.messages`。
 - `consent:false` 时不装插件、不注入、不预抓
 - 未真机跑完整加载链路；已验证 Java 结构、JS 语法、插件 `node --check`、
   package.json、Manifest、包身份、签名与防护链自洽
+
+
+---
+
+## 二十八、阶段 Y：为什么「根本没真正彻底辅助我的软件」
+
+### 用户口径
+
+> 「我感觉 DeepSeek agent 根本就没有真正的彻底辅助我的软件」，并要求把
+> **修改后完整源码 + APK** 上传到 Buwrt/2。
+
+前面十轮都在做「把仓库数据/路由喂给 AI」。这一轮核查后发现三个确凿硬伤，
+每一个单独都能让用户觉得「AI 没辅助」：
+
+### 根因 ①：插件大概率压根没被引擎加载（最硬的 bug）
+
+核查 payload 内 `dshhome/cordis.patch.yml`：所有 `- insert:` 条目
+（`memory-ui` / `user-profile-ui` / `another-me` / `neuron-hub` / `tool-gate` /
+`self-card` …）**全部写在根 `dshhome/cordis.patch.yml`**（L114、L266–291）。
+而 `dshhome/profiles/web/cordis.patch.yml` 只有 2 条 `config` 覆盖
+（welcomeNoticeVersion / busyEnter），没有一条 insert。
+
+阶段 X 的 `GithupContextPlugin.apply()` 偏偏只把
+`- insert: githup-context` 写进了 **`profiles/web/cordis.patch.yml`**。
+那是「用户层 config 覆盖」，插件极可能从未进入 loader 树 ——
+于是「每轮自动注入」从来没发生过，模型继续按老习惯探测环境、烧 token。
+
+**修**：两处都写（根 patch + 用户层 patch），幂等 BEGIN/END 块互不干扰；
+插件文件同时放到 `profiles/web/node_modules/` 与 `$DSH_HOME/node_modules/`
+（防模块解析基准不同）。
+
+### 根因 ②：consent 藏在一个用户根本不会去开的第二个开关里
+
+阶段 V 加了「AI 感知与克隆」开关，**默认关**。但用户早已打开的是
+「AI 辅助 githup」（悬浮球开关，见用户截图 17 的绿色开关）——
+两件事名字像、语义完全不同。用户以为开了就有 AI 辅助，实际：
+
+- `AppContext.consent()` = false → `/app/context` 返回 `page:null`
+- `GithupContextPlugin.apply()` 里 `on=false` → 插件不装
+- AI 面板仓库卡显示「点右侧开启感知」
+- 于是「AI 完全不认得当前库、也不辅助」
+
+更糟的是：用户第一次点开 AI 球时**引擎早已启动**，即使这时去设置页同意，
+插件也要重启引擎才能装上。
+
+**修**：
+- 插件改为**无条件常驻安装**；consent 只作为 `/app/*` 的**数据闸门**
+  （未同意时返回 `page:null` + 禁止编造的 hint，模型如实说明）
+- **第一次展开 AI 面板**就弹一次风险确认（同意 / 拒绝，文案按用户原话），
+  点同意后 `setConsent(true)` + 立刻补抓 RepoBrief，**下一轮注入即生效**，
+  不用重启引擎、不用再找第二个开关
+- 设置页开关保留为「撤销 / 重新同意」入口，副标题说明首次展开也会确认
+- 「AI 辅助 githup」开关语义不变（只管悬浮球显隐）
+
+### 根因 ③：只有单向通道，AI **不能操作软件本体**（「彻底辅助」的真正缺口）
+
+`LocalBridgeServer` 里 `MainActivity` / `runOnUiThread` / `evaluateJavascript`
+出现次数全是 **0**，`/app/ui` 也是 0。也就是说：
+
+- AI 读不到 githup WebView **当前已经渲染出来的内容**（Issue 正文、README、
+  文件列表、可见按钮、顶栏）——这些是 App 自己的 DOM，零系统权限就能读
+- AI **不能替用户操作软件**：不能导航、不能 Star、不能切 tab、不能翻译、不能返回
+- 它永远只是「旁边一个能聊 GitHub API 的窗口」
+
+**修：新增双向通道 `/app/ui/*`**
+
+新增 `UiBridge.java`：`UiBridge.bind(Activity)` 由 MainActivity 挂上，
+`eval(js)` 用 `CountDownLatch(2.5s)` 在**底座** WebView 同步执行受限 JS 并取回
+结果（精确用 `MainActivity.hostWebView()`，不遍历 contentRoot —— AI 面板自己
+也有 WebView，遍历会取错）；`toast(msg)` 给系统 toast + 底座 `UI.toast` 双回执。
+
+新增 `AppUi.java`：
+
+| 端点 | 作用 |
+|---|---|
+| `GET /app/ui/state` | 读当前屏幕渲染内容：hash / 标题 / 正文前 1400 字 / ≤18 个可见按钮 / 滚动位置 |
+| `GET /app/ui/help` | 全部可用动作清单 |
+| `POST /app/ui/act` | 白名单：`navigate` `open_repo` `search` `click` `star` `watch` `fork` `translate` `scroll` `refresh` `back` `theme` `copy` |
+
+动作全部走底座已有 `window.Router` / `window.API` / `window.UI` 与页面原有按钮
+（`#btn-star` 等），不绕过登录令牌；`arg` 过滤 `javascript:` / `data:` / `://` /
+换行 / 任意函数，长度 ≤200；每个动作给用户一条可见回执
+「AI 助手：已…」。闸门仍是 `AppContext.consent()`。
+
+`AppContext.shortBrief()` / `contextJson()` endpoints / `ghHelp` /
+`GhBridgeDocs.text()` / `$DSH_HOME/AGENTS.md` 同步写明这条通道，并明确
+「用户说帮我 Star / 切到 Issue / 翻译这页时**直接调 /app/ui/act**，
+不要只回一段文字让用户自己点」。
+
+### 根因 ④（附加）：仓库 README 与「完整源码」认知
+
+用户贴的仓库页面里 README 还是**原始 350KB 纯客户端**说明，Latest commit
+也停在旧快照，看起来像「改动根本没传上来」。实测本地 515 个受控文件 vs
+线上 515 个，只差 6 个（3 个历史 `.sha256`、2 个本轮新增 Java、
+1 个 `keystore/pass.txt`）。
+
+**修**：
+- 重写 `README.md`：包身份、首次使用、AI 双向能力表、底座功能、安全、
+  **合并版真实目录结构**、构建方式、边界
+- 推送时做**全量 blob SHA 对齐**，补齐缺失文件
+- `keystore/pass.txt` 是**明文签名口令**，故意不推到公开仓库（`.gitignore`
+  排除 `*.keystore`；CI 用 Secrets）。这是安全决定，不是遗漏
+- `version.json` 与 `apk/*.sha256` 由 CI 在发版时写，推送时跳过以免覆盖
+
+### 现在的行为
+
+1. 点开 githup → 引擎后台装载 → 插件常驻已装好
+2. 打开「AI 辅助 githup」→ 球出现 → **第一次点球**弹风险确认 → 同意
+3. 下一轮对话自动带着 ≤600 字符当前页面事实；逛到 `gbataille/gitHUD`
+   顶部卡片立刻认出来
+4. 「帮我 Star」→ 模型调 `POST /app/ui/act {"action":"star"}` →
+   底座 Star 按钮被点、toast「AI 助手：已切换 Star」→ **软件本体真的动了**
+5. 「切到 Issue」「翻译这页」「总结这个库」「改完传到我账号」同理
+
+### 验证与边界（如实）
+
+- 已验证：Java 结构、JS 语法、插件 `node --check`、Manifest、包身份、
+  签名、防护链与源码指纹自洽；仓库文件树全量对齐
+- **未真机验证**：cordis 是否真的把新 insert 条目加载进 loader 树、
+  `agent/pre-step` 注入是否生效、`evaluateJavascript` 取回的 DOM 摘要格式。
+  插件全链路 try/catch，加载失败也只是退回「卡片 + 一键带入」，不会崩引擎
+- `/app/ui/state` 读的是 WebView DOM 文本，**不是屏幕像素**；没有控件树、
+  不能点按系统界面。零权限指 Android 运行时权限
+- 动作白名单不含任意 JS 执行；`click` 只在 `#view` 与 `#appbar-actions`
+  内按可见文字匹配，找不到按钮会明确返回 `not found`
+- 总结 / 修改代码仍会把内容发到 DeepSeek 云端；令牌权限越大 AI 经代理
+  的能力越大，建议换 fine-grained 最小权限令牌
+- 上游 payload 为第三方二进制，再分发请确认许可

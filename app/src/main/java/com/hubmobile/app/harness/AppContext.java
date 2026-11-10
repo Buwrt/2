@@ -46,8 +46,8 @@ public final class AppContext {
     /** 设置页副标题。 */
     public static String status(Context c) {
         return consent(c)
-                ? "已同意 · AI 可零权限感知当前页面与仓库，并可建立同名库上传"
-                : "未开启 · AI 不会读取当前页面，也不会建立同名库";
+                ? "已同意 · AI 可零权限感知页面、读屏幕内容、替你操作软件并建同名库"
+                : "未开启 · 首次展开 AI 面板也会弹确认；同意后才有感知与操作能力";
     }
 
     /**
@@ -171,6 +171,9 @@ public final class AppContext {
                         .put("GET  /app/context     当前页面 / 当前仓库（零权限）")
                         .put("POST /app/clone-repo  把修改后的文件以同名仓库上传到当前登录账号")
                         .put("GET  /app/summary     当前仓库完整速览（含 README 摘要），按需取")
+                        .put("GET  /app/ui/state    读 githup 当前屏幕渲染的内容（零权限）")
+                        .put("POST /app/ui/act     直接替用户操作软件：导航/Star/点击/翻译/滚动…")
+                        .put("GET  /app/ui/help     全部可用动作清单")
                         .put("ANY  /gh/api/<path>   GitHub REST 全方法透传（读代码做总结）"));
                 o.put("warning", "总结或修改代码会把内容发到 DeepSeek 云端；"
                         + "建立同名仓库会用当前登录令牌调用 GitHub 写接口。此操作与作者无关。");
@@ -220,6 +223,8 @@ public final class AppContext {
         }
         b.append("这是 App 已查好的事实，**直接采用**。不要执行 gh CLI、不要检查环境变量、")
          .append("不要列全库或逐文件读（那些轮次会白烧 token）。\n")
+         .append("辅助软件本体：GET /app/ui/state 读当前屏幕渲染内容；")
+         .append("POST /app/ui/act 直接替用户导航/Star/切换翻译（清单 /app/ui/help）。\n")
          .append("需要总结/修改：先 curl 'http://127.0.0.1:3081/app/summary")
          .append(repo.isEmpty() ? "" : "?repo=" + repo)
          .append("' 拿完整速览；只有确实需要细节才读单个文件。");

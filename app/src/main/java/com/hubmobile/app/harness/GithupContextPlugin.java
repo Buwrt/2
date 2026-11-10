@@ -42,17 +42,26 @@ public final class GithupContextPlugin {
     /** 在 HarnessBridge 起 node 之前调用。任何异常都吞掉，绝不阻塞引擎。 */
     public static void apply(Context c, File dshHome) {
         try {
-            boolean on = AppContext.consent(c);
+            /* 阶段 Y 修正：插件**无条件安装**，不再以 consent 为闸门。
+               用户第一次点开 AI 面板时引擎早已启动，若那时才装插件就得重启
+               引擎才生效 —— 这正是「开了开关也没辅助」的隐藏坑。现在常驻，
+               未同意时 /app/context 只返回 consent:false 的 hint；用户一点
+               「同意」，下一轮立刻注入。 */
+            boolean on = true;
             File web = new File(dshHome, "profiles/web");
             File mods = new File(web, "node_modules/dsh-plugin-githup-context");
             File lib = new File(mods, "lib");
             if (!lib.exists() && !lib.mkdirs()) return;
-
-            if (on) {
-                writeAsset(c, "harness/githup-context-package.json", new File(mods, "package.json"));
-                writeAsset(c, "harness/githup-context-plugin.js", new File(lib, "index.js"));
-            } else {
-                /* 关掉时留着文件不碍事，但绝不 insert；下次开启会重写 */
+            writeAsset(c, "harness/githup-context-package.json", new File(mods, "package.json"));
+            writeAsset(c, "harness/githup-context-plugin.js", new File(lib, "index.js"));
+            /* 兜底：若 cordis 以 $DSH_HOME 为模块解析基准，再放一份到根 node_modules */
+            File mods2 = new File(dshHome, "node_modules/dsh-plugin-githup-context");
+            File lib2 = new File(mods2, "lib");
+            if (lib2.mkdirs() || lib2.isDirectory()) {
+                try {
+                    writeAsset(c, "harness/githup-context-package.json", new File(mods2, "package.json"));
+                    writeAsset(c, "harness/githup-context-plugin.js", new File(lib2, "index.js"));
+                } catch (Throwable ignored) {}
             }
 
             /* ② cordis.patch.yml —— 幂等块，照 AccountDefaultRoute 的写法 */
@@ -70,6 +79,26 @@ public final class GithupContextPlugin {
                         + E + "\n";
             }
             if (!next.equals(old)) write(patch, next);
+
+            /* ②b 阶段 Y 关键修复：**根** dshhome/cordis.patch.yml 才是上游
+               所有 - insert: 条目所在（memory-ui / neuron-hub / self-card …）。
+               上一轮只写 profiles/web/cordis.patch.yml（用户层 config 覆盖），
+               插件很可能压根没被引擎加载 —— 这是「根本没辅助」的硬伤。
+               现在两处都写，幂等 BEGIN/END 块互不干扰。 */
+            File rootPatch = new File(dshHome, "cordis.patch.yml");
+            String ro = read(rootPatch);
+            String rc = strip(ro, B, E);
+            String rn = rc;
+            if (on) {
+                if (!rn.endsWith("\n")) rn += "\n";
+                rn += "\n" + B + "\n"
+                        + "# githup：每轮自动注入当前页面，让 AI 真正辅助本软件。\n"
+                        + "- insert:\n"
+                        + "    - id: githup-context\n"
+                        + "      name: dsh-plugin-githup-context\n"
+                        + E + "\n";
+            }
+            if (!rn.equals(ro)) write(rootPatch, rn);
 
             /* ③ $DSH_HOME/AGENTS.md —— 追加，不覆盖记忆系统已有内容 */
             File agents = new File(dshHome, "AGENTS.md");

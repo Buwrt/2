@@ -927,6 +927,13 @@ public final class LocalBridgeServer {
     private String appRoute(String path, String query, String body, String method) {
         try {
             if (path.equals("/app/context")) return AppContext.contextJson(app);
+            if (path.equals("/app/ui/help")) return AppUi.help();
+            if (path.equals("/app/ui/state")) return AppUi.state(app);
+            if (path.equals("/app/ui/act")) {
+                if (!"POST".equalsIgnoreCase(method))
+                    return "{\"ok\":false,\"error\":\"请用 POST /app/ui/act\"}";
+                return AppUi.act(app, new org.json.JSONObject(body.isEmpty() ? "{}" : body));
+            }
             if (path.equals("/app/summary")) {
                 String repo = "";
                 for (String kv : query.split("&")) {
@@ -984,6 +991,7 @@ public final class LocalBridgeServer {
                 + "\"zero_permission_page\":\"GET /app/context 可零系统权限读到 githup 当前页面与仓库；须用户已在设置页同意\","
                 + "\"clone\":\"POST /app/clone-repo 把改好的文件以同名仓库上传到当前登录账号\","
                 + "\"cheap_summary\":\"GET /app/summary?repo=owner/name 一次拿元数据+README摘要（≤2KB），别逐文件读全库\","
+                + "\"assist_app\":\"GET /app/ui/state 读 githup 当前屏幕渲染内容；POST /app/ui/act 直接替用户操作软件（navigate/star/click/translate…），见 /app/ui/help\","
                 + "\"active_token\":\"由 /gh/selftest 的 token_head 字段给出当前生效令牌的前 6 位\","
                 + "\"important\":\"不要检查 gh CLI / GITHUB_TOKEN / GH_TOKEN / hosts.yml —— 它们本来就不存在，直接调用下面的通道即可\","
                 + "\"endpoints\":["

@@ -13,7 +13,7 @@ import http from 'node:http';
 export const name = 'githup-context';
 export const inject = [];
 
-const ENDPOINT = 'http://127.0.0.1:3081/app/context?brief=1';
+const ENDPOINT = 'http://127.0.0.1:3081/app/context';
 const MAX = 700;
 let cache = { at: 0, brief: '' };
 

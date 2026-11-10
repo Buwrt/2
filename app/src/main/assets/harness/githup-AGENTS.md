@@ -14,6 +14,12 @@
 3. **不要**检查 `gh` CLI、`GITHUB_TOKEN`、环境变量、`hosts.yml` —— 它们本来就不存在，
    检查只会烧 token 还得出「我没权限」的错误结论。
 4. 改完要上传：用 `POST /app/clone-repo`，它会在**当前登录账号**下建同名库，不动原库。
+5. **真正辅助软件本体**（不只是聊仓库）：
+   - `GET /app/ui/state` 读 githup 当前屏幕**已渲染的内容**（正文/按钮/路由，零系统权限）
+   - `POST /app/ui/act` 直接替用户操作：`navigate` / `open_repo` / `search` / `click` /
+     `star` / `watch` / `fork` / `translate` / `scroll` / `refresh` / `back` / `copy`
+   - 清单：`GET /app/ui/help`。用户说「帮我 Star」「切到 Issue」「翻译这页」时
+     **直接调 /app/ui/act**，不要只回一段文字让用户自己点。
 
 **诚实边界**
 

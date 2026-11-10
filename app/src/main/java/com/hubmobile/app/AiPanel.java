@@ -107,6 +107,8 @@ public final class AiPanel {
     private long totalEntries = 41426L, lastEntries = 0, lastWritten = 0;
     private String readyUrl = null;
     private Intent pendingDraft = null;
+    /** 阶段 Y：本次进程内是否已弹过风险确认，避免拒绝后反复骚扰。 */
+    private static boolean sConsentAsked = false;
 
     /* 阶段 X：当前仓库卡。原生层渲染，零 LLM token。 */
     private LinearLayout repoStrip;
@@ -673,8 +675,59 @@ public final class AiPanel {
         else bubble.setVisibility(expanded ? View.GONE : (on ? View.VISIBLE : View.GONE));
     }
 
+    /**
+     * 阶段 Y：把「同意」放到用户**真正会点的地方**。
+     *
+     * 上一轮把 consent 藏在「我的 → 设置 → AI 感知与克隆」这个新开关里，
+     * 默认关。用户早已打开的是「AI 辅助 githup」（悬浮球开关），以为开了
+     * 就有 AI 辅助 —— 结果 /app/context 返回 page:null、插件不装、卡片只写
+     * 「点右侧开启感知」，看起来就是「AI 根本没辅助」。
+     *
+     * 现在第一次展开 AI 面板就弹一次风险确认（同意 / 拒绝，文案按用户原话）。
+     * 插件已在引擎启动时常驻，所以点「同意」**不需要重启引擎**：下一轮
+     * 自动注入、/app/ui/* 立刻可用。拒绝则保持只读聊天，不写任何数据。
+     */
+    private void ensureConsent() {
+        try {
+            if (com.hubmobile.app.harness.AppContext.consent(act) || sConsentAsked) return;
+            sConsentAsked = true;
+            String msg = "开启后，AI 无需任何 Android 系统权限（不用无障碍、不用截图、不用悬浮窗），"
+                    + "就能知道 githup 当前所在的页面、正在阅读的仓库与屏幕上已渲染的内容，"
+                    + "并可替你操作本软件（导航、Star、切换翻译、打开 Issue…）、总结与修改代码，"
+                    + "再把修改后的内容以「相同名称」的仓库上传到你当前登录的 GitHub 账号。\n\n"
+                    + "注意：此过程有可能将 token 给予第三方软件或 DeepSeek，仓库内容也会离开设备。\n\n"
+                    + "是否同意？此操作与作者无关。";
+            new AlertDialog.Builder(act)
+                    .setTitle("AI 辅助 githup · 风险确认")
+                    .setMessage(msg)
+                    .setCancelable(true)
+                    .setNegativeButton("拒绝", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) {
+                            Toast.makeText(act, "已拒绝：AI 保持普通对话，不感知页面、不操作软件",
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    })
+                    .setPositiveButton("同意", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) {
+                            com.hubmobile.app.harness.AppContext.setConsent(act, true);
+                            /* consent 之前不预抓 RepoBrief，同意后立刻补一次当前仓库速览 */
+                            try {
+                                String r = com.hubmobile.app.harness.AppContext.currentRepo(act);
+                                if (r != null && !r.isEmpty()) onRepoChanged(r);
+                            } catch (Throwable ignored) {}
+                            Toast.makeText(act,
+                                    "已开启：AI 现在能看懂当前页面，并可替你操作 githup",
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    })
+                    .show();
+        } catch (Throwable ignored) {}
+    }
+
     public void expand() {
         if (destroyed) return;
+        ensureConsent();
+
         /* 每次打开都把视口比例拉回 100%，避免上一次被放大/全屏的状态带过来，
            用户再也不会「放大之后缩不小」。configure() 里也已禁掉手势缩放。 */
         if (web != null) try {
