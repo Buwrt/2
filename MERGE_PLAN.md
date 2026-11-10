@@ -1567,3 +1567,91 @@ payload 的内核里，本层无法裁剪。所以是「大幅减少浪费」，
 未真机跑完整 composer 预填链路（DSH 的 composer 可能是 contenteditable，
 已加多选择器 + native setter + 剪贴板退化）；已验证 Java 结构、JS 语法、
 Manifest、包身份、签名与防护链自洽。
+
+
+---
+
+## 二十七、阶段 X+：从「一键带入」到「每轮自动辅助」，并再压一次 token
+
+> 第二十六章已经解决了「App 不认识当前仓库」（RepoBrief 卡片 + 带入对话 +
+> 工作区说明去重）。本轮补的是用户口径里「**真正辅助**」的最后一段：
+> 连「点一下带入对话」都不需要，模型每轮自己就知道；同时把每轮注入的
+> 上下文再压一档。
+
+### 还差什么
+
+核查 payload 后发现两个硬事实：
+
+1. **工作区 `AGENTS.md` 不是 DSH 读的那份**。DSH 记忆系统读
+   `$DSH_HOME/AGENTS.md`（`dshhome/AGENTS.md`），而 payload 里
+   **这个文件根本不存在**；工作区根目录那份是给 bash/file 工具的 cwd 用的，
+   模型不会自动读。所以第二十六章的「去重说明」再精简，也只是兜底。
+2. **模型是被动的**。即使 `/app/context` 摆在那，它也不会主动 curl；
+   用户不点「带入对话」，这一轮仍然不知道当前页面。
+
+### 本轮增量
+
+**① 新增 DSH 插件 `dsh-plugin-githup-context`（每轮自动注入）**
+
+`GithupContextPlugin.java` 在 `HarnessBridge` 起 node 之前：
+
+- 从 `assets/harness/` 写出
+  `dshhome/profiles/web/node_modules/dsh-plugin-githup-context/`
+  （`package.json` + `lib/index.js`）
+- 往 `profiles/web/cordis.patch.yml` 追加幂等 `- insert:` 块
+  （语法照 `dshhome/cordis.patch.yml` 里已有的 insert 条目；
+  与 `AccountDefaultRoute` 各自的 BEGIN/END 块互不干扰）
+- 往 **`$DSH_HOME/AGENTS.md`** 追加一段 ≤1.2KB 的省 token 规矩
+  （追加，不覆盖记忆系统已有内容）
+
+插件 `apply(ctx)` 监听 `agent/pre-step`，结构照内置
+`dsh-plugin-neuron-hub`：每个 `sessionId:turn` 只注入一次，
+拉 `/app/context?brief=1`，把 `brief` 作为一条
+`{ role:'user', source:{kind:'githup-context',form:'notice'},
+content:[{type:'text',text}] }` 追加到 `decision.messages`。
+全链路 try/catch，任何异常都 `return decision`，绝不让引擎 pending。
+只有 `AppContext.consent()` 为 true 才启用；关掉即摘除 insert 块。
+
+**② 上下文分档：每轮 ≤600 字符，完整速览按需**
+
+| 内容 | 何时给 | 大小 |
+|---|---|---|
+| `AppContext.shortBrief()` | **每轮**由插件注入 | ≤600 字符：页面/仓库/一行速览 + 「不要探测」 |
+| `GET /app/summary?repo=...` | 模型要总结时才 curl | ≤2.2KB：复用 RepoBrief 缓存（元数据 + README 摘要） |
+| `/gh/api/repos/O/R/contents/PATH` | 确实需要细节 | 按需单文件 |
+
+`contextJson()` 的 `brief` 改为**总是返回**短版（之前只在 RepoBrief 缓存命中时
+才有，缓存未命中时插件拿不到东西就不注入）。短版明确写：
+「不要执行 gh CLI、不要检查环境变量、不要列全库或逐文件读（那些轮次会白烧 token）」。
+
+`LocalBridgeServer.appRoute()` 增加 query 与 `/app/summary` 路由，
+直接复用 `RepoBrief.cachedBrief()`，**不重复造缓存、不重复打 GitHub**；
+`/gh/help` 同步补 `cheap_summary` 自描述。
+
+**③ 工作区说明 9KB → ≤1.5KB**
+
+`GhBridgeDocs.text()` 整段重写成极简索引。真正生效的是插件注入的短 brief
+与 `$DSH_HOME/AGENTS.md`；工作区那份只留兜底，避免万一被整份读进上下文
+反而费 token。
+
+### 现在的行为
+
+1. 逛到 `gbataille/gitHUD` → 路由上报 → `RepoBrief` 后台预热（GitHub GET，
+   零 DeepSeek token）→ AI 面板顶部卡片显示
+2. 点开 AI 面板**随便说一句** → 插件自动把 ≤600 字符的当前页面事实注入本轮
+   → 模型不用问、不用探测、不用读全库，直接基于事实回答
+3. 「帮我总结这个库」→ 一次 `curl /app/summary` 拿完整速览
+4. 「改完传到我账号」→ `POST /app/clone-repo` 建同名库
+5. 「带入对话」按钮仍保留，可把完整速览预填进输入框
+
+### 边界（如实）
+
+- 插件加载依赖 `agent/pre-step` 与 `cordis.patch.yml insert`，照内置插件写法
+  实现；未真机验证引擎加载，但失败也只是退回第二十六章的行为（卡片 +
+  一键带入），不会崩引擎
+- 「省 token」是相对上一版：少掉探测轮次、大 JSON、每轮重复的长说明；
+  把代码发给 DeepSeek 做总结本身仍消耗模型 token，且 DSH 内核每次会话
+  自带的系统提示 / 全量工具描述在 160MB payload 里，本层无法裁剪
+- `consent:false` 时不装插件、不注入、不预抓
+- 未真机跑完整加载链路；已验证 Java 结构、JS 语法、插件 `node --check`、
+  package.json、Manifest、包身份、签名与防护链自洽

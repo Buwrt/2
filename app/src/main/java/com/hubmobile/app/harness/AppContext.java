@@ -158,17 +158,19 @@ public final class AppContext {
             } else {
                 JSONObject pg = page(c);
                 o.put("page", pg);
-                String brief = RepoBrief.cachedBrief(c, pg.optString("repo", ""));
-                o.put("brief_cached", !brief.isEmpty());
-                if (!brief.isEmpty()) {
-                    try { o.put("brief", new JSONObject(brief).optString("brief", "")); }
-                    catch (Throwable ignored) {}
-                    o.put("note", o.optString("note") + " `brief` 是 App 已查好的当前仓库事实，"
-                            + "请直接采用，不要为了确认页面再跑探测工具（省 token）。");
-                }
+                String full = RepoBrief.cachedBrief(c, pg.optString("repo", ""));
+                o.put("brief_cached", !full.isEmpty());
+                /* 阶段 X+：brief 是**每轮注入**用的短版（≤600 字符）。
+                   完整版（含 README 1200 字）只由 /app/summary 按需取，
+                   不塞进每一轮上下文 —— 这是「省 token」的关键。 */
+                o.put("brief", shortBrief(c, pg, full));
+                o.put("summary_url", "http://127.0.0.1:3081/app/summary");
+                o.put("note", o.optString("note") + " `brief` 是 App 已查好的当前页面事实，"
+                        + "请直接采用，不要为了确认页面再跑探测工具；需要更多细节才 curl `summary_url`。");
                 o.put("endpoints", new JSONArray()
                         .put("GET  /app/context     当前页面 / 当前仓库（零权限）")
                         .put("POST /app/clone-repo  把修改后的文件以同名仓库上传到当前登录账号")
+                        .put("GET  /app/summary     当前仓库完整速览（含 README 摘要），按需取")
                         .put("ANY  /gh/api/<path>   GitHub REST 全方法透传（读代码做总结）"));
                 o.put("warning", "总结或修改代码会把内容发到 DeepSeek 云端；"
                         + "建立同名仓库会用当前登录令牌调用 GitHub 写接口。此操作与作者无关。");
@@ -177,6 +179,76 @@ public final class AppContext {
             return err("读取页面状态失败：" + t.getMessage());
         }
         return o.toString();
+    }
+
+    /* ==================== 阶段 X+：短版注入 + 按需完整速览 ==================== */
+
+    /** 每轮注入文本的硬上限。宁可少给，也不让模型为「确认页面」多烧几轮。 */
+    private static final int BRIEF_MAX = 600;
+
+    private static String clip(String s, int n) {
+        if (s == null) return "";
+        return s.length() <= n ? s : s.substring(0, n) + "…";
+    }
+
+    /**
+     * 短版上下文：路由 + 仓库 + 一行元数据 + 「别探测」的指令。
+     * 只读本地缓存，绝不联网；插件每一轮拉的就是这段。
+     */
+    private static String shortBrief(Context c, JSONObject pg, String full) {
+        String repo = pg.optString("repo", "");
+        String hash = pg.optString("hash", "#/");
+        String title = pg.optString("title", "");
+        String tab = pg.optString("tab", "");
+        String path = pg.optString("path", "");
+        String card = "";
+        if (!full.isEmpty()) {
+            try { card = new JSONObject(full).optString("card", ""); } catch (Throwable ignored) {}
+        }
+        StringBuilder b = new StringBuilder();
+        b.append("[githup 当前页面 · App 直接提供，不是截图/控件树，无需任何系统权限]\n");
+        b.append("页面：").append(clip(hash, 90));
+        if (!title.isEmpty()) b.append("（").append(clip(title, 50)).append("）");
+        b.append("\n");
+        if (!repo.isEmpty()) {
+            b.append("仓库：").append(repo).append("\n");
+            if (!card.isEmpty()) b.append("速览：").append(clip(card, 160)).append("\n");
+            if (!tab.isEmpty() || !path.isEmpty())
+                b.append("位置：").append(clip(tab + "/" + path, 90)).append("\n");
+        } else {
+            b.append("当前不在仓库页。\n");
+        }
+        b.append("这是 App 已查好的事实，**直接采用**。不要执行 gh CLI、不要检查环境变量、")
+         .append("不要列全库或逐文件读（那些轮次会白烧 token）。\n")
+         .append("需要总结/修改：先 curl 'http://127.0.0.1:3081/app/summary")
+         .append(repo.isEmpty() ? "" : "?repo=" + repo)
+         .append("' 拿完整速览；只有确实需要细节才读单个文件。");
+        return clip(b.toString(), BRIEF_MAX);
+    }
+
+    /**
+     * GET /app/summary?repo=owner/name —— 按需给完整速览（RepoBrief 已算好的
+     * 元数据 + README 前 1200 字，≤2KB）。没缓存时给出明确提示而不是让模型
+     * 自己跑去翻整个仓库。全程不调 LLM。
+     */
+    public static String summary(Context c, String repo) {
+        if (!consent(c)) return err("用户未同意：请先在 我的 → 设置 打开「AI 感知与克隆」");
+        if (repo == null || repo.isEmpty()) repo = page(c).optString("repo", "");
+        if (repo.isEmpty()) return err("当前不在仓库页；请用 ?repo=owner/name 指定");
+        String full = RepoBrief.cachedBrief(c, repo);
+        if (full.isEmpty()) {
+            return new org.json.JSONObject().put("ok", true).put("repo", repo)
+                    .put("cached", false)
+                    .put("text", "该仓库速览尚未生成（通常会在你打开仓库页几秒内自动完成）。"
+                            + "请稍后再试一次本端点；不要改为逐文件读取整个仓库。")
+                    .toString();
+        }
+        try {
+            JSONObject o = new JSONObject(full);
+            return new JSONObject().put("ok", true).put("repo", repo)
+                    .put("cached", true).put("card", o.optString("card", ""))
+                    .put("text", clip(o.optString("brief", ""), 2200)).toString();
+        } catch (Throwable t) { return err("速览解析失败：" + t.getMessage()); }
     }
 
     /**

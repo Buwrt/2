@@ -77,67 +77,41 @@ public final class GhBridgeDocs {
         return text(c, fullName);
     }
 
+    /**
+     * 阶段 X+：工作区说明刻意压到 ≤1.5KB。
+     *
+     * 上一版写了 9KB 的「通道说明 + 禁止编造 + 完整 curl 流程」，但
+     * DSH 记忆系统读的是 $DSH_HOME/AGENTS.md、模型也不会自动读工作区文件；
+     * 万一被整份读进上下文，反而就是「费 token」。现在真正生效的是
+     * dsh-plugin-githup-context 每轮注入的 ≤600 字符短 brief，
+     * 这里只留一份兜底的极简索引。
+     */
     private static String text(Context c, String repo) {
         String where = repo == null
-                ? "当前目录是 AI 的默认工作区（还没选择 GitHub 仓库）。"
-                : "当前目录是 GitHub 仓库 `" + repo + "` 的本地镜像。";
-        return "# githup · AI 工作约定（先读这一份，别重复读）\n\n"
+                ? "当前是 AI 默认工作区（尚未选择 GitHub 仓库）。"
+                : "当前是 GitHub 仓库 `" + repo + "` 的本地镜像。";
+        return "# githup · AI 辅助速查\n\n"
                 + where + "\n\n"
-                + "## 0. 省 token 铁律（最重要）\n\n"
-                + "- 用户**当前看的仓库 / 页面，App 已经查好了**：AI 面板顶部常驻一张\n"
-                + "  「当前仓库卡」；`GET /app/context` 的 `brief` 字段直接给出仓库名、简介、\n"
-                + "  主语言、star、默认分支、README 开头。这些是**已知事实，直接采用**。\n"
-                + "- **禁止**为了确认「用户看的是哪个库」去跑 `gh` CLI、检查环境变量、\n"
-                + "  `ls -R` 全库、逐个读文件或反复试探 —— 那些轮次纯烧 token，\n"
-                + "  也是上一版「没干活却特别费 token」的根因。\n"
-                + "- 需要更多细节时**只精确取单个文件**：\n"
-                + "  `/gh/api/repos/OWNER/REPO/contents/PATH`。\n"
-                + "- 本目录 `AGENTS.md` 是唯一全量说明，其它 `.md` 只是指针，读一份即可。\n\n"
-                + "## 1. 零系统权限知道当前页面\n\n"
-                + "```\ncurl http://127.0.0.1:3081/app/context\n```\n\n"
-                + "返回 `page{route,hash,title,repo,owner,tab,path,ref,ts}` 和 `brief`。\n"
-                + "这是 githup 客户端渲染时自己写下的路由记录，经本机回环桥交给你 ——\n"
-                + "**不是截图、不是控件树**，不需要无障碍 / 悬浮窗 / 截屏 / 存储权限。\n"
-                + "如实说明渠道；别说「跑在 githup 用户身份下读它的私有文件」。\n\n"
-                + "### 严格禁止编造\n\n"
-                + "- 没调 `/app/context` 不要声称知道当前页面或仓库。\n"
-                + "- `consent:false` 时 `page` 为 null：如实说「用户尚未在 我的 → 设置\n"
-                + "  开启『AI 感知与克隆』」，**禁止**编造设置页、主题、字号、密度、\n"
-                + "  启动页、浏览历史、路由序列、通知记录等任何具体数值。\n"
-                + "- 你**没有**屏幕像素、控件树、无障碍点按/滚动能力。\n"
-                + "- 「能调 GitHub API 读仓库」≠「能看到 App 屏幕上渲染了什么」。\n\n"
-                + "## 2. GitHub 通道\n\n"
-                + "`/gh/api/<路径>` = `https://api.github.com` 之后的部分，\n"
-                + "GET / POST / PUT / PATCH / DELETE 全支持。\n"
-                + "权限 = githup **当前登录令牌**的权限（含私有库与写操作）；换号即时跟随、\n"
-                + "退出即失效，没有任何写死令牌。令牌锁在设备 Keystore，\n"
-                + "**不在你的环境变量、文件、本目录里** —— 别去找、别输出。\n\n"
-                + "别再检查 `gh` CLI / `GITHUB_TOKEN` / `hosts.yml` / `.netrc` / SSH key：\n"
-                + "它们本来就不存在，查了只会得出错误结论并浪费 token。\n\n"
-                + "```\n"
-                + "curl http://127.0.0.1:3081/gh/help\n"
-                + "curl http://127.0.0.1:3081/gh/api/repos/OWNER/REPO\n"
-                + "curl http://127.0.0.1:3081/gh/api/repos/OWNER/REPO/contents/PATH\n"
-                + "curl -X POST -H 'Content-Type: application/json' \\\n"
-                + "  -d '{\"title\":\"...\",\"body\":\"...\"}' \\\n"
-                + "  http://127.0.0.1:3081/gh/api/repos/OWNER/REPO/issues\n"
-                + "```\n\n"
-                + "## 3. 改完以同名库上传（须用户已同意）\n\n"
-                + "```\n"
-                + "curl -X POST http://127.0.0.1:3081/app/clone-repo \\\n"
-                + "  -H 'Content-Type: application/json' \\\n"
-                + "  -d '{\"repo\":\"owner/name\",\"files\":[{\"path\":\"README.md\",\"content\":\"...\"}]}'\n"
-                + "```\n\n"
-                + "在当前登录账号下建**相同名称**的库并写文件，返回\n"
-                + "`login` / `repo` / `html_url` / `files_written`。只写自己账号，原库不动；\n"
-                + "同名已存在时不覆盖建库、直接写文件。\n\n"
-                + "必须用户先在「我的 → 设置 → AI 感知与克隆」点过**同意**\n"
-                + "（弹窗已告知：有可能将 token 给予第三方软件或 DeepSeek，\n"
-                + "仓库内容会离开设备，此操作与作者无关）。未同意直接拒绝，不要绕过。\n\n"
-                + "## 边界\n\n"
-                + "- 只连 `api.github.com` / `codeload.github.com`，其它域会被拒绝。\n"
-                + "- 工作区镜像是快照、不自动同步；刷新请在设置里重新选工作区。\n"
-                + "- 退出登录后通道立刻失效（「记住的令牌」不参与授权）。\n";
+                + "## 当前页面（不用问、不用猜）\n\n"
+                + "每轮对话开头会自动收到一条 `githup-context` 通知，内容是 githup 客户端"
+                + "自己写下的路由与仓库状态（不是截图、不是控件树，无需任何系统权限）。"
+                + "**直接采信它**，不要再问用户「你在看哪个库」。\n\n"
+                + "## 省 token 的硬规矩\n\n"
+                + "1. 要总结/修改当前仓库，先一次：\n"
+                + "   `curl 'http://127.0.0.1:3081/app/summary?repo=owner/name'`\n"
+                + "   已含元数据 + README 摘要 + 顶层文件树（≤2KB）。\n"
+                + "2. **不要**逐文件读全库、**不要** `curl /gh/repos` 拿 100 个仓库的大 JSON。"
+                + "只有确实需要细节才读 `/gh/api/repos/O/R/contents/PATH` 单个文件。\n"
+                + "3. **不要**检查 `gh` CLI / `GITHUB_TOKEN` / 环境变量 / `hosts.yml` ——"
+                + "它们本来就不存在，检查只会烧 token 还得错结论。\n"
+                + "4. 改完上传用 `POST /app/clone-repo`：在当前登录账号下建**同名**库，不动原库。\n\n"
+                + "## 诚实边界\n\n"
+                + "- 没有屏幕像素、控件树、点按/滚动能力；除非用户开了系统无障碍服务。\n"
+                + "- 没拿到上下文通知时**不要编造**页面、设置值、主题、字号、浏览历史。\n"
+                + "- 能调 GitHub API ≠ 能看到 App 屏幕上渲染了什么。\n"
+                + "- 权限 = githup 当前登录令牌；换号跟着换，退出登录立刻失效。\n"
+                + "- 以上能力须用户在「我的 → 设置 → AI 感知与克隆」点过同意；"
+                + "`consent:false` 时如实说明未开启。\n";
     }
 
     private static void write(File f, String s) {

@@ -300,6 +300,10 @@ public final class HarnessBridge {
                cwd 指向它 —— 否则 AI 会去检查 gh CLI / GITHUB_TOKEN，得出
                「我没有凭证、看不到你的仓库」的错误结论。 */
             com.hubmobile.app.harness.GhBridgeDocs.install(c);
+            /* 阶段 X：把「githup 当前页面」变成 DSH 每轮自动注入的上下文。
+               必须在 profile 被引擎读取之前写；须用户已在设置页点过同意。 */
+            com.hubmobile.app.harness.GithupContextPlugin.apply(
+                    c, new java.io.File(dir, "dshhome"));
 
             /* 阶段 N：起 node 之前定好「新会话默认走哪条鉴权路由」。
                账号已登录（截图里能看到充值/赠金余额）时覆盖成 deepseek-account，
