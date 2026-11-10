@@ -4,7 +4,7 @@
 {"entries": 41426, "changed_files": 29, "replaced_hits": 39, "size": 159794879}
 
 --- work/verify.json ---
-{"size": 161894361, "sha256": "b40506da5009f2a81c0e692849ee918dad5042a907605a8ca1ac6a00ba1a3574", "payload_size": 159794879, "harness_assets": 119, "guard_ok": true}
+{"size": 161894361, "sha256": "c374d25fae8a2feaf976294adc1758cfab4e8da95e8987ea520e9a8cf876973a", "payload_size": 159794879, "harness_assets": 119, "guard_ok": true}
 
 --- work/badging.txt ---
 package: name='com.hubmobile.app' versionCode='1002020' versionName='1.2.20' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34' compileSdkVersionCodename='14'
@@ -60,8 +60,8 @@ Warning: SDK processing. This version only understands SDK XML versions up to 3 
 > Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
 > Task :app:checkReleaseDuplicateClasses
 > Task :app:generateReleaseBuildConfig
-> Task :app:javaPreCompileRelease
 > Task :app:checkReleaseAarMetadata
+> Task :app:javaPreCompileRelease
 > Task :app:generateReleaseResValues
 > Task :app:mapReleaseSourceSetPaths
 > Task :app:generateReleaseResources
@@ -82,13 +82,13 @@ Warning: SDK processing. This version only understands SDK XML versions up to 3 
 > Task :app:mergeReleaseAssets
 > Task :app:processApplicationManifestReleaseForBundle
 > Task :app:collectReleaseDependencies
-> Task :app:processReleaseManifestForPackage
-> Task :app:bundleReleaseResources
-> Task :app:compressReleaseAssets
 > Task :app:sdkReleaseDependencyData
 > Task :app:validateSigningRelease
 > Task :app:writeReleaseAppMetadata
+> Task :app:bundleReleaseResources
 > Task :app:writeReleaseSigningConfigVersions
+> Task :app:processReleaseManifestForPackage
+> Task :app:compressReleaseAssets
 > Task :app:processReleaseResources
 
 > Task :app:compileReleaseJavaWithJavac
@@ -104,7 +104,7 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:createReleaseApkListingFileRedirect
 > Task :app:assembleRelease
 
-BUILD SUCCESSFUL in 47s
+BUILD SUCCESSFUL in 49s
 37 actionable tasks: 36 executed, 1 from cache
 
 
