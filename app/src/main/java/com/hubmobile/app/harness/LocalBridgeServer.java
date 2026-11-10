@@ -253,8 +253,9 @@ public final class LocalBridgeServer {
             if (path.startsWith("/log")) return logs(query);
             if (path.startsWith("/backup")) return backup(query, body);
             if (path.startsWith("/update")) return update();
-            if (path.startsWith("/kernel")) return unsupported("内核热切换");
-            if (path.startsWith("/buildenv")) return unsupported("手机内自建编译环境");
+            if (path.startsWith("/kernel") || path.startsWith("/kernels"))
+                return kernel(path, query, body);
+            if (path.startsWith("/buildenv")) return buildenv(path, query, body);
             return "{\"ok\":false,\"error\":\"unknown route: " + path + "\"}";
         } catch (Throwable t) {
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
@@ -832,8 +833,73 @@ public final class LocalBridgeServer {
                 + "\"channel\":\"Buwrt/2\",\"hint\":\"在 githup 客户端内检查更新即可\"}";
     }
 
+    /**
+     * 阶段 J：/kernel 与 /kernels（前端用复数）走 KernelStore 完整实现。
+     * 之前这里直接 unsupported("内核热切换")，控制台「引擎内核」页整片灰掉。
+     */
+    private String kernel(String path, String query, String body) {
+        try {
+            String ver = param(query, "ver", param(query, "version", ""));
+            if (path.endsWith("/activate") && !ver.isEmpty())
+                return new JSONObject().put("ok", true)
+                        .put("result", String.valueOf(KernelStore.activate(app, ver))).toString();
+            if (path.endsWith("/remove") && !ver.isEmpty())
+                return new JSONObject().put("ok", KernelStore.remove(app, ver))
+                        .put("version", ver).toString();
+            if (path.endsWith("/deactivate")) {
+                KernelStore.deactivate(app);
+                return "{\"ok\":true,\"msg\":\"已回退到内置内核\"}";
+            }
+            if (path.endsWith("/install") && !ver.isEmpty())
+                return new ShellBridge(app).ctlAct("kernel.install", ver);
+            // 默认：完整状态（active / installed / store / storeDir）
+            JSONObject o = new JSONObject();
+            String active = KernelStore.activeVersion(app);
+            o.put("ok", true).put("active", active == null ? "" : active)
+                    .put("activeText", active == null ? "内置内核" : active)
+                    .put("storeDir", KernelStore.STORE);
+            org.json.JSONArray inst = new org.json.JSONArray();
+            for (KernelStore.Bundle b : KernelStore.installed(app))
+                inst.put(new JSONObject().put("version", b.version).put("label", b.label)
+                        .put("sizeBytes", b.sizeBytes).put("active", b.active));
+            o.put("installed", inst);
+            org.json.JSONArray store = new org.json.JSONArray();
+            for (KernelStore.Bundle b : KernelStore.scanStore(app))
+                store.put(new JSONObject().put("version", b.version).put("label", b.label)
+                        .put("sizeBytes", b.sizeBytes).put("installed", b.installed)
+                        .put("note", b.note));
+            o.put("store", store);
+            return o.toString();
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
+        }
+    }
+
+    /**
+     * 阶段 J：/buildenv 走 BuildEnvInstaller 完整实现。
+     * 之前 unsupported("手机内自建编译环境")，控制台「自建环境」页点「查询两个仓库」没反应。
+     */
+    private String buildenv(String path, String query, String body) {
+        try {
+            if (path.endsWith("/resolve"))
+                return new ShellBridge(app).ctlAct("buildenv.resolve", "");
+            if (path.endsWith("/cancel")) {
+                BuildEnvInstaller.cancel();
+                return "{\"ok\":true,\"msg\":\"已取消\"}";
+            }
+            if (path.endsWith("/install"))
+                return new ShellBridge(app).ctlAct("buildenv.install",
+                        param(query, "index", param(query, "idx", "0")));
+            JSONObject o = new JSONObject(ShellBridge.buildEnvJson(app));
+            o.put("ok", true).put("storeDir", BuildEnvInstaller.STORE);
+            return o.toString();
+        } catch (Throwable t) {
+            return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
+        }
+    }
+
     private String unsupported(String what) {
-        return "{\"ok\":false,\"error\":" + q(what + " 需要 Shizuku 特权或上游完整原生壳，本版未接入") + "}";
+        return "{\"ok\":false,\"error\":" + q(what + " 需要 Shizuku 特权服务端，本版未接入") + "}";
     }
 
     private static String param(String query, String key, String def) {

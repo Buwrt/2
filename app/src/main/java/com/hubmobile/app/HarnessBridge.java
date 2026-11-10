@@ -476,6 +476,19 @@ public final class HarnessBridge {
      * 只杀「本应用 payload 目录下、且带 web --port <port>」的残留 node。
      * 路径锚定保证绝不会误伤别的应用或 Termux 里的 node。
      */
+    /** 阶段 J：供控制台 ctlAct("engine.stop"/"engine.restart") 调用。
+     *  只杀 cmdline 带本 payload 路径的自己的 node 引擎，不误伤上游原版 / Termux。 */
+    public static int stopEngine(Context c) {
+        File dir = payload(c);
+        killStaleEngines(dir, PORT);
+        return 1;
+    }
+
+    /** 阶段 J：控制台状态里的 engine.running。 */
+    public static boolean isRunning() {
+        return portBusy(sActivePort == 0 ? PORT : sActivePort);
+    }
+
     private static void killStaleEngines(File dir, int port) {
         String marker = dir.getAbsolutePath();
         File[] pids = new File("/proc").listFiles();

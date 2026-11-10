@@ -541,3 +541,61 @@ hook，本版先覆盖通知与台词/语音结果。桌面双入口、包名、
 | 按用户口径冲突 | 包名、签名、品牌条；上游原版用户不能覆盖升级 |
 
 桌面双入口、包名、官方签名、`1.2.20 / 1002020`、底座 SPA 均未改动。
+
+
+---
+
+## 十五、阶段 J：把「和桌宠一样被精简」的地方全部对齐
+
+阶段 I 把桌宠换成上游 4402 行完整实现后，用户要求把其余同类位置一并改完。
+全工程盘点出 5 处同样的「精简壳替代 / unsupported 占位 / 假成功」：
+
+| 位置 | 之前 | 上游 |
+|---|---|---|
+| `MainActivity` 控制台 | `HarnessActivity` 508 + `HarnessBridge` 548 | 11179 行 |
+| `ShellBridge` | 165 行，36 个动作大半假成功 | `ctlStateJson` + `ctlActionOnUi` |
+| `/kernel` `/buildenv` | `unsupported(...)` | KernelStore / BuildEnvInstaller |
+| `ScheduleExecutor` | 102 行精简 | 359 行完整 |
+| `VsreenBridgeService` | 31 行永远 false | 2072 行 Shizuku 桥 |
+
+### 修改清单
+
+**完整搬入 3 类**：`BuildEnvInstaller.java`(673)、`KernelStore.java`(538)、
+`ScheduleExecutor.java`(359，替换 102 行精简版)。适配仅 2 处：
+通知回跳 `MainActivity → HarnessActivity`、Shizuku 直接引用改反射。
+保留 `execute/tickLife/log/history` 四个接口，`AlarmReceiver` / `ScheduleBridge` /
+`LocalBridgeServer` 零改动。补 `import com.hubmobile.app.R;`（ScheduleExecutor 用了
+`R.drawable.ic_whale_black`，包名改变后 R 不在同包）。
+
+**`HarnessBridge` 新增 2 个公开方法**：`stopEngine(Context)` 复用 `killStaleEngines`、
+`isRunning()` 复用 `portBusy`。
+
+**`LocalBridgeServer`**：`/kernel` `/kernels` `/buildenv` 从 unsupported 换成真路由，
+支持 activate/remove/deactivate/install、resolve/cancel/install，
+状态读 KernelStore / ShellBridge.buildEnvJson。
+
+**`ShellBridge` 165 → 709 行**：
+- `ctlState()` 补齐 17 个字段（extract / engine / rescue / theme / reasoning /
+  perm / workspace / plugins / buildEnv / kernel / log / voice / life / schedules
+  / overlay / vscreenStatus …），全部读真实类
+- `ctlAct()` 36 个动作落地：HarnessBridge、BuildEnvInstaller、KernelStore、
+  BackupRestore（真打包 dshhome 为 .dshbackup）、LogShareProvider、
+  NotificationArchive、ScheduleBridge、VoiceManager/VoiceBridge、NfcStore、
+  OverlayService；`life.*` 照搬上游 `runLifeToolCommand`（node + life.js）与
+  `readLifeDbState`（只读 life.db）
+- 新增 `argParam()`：前端桌宠页传 `action=fluid&on=1`、控制台页传 `"1"`，
+  两种参数形式都吃下
+
+**`VsreenBridgeService` 31 → 92 行**：反射探测 Shizuku binder + 授权、
+检查 `vscreen_shizuku.jar`、按「未装 / 未授权 / 缺 jar」给准确原因，不再静默 false。
+
+### 仍然 100% 不了
+
+虚拟屏实时画面缺三样：Shizuku 服务端 hidden AIDL
+（`IRemoteProcess` / `IShizukuService`）、`assets/vscreen_shizuku.jar`
+（只在上游发行 APK 里，本版 payload 没有）、用户侧 Shizuku 授权。
+特权 shell 同因。启动动画按用户口径保留品牌版四句对话，不换回上游
+`BOOT SEQUENCE`。包名 / 签名 / 品牌条按「以我为准」。
+
+上游 MainActivity 的原生控制台齿轮与时光机 UI 弹层未搬：功能已全部通过
+网页控制台落地，再套一层原生 View 是重复建设且要动底座 SPA 与防护链。
