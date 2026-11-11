@@ -2132,3 +2132,79 @@ composer 应像图 1 那样浮在键盘上方，能正常打字、选模型、�
   临时占满可视区域（与上游全屏观感一致），收起键盘即恢复
 - 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload
   为第三方二进制，再分发请确认许可
+
+
+---
+
+## 三十二、阶段 AB：与上游的完整对照 —— 缺什么、补了什么、什么不补
+
+用户要求「我的软件对于上游还缺少什么，缺少什么就增添什么」。
+这轮不再凭印象，对**上游完整壳 / payload / 本包源码**做了逐文件盘点。
+
+### 盘点口径
+
+| 来源 | 规模 |
+|---|---|
+| 上游 `harness/android-app/src` Java | **28 类**（MainActivity 11179 行、VsreenBridgeService 2072 行、OverlayService 4402 行、AccessibilityService 1987 行、vscreen/ 4 类 1333 行…） |
+| 上游 `res/` | 8 个文件（drawable 2 / values 4 / xml 1 / Manifest） |
+| 上游 `patches + plugins + skills + selfbuild` | **119 个文件** |
+| 上游 Manifest | 17 权限 / 1 Activity / 4 Service / 1 Receiver / 2 Provider |
+| 本包 `app/src/main/java` | **73 类**（底座 31 + harness 包 38） |
+| 本包 `assets/harness` | **122 文件**（上游 119 个脚本资产已全带） |
+
+### 之前各轮已经补齐的
+
+桌宠同源 4502 行、控制台 ShellBridge 36 动作、KernelStore / BuildEnvInstaller
+全量、ScheduleExecutor、ShareInbox、NotificationArchive、UsageStatsHelper、
+NfcStore、LogShareProvider、BackupRestore / Validator、RootShell、SafeFiles、
+VoiceManager、无障碍服务 1990 行、3081 本地桥、3080→3090 端口迁移、
+单图标同屏、双向 `/app/ui/*`、AI 辅助与令牌跟随、键盘与输入框修复。
+
+### 本轮盘点新发现并补齐的 8 项
+
+| # | 缺口（上游有 / 本包无） | 真机后果 | 本轮实现 |
+|---|---|---|---|
+| 1 | `onShowFileChooser` + 拍照 | 点「添加附件 / @文件」**完全没反应** | `AiPanel` 实现文件选择器 + `MediaStore` 拍照 + `MainActivity` 转发 `onActivityResult`；相机不可用自动退回文件选择 |
+| 2 | `fallback.html` 白屏兜底页 | 引擎没起来时纯白屏，什么也点不到 | 新增 `assets/fallback.html`，主框架错误自动切入；后台每 2s 探测端口，通了自动回 AI；带重试 / 安全模式 / 电池 / 诊断日志 6 个按钮 |
+| 3 | `diagLog` 落盘环形缓冲 | JS 异常只进 logcat，导出日志啥也看不到 | `UpstreamParity.diagLog` 写 `files/diagnostics.log`（256KiB 环形），`onConsoleMessage` 按上游 DSHJS 口径过滤 |
+| 4 | 安全模式 | 插件写坏 `cordis.patch.yml` → 引擎起不来 → 又只能靠引擎去修，**死结** | `enterSafeMode` 旁置 4 个用户层配置到 `web.userlayer-<时间戳>`（**会话/凭据不动**），`exitSafeMode` 还原；连续失败 ≥2 次在开机页给入口；控制台新增 `engine.safe_mode` / `exit_safe_mode` |
+| 5 | node 看门狗 | 挂后台被系统杀掉后 AI 一直转圈 / 白屏 | `startWatchdog` 每 5s 探测，`isRunning()` 为假且曾启动过 → `ensureEngine()` 自动重拉；20s 防风暴、用户主动 stop 不自愈；`reviveEpoch` 通知 AiPanel 自动重载 |
+| 6 | 电池优化白名单引导 | 只声明了权限，没有任何运行时检查 | `batteryOptimized` / `requestIgnoreBattery`；面板展开时每 24h 最多一次温和弹窗「去设置 / 暂不」 |
+| 7 | 401 自动重握手 | cookie 失效后只亮一张错误卡 | `onReceivedHttpError` 主框架 401 → 回引擎根路径重握手（`HarnessBridge.homeUrl`，不重放一次性 token） |
+| 8 | Shizuku 声明 + vscreen 源码层 | Manifest 缺权限；`vscreen/` 4 类完全没搬 | 补 `moe.shizuku.manager.permission.API_V23`；搬入 `vscreen/` 四类（FakeContext / LocalHttpFence / Main / Workarounds，共 1333 行），改包名、外部根路径改 `/sdcard/githup` |
+
+附带补齐：`HarnessBridge.homeUrl()`（不带一次性 token 的根路径，401 / 兜底恢复 /
+看门狗重拉共用）、`engine.diag` 控制台动作、`engine.start/stop` 同步看门狗标志。
+
+### 逐项对照结果（盘点后的剩余差异）
+
+| 上游能力 | 本包状态 | 说明 |
+|---|---|---|
+| 28 个 Java 类 | **27 个已等价实现** | 仅 `MainActivity` 用 `AiPanel+HarnessActivity+HarnessBridge` 同屏精简替代（用户明确要单图标同屏，不能搬回独立全屏 Activity） |
+| `VsreenBridgeService` 2072 行 | 91 行真实探测占位 | **编译依赖 `rikka.shizuku.Shizuku` + hidden AIDL `IRemoteProcess`/`IShizukuService`**，本包无 Shizuku AAR；且 `vscreen_shizuku.jar` 只在上游发行 APK 里，本版 payload 没有 |
+| `vscreen/` 4 类 | ✅ 本轮搬入 | 只用 framework + 反射，可编译；但它们是**以 shell uid 由 app_process 加载的特权端**，运行时仍需 Shizuku 授权 + 服务端 dex |
+| 虚拟屏实时画面 | ❌ 仍不可用 | 见上；控制台会明确给「需 Shizuku 授权 / 缺服务端 jar」，不假装成功 |
+| 开机动画 `bootFilm` / `BOOT SEQUENCE` | ❌ 按用户要求不搬 | 用户明确要品牌版四句对话（githup ↔ DeepSeek），且不要整屏启动页 |
+| 原生冷启动控制台 UI（consoleLayer） | ❌ 按用户要求不搬 | 与「单图标同屏、点开即 GitHub」冲突；DSH 前端控制台已由 3081 桥全量接通 |
+| 8 页权限引导向导 `GuidePage` | 精简为运行时温和提示 | 整屏向导与单图标同屏冲突；权限引导做成按需弹窗 |
+| 上游包名 `com.deepseek.harness` / 对方签名 | ❌ 不能搬 | 用户定「包名签名以我为准」；也不能覆盖升级上游原版 |
+| 上游 res 8 文件 | ✅ 等价 | 本包 `themes.xml` 替 `styles.xml`，`harness_a11y_config.xml` 替 `accessibility_config.xml`，其余同名 |
+| 119 个插件 / 技能 / selfbuild 脚本 | ✅ 全带 | `assets/harness` 122 文件 |
+
+### 不补的理由（如实，不是漏做）
+
+1. **包名 / 签名以我为准** → 不能变成上游包，也不能覆盖升级上游原版
+2. **单图标同屏** → 不能搬回独立全屏 Activity、原生冷启动控制台、整屏权限向导
+3. **品牌四句对话** → 不能换回上游 BOOT SEQUENCE 开机动画
+4. **Shizuku hidden AIDL + 服务端 jar 不可得** → 虚拟屏实时画面、特权 shell 需用户手机侧装 Shizuku 授权，且需上游发行 APK 里的 `vscreen_shizuku.jar`；本轮已把**能编译的源码层**与权限声明补齐，运行时缺口如实保留
+
+### 验证与边界（如实）
+
+- 已验证：Java 结构、JS 语法、Manifest、包身份、签名、防护链与源码指纹自洽
+- **未真机验证**：`<input type="file">` 拍照链路、fallback 探测时序、看门狗重拉后
+  DSH 前端对重新导航的响应；但每一步都有 try/catch 与兜底（相机不可用退回文件
+  选择、探测失败继续轮询、重拉失败只记日志不崩）
+- 安全模式只旁置**本包自己生成**的 4 个配置，不动会话 / 凭据 / 设置
+- 兜底页 `githupFallback` 桥带 `fallbackActive` 守卫，引擎页调不到它
+- 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload 为第三方二进制，
+  再分发请确认许可

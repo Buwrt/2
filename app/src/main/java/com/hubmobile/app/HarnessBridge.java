@@ -76,6 +76,18 @@ public final class HarnessBridge {
         return new File(c.getFilesDir(), "payload");
     }
 
+    /**
+     * 阶段 AB：不带一次性 token 的引擎首页。
+     * 首次握手后 cookie 已下发，401 / 白屏恢复 / 看门狗重拉都走这个地址，
+     * 避免重放已失效的 token URL（resetView 也是同一口径）。
+     */
+    public static String homeUrl(Context c) {
+        int p = com.hubmobile.app.harness.EnginePorts.get(c);
+        if (sActivePort >= com.hubmobile.app.harness.EnginePorts.DEFAULT
+                && sActivePort < com.hubmobile.app.harness.EnginePorts.MAX) p = sActivePort;
+        return "http://127.0.0.1:" + p + "/";
+    }
+
     /** 进程仍活着时，重进 Activity 直接走根路径（cookie 已由首次加载下发）。 */
     public static String existingUrl() {
         Process p = sProc;

@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>githup AI · 引擎连接中</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 22px 18px 28px; min-height: 100vh;
+    background: #0d1117; color: #e6edf3;
+    font: 15px/1.65 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .brand { font-size: 13px; letter-spacing: .14em; color: #8b949e; text-transform: uppercase; }
+  h1 { font-size: 20px; margin: 10px 0 4px; font-weight: 650; }
+  .sub { color: #8b949e; font-size: 13px; margin-bottom: 20px; }
+  .card {
+    background: #151b2b; border: 1px solid #2a3247; border-radius: 14px;
+    padding: 14px 16px; margin-bottom: 14px;
+  }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 13px; }
+  .row span:first-child { color: #8b949e; flex: 0 0 auto; }
+  .row span:last-child { text-align: right; word-break: break-all; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #d29922; margin-right: 6px; }
+  .ok { color: #3fb950; } .bad { color: #f85149; } .warn { color: #d29922; }
+  .btns { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 6px; }
+  button {
+    flex: 1 1 44%; min-width: 130px; padding: 11px 12px; border-radius: 10px;
+    border: 1px solid #3a4257; background: #1c2436; color: #e6edf3;
+    font-size: 13.5px; font-weight: 600; cursor: pointer;
+  }
+  button.primary { background: #2f4bdb; border-color: #4d6bfe; }
+  button:active { opacity: .75; }
+  pre {
+    margin: 0; padding: 11px; background: #0a0e15; border: 1px solid #212a3d;
+    border-radius: 9px; font: 11px/1.55 ui-monospace, Menlo, Consolas, monospace;
+    color: #9aa7bd; white-space: pre-wrap; word-break: break-all; max-height: 190px; overflow: auto;
+  }
+  .hint { color: #6e7681; font-size: 12px; margin-top: 16px; line-height: 1.7; }
+  #wait { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <div class="brand">githup AI · DeepSeek Harness</div>
+  <h1>引擎暂时没连上</h1>
+  <div class="sub">这不是白屏。页面已切到不经过引擎的兜底页，后台每 2 秒探测一次，通了会自动回到 AI 界面。</div>
+
+  <div class="card">
+    <div class="row"><span>状态</span><span><i class="dot"></i><span id="state">正在探测本地引擎…</span></span></div>
+    <div class="row"><span>已等待</span><span id="wait">0 秒</span></div>
+    <div class="row"><span>引擎端口</span><span id="port">—</span></div>
+    <div class="row"><span>版本</span><span>githup 1.2.20 (1002020)</span></div>
+    <div class="row"><span>诊断日志</span><span id="logpath">—</span></div>
+    <div class="row"><span>最近失败</span><span id="why">—</span></div>
+  </div>
+
+  <div class="btns">
+    <button class="primary" onclick="F.retry()">立即重试</button>
+    <button onclick="F.reload()">重新载入 AI 页面</button>
+    <button onclick="F.safe()">进入安全模式</button>
+    <button onclick="F.exitSafe()">退出安全模式</button>
+    <button onclick="F.battery()">忽略电池优化</button>
+    <button onclick="F.logs()">查看诊断日志</button>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="row" style="padding-bottom:9px"><span>诊断日志尾部</span><span></span></div>
+    <pre id="logs">读取中…</pre>
+  </div>
+
+  <div class="hint">
+    安全模式会把本包生成的 profile 配置旁置，用出厂配置启动引擎（会话与凭据保留），
+    适合插件把 YAML 写坏导致反复启动失败的情况。<br>
+    完全退出 App 再重进可让所有残留进程结束。
+  </div>
+
+<script>
+var F = {
+  retry: function () { try { githupFallback.retry(); } catch (e) {} },
+  reload: function () { try { githupFallback.reload(); } catch (e) {} },
+  safe: function () { try { githupFallback.enterSafeMode(); } catch (e) {} },
+  exitSafe: function () { try { githupFallback.exitSafeMode(); } catch (e) {} },
+  battery: function () { try { githupFallback.battery(); } catch (e) {} },
+  logs: function () { try { githupFallback.openLogs(); } catch (e) {} }
+};
+var t0 = Date.now();
+function tick() {
+  document.getElementById('wait').textContent = Math.floor((Date.now() - t0) / 1000) + ' 秒';
+  try { githupFallback.tick(); } catch (e) {}
+}
+setInterval(tick, 1000);
+try { githupFallback.tick(); } catch (e) {}
+</script>
+</body>
+</html>

@@ -238,6 +238,7 @@ public final class ShellBridge {
 
             // ---- 解压 / 引擎 ----
             if (id.equals("extract")) {
+                com.hubmobile.app.harness.UpstreamParity.setUserStopped(ctx, false);
                 HarnessBridge.prepare(ctx, new HarnessBridge.Callback() {
                     @Override public void onStage(String s) {}
                     @Override public void onProgress(long e, long w, long t) {}
@@ -245,6 +246,15 @@ public final class ShellBridge {
                     @Override public void onError(String m) {}
                 });
                 return ok("正在展开引擎文件");
+            }
+            if (id.equals("engine.safe_mode")) {
+                return ok(com.hubmobile.app.harness.UpstreamParity.enterSafeMode(ctx));
+            }
+            if (id.equals("engine.exit_safe_mode")) {
+                return ok(com.hubmobile.app.harness.UpstreamParity.exitSafeMode(ctx));
+            }
+            if (id.equals("engine.diag")) {
+                return ok(com.hubmobile.app.harness.UpstreamParity.diagTail(ctx, 4000));
             }
             if (id.equals("engine.start")) {
                 if (engineAlive()) return ok("引擎已在运行");
@@ -257,6 +267,7 @@ public final class ShellBridge {
                 return ok("正在启动引擎");
             }
             if (id.equals("engine.restart") || id.equals("engine.stop")) {
+                com.hubmobile.app.harness.UpstreamParity.setUserStopped(ctx, true);
                 HarnessBridge.stopEngine(ctx);
                 return ok("引擎已停止，重新进入 githup AI 即会拉起");
             }

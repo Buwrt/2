@@ -305,6 +305,9 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.NFC" />
+    <!-- 阶段 AB：上游持有此权限，Shizuku 授权弹窗与特权 shell / 虚拟屏共用。
+         本包 VscreenBridgeService 走反射探测，不需要 Shizuku AAR 编译依赖。 -->
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
 </manifest>

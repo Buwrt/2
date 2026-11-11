@@ -782,6 +782,11 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        /* 阶段 AB：AI 面板的 <input type="file"> / 拍照回调由这里转发。
+           AiPanel 不是 Activity，自己收不到结果，漏了就是「点添加附件没反应」。 */
+        try {
+            if (aiPanel != null && aiPanel.onActivityResult(requestCode, resultCode, data)) return;
+        } catch (Throwable ignored) {}
         if (requestCode == FilePick.REQ_PICK && bridge != null) {
             if (resultCode == RESULT_OK) bridge.onPickResult(resultCode, data);
             else bridge.onPickCancel();

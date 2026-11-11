@@ -30,6 +30,9 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.ValueCallback;
+import android.provider.MediaStore;
+import android.content.pm.PackageManager;
+import java.io.File;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -77,6 +80,10 @@ public final class AiPanel {
     private static final boolean[] RIGHT = {true, false, true, false};
 
     private static final int REQ_MIC = 203;
+    /** 阶段 AB：上游 v1.40 的 <input type="file"> / 拍照附件通道。 */
+    private static final int REQ_FILE_CHOOSER = 510;
+    private static final int REQ_CAMERA_CAPTURE = 511;
+    private static final String FALLBACK_URL = "file:///android_asset/fallback.html";
 
     /** 旧桌面图标 / 系统分享转发过来的 intent，MainActivity 起来后交给面板。 */
     private static volatile Intent pendingShare;
@@ -109,6 +116,42 @@ public final class AiPanel {
     private Intent pendingDraft = null;
     /** 阶段 Y：本次进程内是否已弹过风险确认，避免拒绝后反复骚扰。 */
     private static boolean sConsentAsked = false;
+
+    /* 阶段 AB：上游 MainActivity 有、本包之前没有的壳级状态。 */
+    private ValueCallback<Uri[]> fileChooserCallback;
+    private Uri cameraOutputUri;
+    private volatile boolean fallbackActive = false;
+    private volatile String fallbackWhy = "";
+    private long fallbackSince = 0L;
+    private long seenReviveEpoch = 0L;
+    /** 看门狗重拉引擎后 epoch 自增；这里每 4s 检查一次，自动回主界面。 */
+    private final Runnable reviveWatcher = new Runnable() {
+        @Override public void run() {
+            if (destroyed) return;
+            maybeReloadAfterRevive();
+            ui.postDelayed(this, 4000);
+        }
+    };
+    private final Runnable fallbackProbe = new Runnable() {
+        @Override public void run() {
+            if (destroyed || !fallbackActive) return;
+            try {
+                int p = com.hubmobile.app.harness.EnginePorts.get(act);
+                java.net.Socket s = new java.net.Socket();
+                try {
+                    s.connect(new java.net.InetSocketAddress("127.0.0.1", p), 300);
+                    s.close();
+                    /* 引擎真的答话了 → 回主界面（cookie 已下发，走根路径不带一次性 token） */
+                    fallbackActive = false;
+                    if (web != null) web.loadUrl(com.hubmobile.app.HarnessBridge.homeUrl(act));
+                    return;
+                } catch (Throwable ignored) {
+                    try { s.close(); } catch (Throwable ignored2) {}
+                }
+            } catch (Throwable ignored) {}
+            ui.postDelayed(fallbackProbe, 2000);
+        }
+    };
 
     /* 阶段 AA：键盘与输入法。上游 DSH 是独立全屏 Activity（默认 adjustResize），
        键盘弹出时 window 变矮，DSH 的 fixed 底栏自然贴在键盘上方（图 1）。
@@ -840,6 +883,27 @@ public final class AiPanel {
             if (readyUrl != null) showWeb(readyUrl);
         }
         if (nfcAdapter != null && NfcStore.isArmed()) enableNfc();
+        /* 阶段 AB：上游 checkBatteryOptimization 的等价温和提示，每 24h 最多一次，
+           不阻塞、不强行要权限。延后 1.5s 避开风险确认弹窗。 */
+        ui.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (destroyed || !expanded) return;
+                if (!com.hubmobile.app.harness.UpstreamParity.shouldHintBattery(act)) return;
+                com.hubmobile.app.harness.UpstreamParity.markBatteryHinted(act);
+                try {
+                    new AlertDialog.Builder(act)
+                            .setTitle("建议允许后台运行")
+                            .setMessage("当前应用被系统限制后台活动，AI 长时间任务挂后台可能被杀掉。"
+                                    + "把本应用设为「不限制」电池优化可避免。")
+                            .setPositiveButton("去设置", new DialogInterface.OnClickListener() {
+                                @Override public void onClick(DialogInterface d, int w) {
+                                    com.hubmobile.app.harness.UpstreamParity.requestIgnoreBattery(act);
+                                }})
+                            .setNegativeButton("暂不", null)
+                            .show();
+                } catch (Throwable ignored) {}
+            }
+        }, 1500);
     }
 
     public void collapse() {
@@ -876,7 +940,16 @@ public final class AiPanel {
                 if (total > 0) totalEntries = total;
                 updateMeta("正在展开 AI 引擎文件…");
             }
-            @Override public void onReady(String url) { showWeb(url); }
+            @Override public void onReady(String url) {
+                /* 阶段 AB：启动成功 → 清失败计数、登记「曾启动」（看门狗只在
+                   这之后才自愈，避免冷启动 700ms 被误判）、拉起看门狗。 */
+                com.hubmobile.app.harness.UpstreamParity.clearBootFailures(act);
+                com.hubmobile.app.harness.UpstreamParity.noteEngineStarted(act);
+                com.hubmobile.app.harness.UpstreamParity.setUserStopped(act, false);
+                com.hubmobile.app.harness.UpstreamParity.startWatchdog(act);
+                seenReviveEpoch = com.hubmobile.app.harness.UpstreamParity.reviveEpoch();
+                showWeb(url);
+            }
             @Override public void onError(String msg) {
                 String brief = msg == null ? "" :
                         (msg.length() > 600 ? "…" + msg.substring(msg.length() - 600) : msg);
@@ -893,6 +966,15 @@ public final class AiPanel {
                 err.setVisibility(View.VISIBLE);
                 err.setText(shown);
                 updateMeta(clash ? "端口冲突 · 装载中断" : "装载中断");
+                /* 阶段 AB：连续失败达到阈值时，把「安全模式」入口直接给出来 ——
+                   上游这步用来解「插件写坏 YAML → 引擎起不来 → 又只能靠引擎去修」的死结。 */
+                com.hubmobile.app.harness.UpstreamParity.noteBootFailure(act, brief);
+                int fails = com.hubmobile.app.harness.UpstreamParity.bootFailures(act);
+                if (fails >= com.hubmobile.app.harness.UpstreamParity.BOOT_FAIL_HINT_AT) {
+                    err.setText(shown + "\n\n已连续失败 " + fails
+                            + " 次。若是插件把配置写坏，可在 AI 面板点「复位」后"
+                            + "用兜底页的「进入安全模式」旁置用户层配置（会话与凭据保留）。");
+                }
             }
         });
     }
@@ -921,6 +1003,9 @@ public final class AiPanel {
                 try { EngineService.keepAlive(act.getApplicationContext()); }
                 catch (Throwable ignored) {}
                 web.loadUrl(url);
+                /* 看门狗重拉引擎后 epoch 会变，周期轮询发现即自动回主界面。 */
+                ui.removeCallbacks(reviveWatcher);
+                ui.postDelayed(reviveWatcher, 4000);
             }
         });
     }
@@ -1013,6 +1098,80 @@ public final class AiPanel {
             public void open(String url) { openExternalFast(url); }
         }, "githupExternal");
 
+        /* 阶段 AB：白屏兜底页的原生桥。只在 file:///android_asset/fallback.html
+           里调用；里面每个方法都自带 try/catch，不影响引擎页。 */
+        w.addJavascriptInterface(new Object() {
+            @android.webkit.JavascriptInterface
+            public void tick() {
+                if (!fallbackActive) return;
+                ui.post(new Runnable() {
+                    @Override public void run() {
+                        if (destroyed || web == null || !fallbackActive) return;
+                        String st = "正在探测本地引擎…"
+                                + (fallbackWhy.isEmpty() ? "" : "（" + fallbackWhy + "）");
+                        int p = com.hubmobile.app.harness.EnginePorts.get(act);
+                        int sec = (int) ((System.currentTimeMillis() - fallbackSince) / 1000);
+                        String s = com.hubmobile.app.harness.UpstreamParity.safeModeActive(act)
+                                ? "安全模式已开启" : st;
+                        web.evaluateJavascript(
+                                "try{var d=document;if(d.getElementById('state'))d.getElementById('state').textContent="
+                                + org.json.JSONObject.quote(s)
+                                + ";if(d.getElementById('port'))d.getElementById('port').textContent='"
+                                + p + "';if(d.getElementById('logpath'))d.getElementById('logpath').textContent="
+                                + org.json.JSONObject.quote(com.hubmobile.app.harness.UpstreamParity.diagPath(act))
+                                + ";if(d.getElementById('why'))d.getElementById('why').textContent="
+                                + org.json.JSONObject.quote(fallbackWhy.isEmpty() ? "—" : fallbackWhy)
+                                + ";if(d.getElementById('logs'))d.getElementById('logs').textContent="
+                                + org.json.JSONObject.quote(com.hubmobile.app.harness.UpstreamParity.diagTail(act, 1600))
+                                + ";}catch(e){}", null);
+                    }
+                });
+            }
+            @android.webkit.JavascriptInterface public void retry() {
+                if (!fallbackActive) return;
+                ui.post(new Runnable() { @Override public void run() {
+                    com.hubmobile.app.harness.UpstreamParity.diagLog(act, "FALLBACK", "用户点立即重试");
+                    fallbackActive = false;
+                    ui.removeCallbacks(fallbackProbe);
+                    if (web != null) web.loadUrl(com.hubmobile.app.HarnessBridge.homeUrl(act));
+                }});
+            }
+            @android.webkit.JavascriptInterface public void reload() {
+                if (!fallbackActive) return;
+                ui.post(new Runnable() { @Override public void run() {
+                    fallbackActive = false;
+                    if (web != null) web.loadUrl(com.hubmobile.app.HarnessBridge.homeUrl(act));
+                }});
+            }
+            @android.webkit.JavascriptInterface public void enterSafeMode() {
+                if (!fallbackActive) return;
+                final String r = com.hubmobile.app.harness.UpstreamParity.enterSafeMode(act);
+                ui.post(new Runnable() { @Override public void run() {
+                    Toast.makeText(act, r, Toast.LENGTH_LONG).show();
+                }});
+            }
+            @android.webkit.JavascriptInterface public void exitSafeMode() {
+                if (!fallbackActive) return;
+                final String r = com.hubmobile.app.harness.UpstreamParity.exitSafeMode(act);
+                ui.post(new Runnable() { @Override public void run() {
+                    Toast.makeText(act, r, Toast.LENGTH_LONG).show();
+                }});
+            }
+            @android.webkit.JavascriptInterface public void battery() {
+                if (!fallbackActive) return;
+                com.hubmobile.app.harness.UpstreamParity.requestIgnoreBattery(act);
+                com.hubmobile.app.harness.UpstreamParity.markBatteryHinted(act);
+            }
+            @android.webkit.JavascriptInterface public void openLogs() {
+                if (!fallbackActive) return;
+                ui.post(new Runnable() { @Override public void run() {
+                    Toast.makeText(act,
+                            com.hubmobile.app.harness.UpstreamParity.diagTail(act, 500),
+                            Toast.LENGTH_LONG).show();
+                }});
+            }
+        }, "githupFallback");
+
         /* 文件卡片 / APK 链接：WebView 默认会把下载交回系统「文件预览」，
            这里交给 DownloadManager，通知栏点开即装。 */
         w.setDownloadListener(new android.webkit.DownloadListener() {
@@ -1063,13 +1222,26 @@ public final class AiPanel {
             @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
                 if (r != null && r.isForMainFrame()) {
                     String d = e == null ? "" : String.valueOf(e.getDescription());
-                    showPageError("页面加载失败：" + d);
+                    if (isEngineUrl(v.getUrl()) || readyUrl != null) enterFallback("页面加载失败：" + d);
+                    else showPageError("页面加载失败：" + d);
                 }
             }
             @Override public void onReceivedHttpError(WebView v, WebResourceRequest r,
                                                       WebResourceResponse er) {
-                if (r != null && r.isForMainFrame() && er != null)
-                    showPageError("引擎返回 HTTP " + er.getStatusCode());
+                if (r == null || !r.isForMainFrame() || er == null) return;
+                int code = er.getStatusCode();
+                /* 阶段 AB：401 不再只亮一张错误卡。cookie 失效时回到引擎根路径
+                   重新走一次带 token 的握手（token 一次性，不能重放旧 URL）。 */
+                if (code == 401 && web != null && readyUrl != null) {
+                    com.hubmobile.app.harness.UpstreamParity.diagLog(act, "HTTP", "主框架 401，重新握手");
+                    try { web.loadUrl(com.hubmobile.app.HarnessBridge.homeUrl(act)); }
+                    catch (Throwable ignored) {}
+                    return;
+                }
+                if (isEngineUrl(v.getUrl()) || readyUrl != null)
+                    enterFallback("引擎返回 HTTP " + code);
+                else
+                    showPageError("引擎返回 HTTP " + code);
             }
         });
 
@@ -1115,16 +1287,55 @@ public final class AiPanel {
                     return false;
                 }
             }
-            /** 前端 JS 异常以前完全看不到，这里转发到 logcat，方便下次定位白屏。 */
+            /** 阶段 AB：前端 JS 异常上游会落到 diagLog 环形缓冲（DSHJS），
+                本版之前只进 logcat，导出日志时啥也看不到。 */
             @Override public boolean onConsoleMessage(android.webkit.ConsoleMessage m) {
                 try {
-                    if (m != null && (m.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR
-                            || m.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.WARNING))
+                    if (m == null) return true;
+                    String lvl = String.valueOf(m.messageLevel());
+                    String msg = String.valueOf(m.message());
+                    boolean bad = "ERROR".equals(lvl) || "WARNING".equals(lvl);
+                    String low = msg.toLowerCase(java.util.Locale.US);
+                    if (bad || low.contains("plugin") || low.contains("console")
+                            || low.contains("slot") || low.contains("inject")) {
+                        com.hubmobile.app.harness.UpstreamParity.diagLog(
+                                act.getApplicationContext(), "DSHJS",
+                                lvl + " " + m.sourceId() + ":" + m.lineNumber() + " " + msg);
                         android.util.Log.w("GithupAI",
-                                m.messageLevel() + " " + m.sourceId() + ":" + m.lineNumber()
-                                        + " " + m.message());
+                                lvl + " " + m.sourceId() + ":" + m.lineNumber() + " " + msg);
+                    }
                 } catch (Throwable ignored) {}
                 return true;
+            }
+
+            /** 阶段 AB：上游 v1.40 —— 前端「添加附件 / @文件」是 <input type="file">，
+                Android WebView 不实现这个回调就完全没反应。要图片时额外给「拍照」。 */
+            @Override public boolean onShowFileChooser(WebView view,
+                    ValueCallback<Uri[]> callback,
+                    WebChromeClient.FileChooserParams params) {
+                try {
+                    if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
+                    fileChooserCallback = callback;
+                    if (attachWantsImage(params)) {
+                        new AlertDialog.Builder(act)
+                                .setTitle("添加图片")
+                                .setItems(new String[]{"拍照", "从相册/文件选择"},
+                                        new DialogInterface.OnClickListener() {
+                            @Override public void onClick(DialogInterface d, int which) {
+                                if (which == 0) launchCameraCapture();
+                                else launchFilePicker(params);
+                            }})
+                                .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                            @Override public void onCancel(DialogInterface d) { cancelFileChooser(); }
+                        }).show();
+                        return true;
+                    }
+                    return launchFilePicker(params);
+                } catch (Throwable t) {
+                    com.hubmobile.app.harness.UpstreamParity.diagLog(act, "ATTACH", "onShowFileChooser 失败 " + t);
+                    cancelFileChooser();
+                    return false;
+                }
             }
         });
     }
@@ -1137,6 +1348,9 @@ public final class AiPanel {
             String scheme = u.getScheme();
             if (scheme == null) return true;
             String low = scheme.toLowerCase(java.util.Locale.US);
+            /* 阶段 AB：白屏兜底页是本地静态页，必须交回 WebView 自己加载，
+               否则会被下面的 openExternally 判成「非 http」直接拦掉。 */
+            if (FALLBACK_URL.equals(url)) return false;
             /* 主框架的 about:/data:/blob:/javascript: 一律拦，绝不让它把 GUI 顶成白屏。 */
             if (low.equals("about") || low.equals("data") || low.equals("blob")
                     || low.equals("javascript")) return true;
@@ -1150,6 +1364,7 @@ public final class AiPanel {
     /** 子资源判据：只拦能碰本地文件的协议，blob:/data:/远程 iframe 放行。 */
     private boolean resourceAllowed(String url) {
         if (url == null || url.isEmpty()) return false;
+        if (FALLBACK_URL.equals(url)) return true;
         String low = url.toLowerCase(java.util.Locale.US);
         if (low.startsWith("file://") || low.startsWith("content://")
                 || low.startsWith("javascript:")) return false;
@@ -1304,6 +1519,132 @@ public final class AiPanel {
     }
 
     /** 白屏兜底：把装载卡亮出来、Web 容器收起、显示错误与重试入口。 */
+    // ==================== 阶段 AB：附件通道（上游 v1.40） ====================
+
+    private boolean attachWantsImage(WebChromeClient.FileChooserParams params) {
+        try {
+            String[] acc = params == null ? null : params.getAcceptTypes();
+            if (acc == null || acc.length == 0) return true;
+            for (String s : acc) {
+                if (s == null) continue;
+                String t = s.toLowerCase(java.util.Locale.US);
+                if (t.contains("image") || t.contains("*/*") || t.trim().isEmpty()) return true;
+            }
+            return false;
+        } catch (Throwable t) { return true; }
+    }
+
+    private boolean launchFilePicker(WebChromeClient.FileChooserParams params) {
+        try {
+            Intent i = params != null && Build.VERSION.SDK_INT >= 21
+                    ? params.createIntent() : new Intent(Intent.ACTION_GET_CONTENT);
+            if (i == null) i = new Intent(Intent.ACTION_GET_CONTENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            act.startActivityForResult(Intent.createChooser(i, "选择附件"), REQ_FILE_CHOOSER);
+            return true;
+        } catch (Throwable t) {
+            com.hubmobile.app.harness.UpstreamParity.diagLog(act, "ATTACH", "文件选择器启动失败 " + t);
+            cancelFileChooser();
+            return false;
+        }
+    }
+
+    private void launchCameraCapture() {
+        try {
+            android.content.ContentValues cv = new android.content.ContentValues();
+            cv.put(MediaStore.Images.Media.DISPLAY_NAME, "githup_" + System.currentTimeMillis() + ".jpg");
+            cv.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+            cameraOutputUri = act.getContentResolver().insert(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+            Intent i = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+            i.putExtra(MediaStore.EXTRA_OUTPUT, cameraOutputUri);
+            i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            act.startActivityForResult(i, REQ_CAMERA_CAPTURE);
+        } catch (Throwable t) {
+            com.hubmobile.app.harness.UpstreamParity.diagLog(act, "ATTACH", "拍照启动失败 " + t);
+            cameraOutputUri = null;
+            launchFilePicker(null);       // 相机不可用时退回文件选择，绝不「点了没反应」
+        }
+    }
+
+    private void cancelFileChooser() {
+        if (fileChooserCallback != null) {
+            try { fileChooserCallback.onReceiveValue(null); } catch (Throwable ignored) {}
+            fileChooserCallback = null;
+        }
+    }
+
+    /** 由 MainActivity.onActivityResult 转发（AiPanel 不是 Activity，自己收不到）。 */
+    public boolean onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQ_FILE_CHOOSER) {
+            Uri[] uris = null;
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                try { uris = WebChromeClient.FileChooserParams.parseResult(resultCode, data); }
+                catch (Throwable ignored) {}
+                if (uris == null && data.getData() != null) uris = new Uri[]{data.getData()};
+            }
+            if (fileChooserCallback != null) {
+                try { fileChooserCallback.onReceiveValue(uris); } catch (Throwable ignored) {}
+                fileChooserCallback = null;
+            }
+            return true;
+        }
+        if (requestCode == REQ_CAMERA_CAPTURE) {
+            Uri[] uris = null;
+            if (resultCode == Activity.RESULT_OK && cameraOutputUri != null)
+                uris = new Uri[]{cameraOutputUri};
+            if (fileChooserCallback != null) {
+                try { fileChooserCallback.onReceiveValue(uris); } catch (Throwable ignored) {}
+                fileChooserCallback = null;
+            }
+            cameraOutputUri = null;
+            return true;
+        }
+        return false;
+    }
+
+    // ==================== 阶段 AB：白屏兜底页（上游 v1.52） ====================
+
+    /** 主框架加载失败 → 切到不经过引擎的静态页，后台每 2s 探测，通了自动回主界面。 */
+    private void enterFallback(final String why) {
+        ui.post(new Runnable() {
+            @Override public void run() {
+                if (destroyed || web == null) return;
+                if (fallbackActive) return;
+                fallbackActive = true;
+                fallbackWhy = why == null ? "" : why;
+                fallbackSince = System.currentTimeMillis();
+                com.hubmobile.app.harness.UpstreamParity.diagLog(act, "FALLBACK", "进入兜底页：" + fallbackWhy);
+                try {
+                    FrameLayout holder = (FrameLayout) panel.getTag();
+                    if (holder != null) holder.setVisibility(View.VISIBLE);
+                    loading.setVisibility(View.GONE);
+                    web.loadUrl(FALLBACK_URL);
+                } catch (Throwable ignored) {}
+                ui.removeCallbacks(fallbackProbe);
+                ui.postDelayed(fallbackProbe, 2000);
+            }
+        });
+    }
+
+    /** 引擎被看门狗重拉后，AiPanel 主动回主界面（不白屏等用户手点）。 */
+    private void maybeReloadAfterRevive() {
+        try {
+            long e = com.hubmobile.app.harness.UpstreamParity.reviveEpoch();
+            if (e != seenReviveEpoch) {
+                seenReviveEpoch = e;
+                if (seenReviveEpoch > 0 && web != null) {
+                    fallbackActive = false;
+                    ui.removeCallbacks(fallbackProbe);
+                    fallbackWhy = "";
+                    web.loadUrl(com.hubmobile.app.HarnessBridge.homeUrl(act));
+                }
+            }
+        } catch (Throwable ignored) {}
+    }
+
     private void showPageError(final String msg) {
         ui.post(new Runnable() {
             @Override public void run() {
@@ -1382,6 +1723,9 @@ public final class AiPanel {
             web = null;
         }
         ui.removeCallbacksAndMessages(null);
+        ui.removeCallbacks(fallbackProbe);
+        ui.removeCallbacks(reviveWatcher);
+        cancelFileChooser();
     }
 
     private int dp(int v) {
