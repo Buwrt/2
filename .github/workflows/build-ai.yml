@@ -126,30 +126,20 @@ jobs:
           set +e
           if [ -f work/gradle.log ]; then
             tail -c 180000 work/gradle.log > /tmp/diag.txt
-            python3 - <<'PYDIAG'
-          import base64, json, os, urllib.request
-          try:
-          b = open('/tmp/diag.txt','rb').read()[:180000]
-          tok = os.environ['GH_TOKEN']
-          owner, repo, branch = os.environ['OWNER'], os.environ['REPO'], os.environ['BRANCH']
-          api = 'https://api.github.com/repos/%s/%s/contents/ci/last-gradle.log' % (owner, repo)
-          h = {'Authorization':'Bearer '+tok,'Accept':'application/vnd.github+json',
-          'User-Agent':'ci','Content-Type':'application/json'}
-          sha = None
-          try:
-          with urllib.request.urlopen(urllib.request.Request(api, headers=h), timeout=30) as z:
-          sha = json.load(z)['sha']
-          except Exception:
-          pass
-          body = {'message':'ci: upload failed-build gradle diagnostics',
-          'content':base64.b64encode(b).decode(),'branch':branch}
-          if sha: body['sha'] = sha
-          r = urllib.request.Request(api, data=json.dumps(body).encode(), method='PUT', headers=h)
-          with urllib.request.urlopen(r, timeout=60) as z:
-          print('diag uploaded', z.status)
-          except Exception as e:
-          print('diag upload failed', e)
-          PYDIAG
+            B64=$(base64 -w0 /tmp/diag.txt)
+            SHA=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/$OWNER/$REPO/contents/ci/last-gradle.log?ref=$BRANCH" \
+              | jq -r '.sha // empty')
+            if [ -n "$SHA" ]; then
+              JSON="{\"message\":\"ci: upload failed-build gradle diagnostics\",\"content\":\"$B64\",\"branch\":\"$BRANCH\",\"sha\":\"$SHA\"}"
+            else
+              JSON="{\"message\":\"ci: upload failed-build gradle diagnostics\",\"content\":\"$B64\",\"branch\":\"$BRANCH\"}"
+            fi
+            curl -s -X PUT -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Content-Type: application/json" -H "Accept: application/vnd.github+json" \
+              -d "$JSON" \
+              "https://api.github.com/repos/$OWNER/$REPO/contents/ci/last-gradle.log" \
+              -o /dev/null -w "diag-put=%{http_code}\n"
           fi
 
       - name: Inject payload.zip, zipalign, re-sign with official key
