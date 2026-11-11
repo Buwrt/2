@@ -162,6 +162,8 @@ public final class AiPanel {
        让 WebView 真的重新测量。 */
     private int savedSoftInputMode = -1;
     private int lastKeyboardHeight = -1;
+    /** decor 可视区底部（= 键盘上沿的屏幕 y）。阶段 AC 用它做 TOP 锚定。 */
+    private int lastVisibleBottom = -1;
     private android.view.ViewTreeObserver.OnGlobalLayoutListener kbWatcher;
 
     /* 阶段 X：当前仓库卡。原生层渲染，零 LLM token。 */
@@ -242,7 +244,8 @@ public final class AiPanel {
             @Override public void onLayoutChange(View v, int l, int t, int r, int b,
                                                  int ol, int ot, int or, int ob) {
                 if (expanded && panel != null)
-                    panel.setLayoutParams(panelLp(lastKeyboardHeight > 0 ? lastKeyboardHeight : 0));
+                    panel.setLayoutParams(panelLp(
+                            lastKeyboardHeight > 0 ? lastKeyboardHeight : 0, lastVisibleBottom));
             }
         });
 
@@ -304,21 +307,43 @@ public final class AiPanel {
     }
 
     private FrameLayout.LayoutParams panelLp() {
-        return panelLp(lastKeyboardHeight > 0 ? lastKeyboardHeight : 0);
+        return panelLp(lastKeyboardHeight > 0 ? lastKeyboardHeight : 0, lastVisibleBottom);
     }
 
     /**
-     * keyboardHeight > 0 时：面板占满「可视区域」，顶部让出状态栏、
-     * 底部正好到键盘上沿。WebView 随之变矮并触发 resize，
-     * DSH 的 position:fixed / 100dvh 输入栏才能重新贴到键盘上方。
+     * 阶段 AC：上一轮（AA）方向对但真机没生效，两个硬伤：
+     *  ① MainActivity 是 LAYOUT_FULLSCREEN 的 edge-to-edge 窗口，Android 在
+     *     全屏布局下**会忽略 ADJUST_RESIZE**，decor 根本不缩；
+     *  ② 面板一直是 Gravity.BOTTOM 对齐。键盘弹出时 ADJUST_PAN 把整个
+     *     decor 往上平移，BOTTOM 对齐的面板跟着沉到键盘底下，只剩品牌条
+     *     和一小截工具栏露出来 —— DSH 的白色 composer（fixed bottom:0）
+     *     正好被吞掉，就是用户截图里「工具栏还在、输入框没了」。
+     *
+     * 这轮彻底不让系统插手：
+     *  · 面板展开期间 SOFT_INPUT_ADJUST_NOTHING（decor 不平移、不缩放）
+     *  · 键盘弹出时面板改 Gravity.TOP，topMargin=状态栏高度，
+     *     height= 可视区底部(r.bottom) − 状态栏高度
+     *     → 面板正好铺满「状态栏下沿 ↔ 键盘上沿」，与上游独立全屏
+     *       Activity 的 WebView 视口完全一致，composer 自然贴回键盘上方
+     *  · WebView 尺寸变化 + 显式派发 resize，兼容前端 visualViewport/100dvh
+     *  · 键盘收起恢复原来的 BOTTOM 68% 抽屉 / 全屏
      */
-    private FrameLayout.LayoutParams panelLp(int keyboardHeight) {
+    private FrameLayout.LayoutParams panelLp(int keyboardHeight, int visibleBottom) {
         int avail = root.getHeight();
-        int h;
         if (keyboardHeight > 0) {
-            h = avail > 0 ? Math.max(dp(200), avail - statusBarHeight() - keyboardHeight)
-                          : ViewGroup.LayoutParams.MATCH_PARENT;
-        } else if (fullHeight) {
+            int top = statusBarHeight();
+            int bottom = visibleBottom > 0
+                    ? Math.min(visibleBottom, avail)
+                    : (avail > 0 ? Math.max(top + dp(240), avail - keyboardHeight) : 0);
+            int h = bottom > 0 ? Math.max(dp(240), bottom - top)
+                               : ViewGroup.LayoutParams.MATCH_PARENT;
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, h, Gravity.TOP);
+            lp.topMargin = top;
+            return lp;
+        }
+        int h;
+        if (fullHeight) {
             /* 全屏但**不顶到状态栏**：底部对齐，顶部让出状态栏高度。 */
             h = avail > 0 ? Math.max(dp(200), avail - statusBarHeight())
                           : ViewGroup.LayoutParams.MATCH_PARENT;
@@ -341,13 +366,38 @@ public final class AiPanel {
                     try {
                         decor.getWindowVisibleDisplayFrame(r);
                         int kb = decor.getHeight() - r.bottom;
+                        /* API 30+ 双保险：ADJUST_NOTHING 下部分 ROM 的
+                           getWindowVisibleDisplayFrame 不随 IME 变化，直接读 insets。 */
+                        if (Build.VERSION.SDK_INT >= 30) {
+                            android.view.WindowInsets wi = decor.getRootWindowInsets();
+                            if (wi != null) {
+                                int ime = wi.getInsets(
+                                        android.view.WindowInsets.Type.ime()).bottom;
+                                if (ime > kb) kb = ime;
+                            }
+                        }
                         if (kb < dp(90)) kb = 0;          // 导航栏/状态栏差异不算键盘
-                        if (kb == lastKeyboardHeight) return;
+                        int vb = r.bottom;
+                        if (kb == lastKeyboardHeight && vb == lastVisibleBottom) return;
                         lastKeyboardHeight = kb;
+                        lastVisibleBottom = vb;
+                        /* 落盘：真机若仍不对，导日志就能看到每次可视区变化，
+                           不用再靠猜「是不是键盘事件没触发」。 */
+                        com.hubmobile.app.harness.UpstreamParity.diagLog(
+                                act.getApplicationContext(), "IME",
+                                "kb=" + kb + " visibleBottom=" + vb
+                                + " decor=" + decor.getHeight() + " expanded=" + expanded);
                         if (expanded && panel != null) {
-                            panel.setLayoutParams(panelLp(kb));
-                            if (web != null) web.requestLayout();
-                            /* 布局落定后再请求一次，确保 WebView 收到尺寸变化 */
+                            panel.setLayoutParams(panelLp(kb, vb));
+                            if (web != null) {
+                                web.requestLayout();
+                                /* DSH 前端有 visualViewport / 100dvh 监听，
+                                   尺寸变了再显式派发一次 resize，避免漏帧。 */
+                                if (trustedDoc && Build.VERSION.SDK_INT >= 19)
+                                    web.evaluateJavascript(
+                                        "try{window.dispatchEvent(new Event('resize'));}catch(e){}",
+                                        null);
+                            }
                             ui.post(new Runnable() {
                                 @Override public void run() {
                                     if (!destroyed && web != null) web.requestLayout();
@@ -361,17 +411,36 @@ public final class AiPanel {
         } catch (Throwable ignored) {}
     }
 
-    /** 面板展开期间改用 adjustResize；收起还原底座原本的 adjustPan。 */
+    /**
+     * 面板展开期间：让系统**完全不要动 decor**（不 pan、不 resize），
+     * 可视区由 installKeyboardWatcher 自己算、面板自己 TOP 锚定。
+     * 收起时先收键盘再延迟还原底座的 adjustPan，避免键盘还开着就被平移。
+     */
     private void applySoftInput(boolean aiMode) {
         try {
             android.view.Window w = act.getWindow();
             if (savedSoftInputMode < 0) savedSoftInputMode = w.getAttributes().softInputMode;
             if (aiMode) {
                 w.setSoftInputMode(
-                        android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                        android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
                         | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_UNCHANGED);
             } else {
-                w.setSoftInputMode(savedSoftInputMode);
+                /* 先收键盘：否则还原 adjustPan 的那一帧会把整个窗口顶上去 */
+                try {
+                    android.view.inputmethod.InputMethodManager imm =
+                            (android.view.inputmethod.InputMethodManager)
+                                    act.getSystemService(Context.INPUT_METHOD_SERVICE);
+                    android.os.IBinder token = w.getDecorView().getWindowToken();
+                    if (imm != null && token != null)
+                        imm.hideSoftInputFromWindow(token, 0);
+                } catch (Throwable ignored) {}
+                ui.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        if (destroyed) return;
+                        try { act.getWindow().setSoftInputMode(savedSoftInputMode); }
+                        catch (Throwable ignored) {}
+                    }
+                }, 120);
             }
         } catch (Throwable ignored) {}
     }
@@ -840,7 +909,8 @@ public final class AiPanel {
 
     public void expand() {
         if (destroyed) return;
-        applySoftInput(true);          // 阶段 AA：与上游一样让 WebView 随键盘 resize
+        /* 阶段 AC：不让系统 pan/resize decor，键盘可视区由本类自己接管。 */
+        applySoftInput(true);
         ensureConsent();
 
         /* 每次打开都把视口比例拉回 100%，避免上一次被放大/全屏的状态带过来，
@@ -909,7 +979,9 @@ public final class AiPanel {
     public void collapse() {
         expanded = false;
         lastKeyboardHeight = -1;
-        applySoftInput(false);         // 还原底座的 adjustPan，别影响 GitHub 搜索框
+        lastVisibleBottom = -1;
+        /* 阶段 AC：先收键盘再延迟还原 adjustPan，避免还原帧把窗口顶上去。 */
+        applySoftInput(false);
         panel.setVisibility(View.GONE);
         bubble.setVisibility(ballEnabled ? View.VISIBLE : View.GONE);
         disableNfc();

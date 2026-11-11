@@ -2208,3 +2208,72 @@ VoiceManager、无障碍服务 1990 行、3081 本地桥、3080→3090 端口迁
 - 兜底页 `githupFallback` 桥带 `fallbackActive` 守卫，引擎页调不到它
 - 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload 为第三方二进制，
   再分发请确认许可
+
+
+---
+
+## 三十三、阶段 AC：上一轮输入框修复为什么真机没生效
+
+### 复现截图（用户 16:38）
+
+- **本包**：AI 品牌条 `githup AI · DeepSeek Harness · 复位 · ⛶` 下面
+  **直接就是那排灰色工具图标**，再下面就是系统键盘；
+  上游那张白色圆角 composer（`发消息或创建任务…` + `DeepSeek-V4…` + 蓝色发送键）
+  **完全不见**。上半部分还完整显示着 GitHub 客户端首页（我的仓库 19）。
+- **上游**：composer 稳稳浮在键盘上方，对话区、思考气泡都还在。
+
+不是 DSH 没加载，也不是 `setTextZoom` 没补 —— 是**面板被键盘挤到只剩一条**。
+
+### 上一轮（AA）方向对，但两个硬伤让它落不了地
+
+AA 的诊断没错：`MainActivity` 是 `adjustPan|stateHidden`，上游独立 Activity
+默认 `adjustResize`，Activity 换了键盘行为没跟着换。但 AA 的实现有两条
+在真机上直接失效：
+
+| # | 硬伤 | 后果 |
+|---|---|---|
+| ① | `MainActivity` 用了 `SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN \| LAYOUT_STABLE`（edge-to-edge 全屏布局） | **Android 在全屏布局窗口下会忽略 `ADJUST_RESIZE`**，decor 根本不缩，`applySoftInput(true)` 切了等于没切 |
+| ② | 面板 `panelLp()` 无论什么状态都是 **`Gravity.BOTTOM` 对齐** | 键盘弹出 → `adjustPan` 把**整个 decor 往上平移** → BOTTOM 对齐的面板跟着沉到键盘底下，只剩品牌条 + 一小截工具栏露出来；DSH 的 `position:fixed; bottom:0` composer 正好被吞 |
+
+AA 写的「键盘期间压到 `avail − status − kb`」用的还是 `root.getHeight()`，
+而 root 在 pan 之后屏幕可见部分已经变了，算出来的高度和屏幕上的位置
+对不上。所以截图里 GitHub 首页还完整显示、AI 面板只占底部一条。
+
+### 阶段 AC：不让系统插手，面板自己锚定可视区
+
+1. **`SOFT_INPUT_ADJUST_NOTHING | STATE_UNCHANGED`**
+   面板展开期间系统**完全不 pan、不 resize decor**。键盘就浮在窗口上，
+   可视区由我们自己算。
+2. **键盘弹出时改 `Gravity.TOP`**
+   `topMargin = statusBarHeight()`，
+   `height = min(r.bottom, root.height) − statusBarHeight()`
+   → 面板正好铺满「状态栏下沿 ↔ 键盘上沿」，与上游独立全屏 Activity 的
+   WebView 视口**完全一致**。composer 自然贴回键盘上方。
+3. **高度双保险**
+   `getWindowVisibleDisplayFrame()` + API 30+ `WindowInsets.Type.ime()`
+   取较大值；ADJUST_NOTHING 下部分 ROM 的 visibleFrame 不随 IME 变化时
+   insets 仍能拿到键盘高度。
+4. **显式派发 `resize`**
+   WebView `requestLayout()` 后 `window.dispatchEvent(new Event('resize'))`，
+   兼容 DSH 前端 `visualViewport` / `100dvh` 监听。
+5. **收起面板**：先 `hideSoftInputFromWindow`，延迟 120ms 再还原底座的
+   `adjustPan|stateHidden` —— 否则还原那一帧键盘还开着，窗口会被顶上去。
+6. 每次可视区变化写 `IME kb=… visibleBottom=… decor=… expanded=…`
+   到 `diagnostics.log`，真机若仍不对，导日志即可定位，不用再猜。
+7. 保留 AA 的 `setTextZoom(100)`（系统大字体不撑大整页）。
+
+### 键盘期间会盖住 GitHub 客户端吗
+
+会。键盘弹出时面板 TOP 锚定占满可视区，与上游独立全屏观感一致；
+**收起键盘立即恢复原来的 68% 抽屉 / 全屏**，GitHub 客户端上半部分重新可见。
+这是「点开 AI 打字」该有的专注态，不改变单图标同屏设计。
+
+### 验证与边界（如实）
+
+- 已验证：Java 结构、JS 语法、Manifest、包身份、签名、防护链与源码指纹自洽
+- **未真机验证** `ADJUST_NOTHING` 下各 ROM 的 `getWindowVisibleDisplayFrame`
+  与 IME insets 时序；已用双取值 + 显式 resize 派发兜底
+- `dp(90)` 阈值：更小的高度差当导航栏差异忽略
+- 键盘监听只在 `expanded` 时改布局，不影响纯逛 GitHub
+- 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload 为第三方二进制，
+  再分发请确认许可
