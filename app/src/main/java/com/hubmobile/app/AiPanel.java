@@ -974,6 +974,9 @@ public final class AiPanel {
 
     public void expand() {
         if (destroyed) return;
+        /* 阶段 AE：桌宠/控制台/AI 辅助全靠 3081 桥，桥没在听按钮就点不动。
+           展开面板时自愈一次（start() 有 isRunning 短路，重复调用无害）。 */
+        try { LocalBridgeServer.ensure(act.getApplicationContext()); } catch (Throwable ignored) {}
         /* 阶段 AD：切回普通窗口 + ADJUST_RESIZE，让系统像上游一样缩窗口。 */
         applySoftInput(true);
         ensureConsent();

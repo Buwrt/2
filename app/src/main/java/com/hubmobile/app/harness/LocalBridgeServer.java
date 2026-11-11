@@ -59,6 +59,13 @@ public final class LocalBridgeServer {
 
     private LocalBridgeServer(Context c) { app = c.getApplicationContext(); }
 
+    /**
+     * 阶段 AE：桥可能因 3081 被占 / 进程重启而没在听。
+     * 桌宠、控制台、/gh/*、/app/* 全靠它，展开面板时自愈一次。
+     * start() 本身已有 isRunning 短路，重复调用无害。
+     */
+    public static synchronized void ensure(Context c) { start(c); }
+
     public static synchronized void start(Context c) {
         if (sInstance != null && sInstance.running) return;
         if (sInstance != null) sInstance.stop();
@@ -269,11 +276,59 @@ public final class LocalBridgeServer {
         }
     }
 
+    /**
+     * 阶段 AE：桌宠按钮「启动不了」的确凿断点。
+     *
+     * 前端桌宠页的「显示桌宠 / 召回桌宠 / 打开面板」走的是
+     * **GET /overlay?action=show|panel|dock**，不是 dshshell.ctlAct，
+     * 也不是 /setting POST。而本仓里两处悬浮窗权限引导
+     * （jumpSetting() 与 ShellBridge.openSettings()）分别挂在那两条路径上，
+     * 这条路径一条都不经过。于是没授权时：
+     *   ① 完全不检查 canDrawOverlays，也不拉 ACTION_MANAGE_OVERLAY_PERMISSION
+     *   ② 直接 startForegroundService → onCreate → addToWindow()
+     *      → wm.addView(TYPE_APPLICATION_OVERLAY) 抛 permission denied
+     *      → stopSelf()，服务当场自杀
+     *   ③ 桥却无条件回 ok:true / running:true / visible:true（**假成功**）
+     * 前端先显示「桌宠已召回」，700ms 后 reload() 读到真实 running=false，
+     * 开关弹回、按钮像没反应 —— 用户看到的就是「桌宠按钮启动不了」。
+     *
+     * 现在：要 addView 的动作先查权限 → 没权限就拉授权页并回带中文原因的
+     * ok:false（前端 run() 会把它显示成红色提示）；有权限就投递后等真实
+     * 服务起来，回报 statusJson 的真实值，不再自己编 running/visible。
+     */
     private String overlay(String query) {
         String action = param(query, "action", "status");
         String on = param(query, "on", "");
         boolean v = "1".equals(on) || "true".equals(on);
         SharedPreferences sp = app.getSharedPreferences("dsh_prefs", Context.MODE_PRIVATE);
+        boolean needsWindow = "show".equals(action) || "panel".equals(action) || "dock".equals(action);
+        boolean canDraw = OverlayService.canDraw(app);
+        com.hubmobile.app.harness.UpstreamParity.diagLog(app, "OVERLAY",
+                "action=" + action + " canDraw=" + canDraw
+                + " instance=" + (OverlayService.get() != null)
+                + " running=" + OverlayService.isRunning);
+        if (needsWindow && !canDraw) {
+            /* 只在真正要 addView 的动作上拉授权页，且 10 秒内不重复拉，
+               避免用户连点时被反复甩到系统设置。 */
+            long now = System.currentTimeMillis();
+            if (now - sp.getLong("ovl_perm_prompt_at", 0L) > 10000L) {
+                sp.edit().putLong("ovl_perm_prompt_at", now).apply();
+                try {
+                    Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:" + app.getPackageName()));
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    app.startActivity(i);
+                } catch (Throwable t) {
+                    com.hubmobile.app.harness.UpstreamParity.diagLog(app, "OVERLAY",
+                            "open permission page failed: " + t);
+                }
+            }
+            return "{\"ok\":false,\"running\":false,\"visible\":false,"
+                    + "\"permission\":false,\"needPermission\":true,"
+                    + "\"fluid\":" + OverlayService.fluidOn()
+                    + ",\"vscreen\":" + OverlayService.vscreenOn()
+                    + ",\"error\":\"需要先开启「显示在其他应用上层」权限，已为你打开设置页；开完回来再点一次\"}";
+        }
         if ("fluid".equals(action)) {
             boolean ok = OverlayService.setFluidFromBridge(v);
             OverlayService.dispatch(app, "fluid=" + (v ? "1" : "0"), null);
@@ -285,9 +340,18 @@ public final class LocalBridgeServer {
             return overlayState(true, true, true, OverlayService.fluidOn(), ok, ok);
         }
         if ("show".equals(action)) {
-            OverlayService.dispatch(app, "show", null);
-            return overlayState(true, true, true, OverlayService.fluidOn(),
-                    OverlayService.vscreenOn(), true);
+            boolean posted = OverlayService.dispatch(app, "show", null);
+            boolean up = awaitOverlay(1200);
+            com.hubmobile.app.harness.UpstreamParity.diagLog(app, "OVERLAY",
+                    "show posted=" + posted + " up=" + up);
+            if (!posted || !up) {
+                return "{\"ok\":false,\"running\":" + up + ",\"visible\":" + up
+                        + ",\"permission\":" + canDraw
+                        + ",\"error\":\"悬浮窗服务没起来："
+                        + (posted ? "系统可能限制了后台启动，重进一次 App 再点" : "服务启动被系统拒绝")
+                        + "\"}";
+            }
+            return realOverlayState();
         }
         if ("hide".equals(action)) {
             OverlayService.dispatch(app, "hide", null);
@@ -304,10 +368,36 @@ public final class LocalBridgeServer {
             return r == null || r.contains("\"ok\":true")
                     ? "{\"ok\":true,\"running\":true,\"visible\":true}" : r;
         }
+        /* status：补 permission / needPermission，让状态行能如实反映授权缺失。 */
         try {
-            return new JSONObject(OverlayService.statusJson(app)).put("on", true).toString();
+            JSONObject o = new JSONObject(OverlayService.statusJson(app));
+            o.put("on", true).put("permission", canDraw)
+                    .put("needPermission", !canDraw);
+            return o.toString();
         } catch (Throwable t) {
             return OverlayService.statusJson(app);
+        }
+    }
+
+    /** 等 OverlayService 真的 onCreate 完（instance 挂上），最多 ms 毫秒。 */
+    private boolean awaitOverlay(long ms) {
+        long end = System.currentTimeMillis() + ms;
+        while (System.currentTimeMillis() < end) {
+            if (OverlayService.get() != null && OverlayService.isRunning) return true;
+            try { Thread.sleep(80); } catch (Throwable ignored) { break; }
+        }
+        return OverlayService.get() != null && OverlayService.isRunning;
+    }
+
+    /** 从 statusJson 读真实状态，不再自己编 running/visible。 */
+    private String realOverlayState() {
+        try {
+            JSONObject o = new JSONObject(OverlayService.statusJson(app));
+            o.put("ok", true).put("on", true)
+                    .put("permission", OverlayService.canDraw(app));
+            return o.toString();
+        } catch (Throwable t) {
+            return "{\"ok\":true,\"running\":true,\"visible\":true}";
         }
     }
 

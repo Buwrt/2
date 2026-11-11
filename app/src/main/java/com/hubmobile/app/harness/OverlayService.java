@@ -4440,7 +4440,7 @@ public class OverlayService extends Service {
     // 上游壳走的是 togglePanelFromBridge / reshowFromBridge / setFluidFromBridge。
     // 这里把两种口径对齐，不改上游 4402 行主体。
 
-    public static void dispatch(Context c, String action, String text) {
+    public static boolean dispatch(Context c, String action, String text) {
         Intent i = new Intent(c, OverlayService.class);
         i.putExtra("bridgeAction", action == null ? "show" : action);
         if (text != null) i.putExtra("bridgeText", text);
@@ -4453,7 +4453,21 @@ public class OverlayService extends Service {
         try {
             if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(i);
             else c.startService(i);
-        } catch (Throwable ignored) {}
+            return true;
+        } catch (Throwable t) {
+            /* 阶段 AE：以前这里 catch(ignored) 把异常整个吞掉，服务到底有没有
+               起来桥一概不知，只能回假成功。现在落盘 + startService 兜底。 */
+            com.hubmobile.app.harness.UpstreamParity.diagLog(c, "OVERLAY",
+                    "startForegroundService failed: " + t);
+            try {
+                c.startService(i);
+                return true;
+            } catch (Throwable t2) {
+                com.hubmobile.app.harness.UpstreamParity.diagLog(c, "OVERLAY",
+                        "startService fallback failed: " + t2);
+                return false;
+            }
+        }
     }
 
     /** 供 3081 /overlay 读取：running / visible / fluid / vscreen / permission。 */

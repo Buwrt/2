@@ -2370,3 +2370,104 @@ insets 没派发（把日志发我）；**resized=false** = ROM 忽略 resize，
 - 键盘监听只在 `expanded` 时改布局，不影响纯逛 GitHub
 - 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload 为第三方二进制，
   再分发请确认许可
+
+
+---
+
+## 三十五、阶段 AE：桌宠按钮「启动不了」
+
+### 现象
+
+用户反馈桌宠按钮点了起不来（无截图，按前端按钮链路逐段核查源码）。
+
+### 确凿断点：GET /overlay 这条路径**从来没有权限引导，而且回的是假成功**
+
+前端 `dsh-android-console/lib/client.js`：
+
+```js
+const OVERLAY_BRIDGE = 'http://127.0.0.1:3081/overlay';
+// 「显示桌宠」开关 / 「召回桌宠」按钮
+run('show', 'action=show')
+run('panel', 'action=panel&show=1')
+```
+
+而仓里两处悬浮窗权限引导分别挂在**别的路径**上：
+
+| 位置 | 挂在 | 桌宠按钮走不走 |
+|---|---|---|
+| `LocalBridgeServer.jumpSetting()` | `/setting` POST（`android_setting_app` 插件） | ❌ |
+| `ShellBridge.openSettings()` | `dshshell.ctlAct("setting.open.overlay")` | ❌ |
+
+于是「显示桌宠 / 召回桌宠 / 打开面板」这条 GET 路径在没授权时：
+
+1. **不检查** `Settings.canDrawOverlays()`，也**不拉**
+   `ACTION_MANAGE_OVERLAY_PERMISSION` —— 用户根本没被提示过要开权限
+   （之前交付说明里写的「点显示桌宠会弹系统提示」与代码不符，是说明错了）
+2. 直接 `startForegroundService` → `OverlayService.onCreate()` →
+   `addToWindow()` → `wm.addView(TYPE_APPLICATION_OVERLAY)` 抛
+   permission denied → `stopSelf()`，**服务当场自杀**
+3. `OverlayService.dispatch()` 里 `catch(Throwable ignored){}` 把
+   FGS 被系统拒绝的异常整个吞掉，连日志都没有
+4. 桥的 `show` 分支**无条件**回
+   `{"ok":true,"running":true,"visible":true}` —— **假成功**
+
+前端 `run()` 收到 `ok:true` 先弹「桌宠已召回，正在当前界面显示」，
+700ms 后 `reload()` 读真实 `statusJson` 得到 `running:false`，开关弹回、
+按钮像没反应。**这就是「启动不了」的完整链条**，不需要真机就能从源码推出来。
+
+Manifest 里 `SYSTEM_ALERT_WINDOW`、`FOREGROUND_SERVICE`、
+`OverlayService(enabled=true)` 都声明齐全，不是漏声明。
+
+### 顺带排掉的其它嫌疑
+
+- 前端写死 `3081`，`LocalBridgeServer.PORT = 3081` 一致；引擎已迁 3090 段，
+  `originOk()` 允许 3090–3099，CORS 没问题
+- `VsreenBridgeService` / `HarnessAccessibilityService` 不绑 3081（后者 3181）
+- `overlayWindowType()` 用的是 `TYPE_APPLICATION_OVERLAY`，与上游一致
+
+### 这轮改了什么
+
+**`LocalBridgeServer.java`**
+
+- `overlay()` 新增权限闸门：`show` / `panel` / `dock` 这类要 `addView`
+  的动作先查 `canDraw`；没权限就拉
+  `ACTION_MANAGE_OVERLAY_PERMISSION`（`FLAG_ACTIVITY_NEW_TASK`，
+  10 秒节流防止连点被反复甩到设置页），并回
+  `ok:false + needPermission:true + 中文 error` —— 前端 `run()` 会把它
+  显示成红色提示，不再静默回弹
+- `show` 分支去掉假成功：`dispatch()` 后 `awaitOverlay(1200)` 等
+  `OverlayService.get() != null && isRunning`，回报 `statusJson` 的**真实**
+  running/visible；服务没起来就回带原因的 `ok:false`
+- `status` 分支补 `permission` / `needPermission`
+- 新增 `ensure(Context)`：展开 AI 面板时自愈 3081 桥（`start()` 已有
+  `isRunning` 短路，重复调用无害），覆盖「桥根本没在听」那一类
+- 所有关键分支写 `OVERLAY` 诊断到 `diagnostics.log`
+
+**`OverlayService.java`**
+
+- `dispatch()` 改返回 `boolean`；`startForegroundService` 失败落盘 +
+  `startService` 兜底，不再 `catch(ignored)` 吞异常
+
+**`AiPanel.java`**
+
+- `expand()` 开头调 `LocalBridgeServer.ensure()`
+
+### 装完怎么操作
+
+覆盖安装 → 完全退出重进 → AI 面板 → 设置 → 桌宠 → 点「显示桌宠」：
+
+- **第一次**（没授权）：自动跳系统「显示在其他应用上层」页，页面红字提示
+  「需要先开启…开完回来再点一次」 → 打开开关 → 返回 App
+- **再点一次**：桌宠真的浮起来，`status` 显示 `在线`
+- 已授权过但服务仍没起：红字会明确写「系统可能限制了后台启动」，
+  日志里有 `OVERLAY show posted=… up=…`
+
+### 验证与边界（如实）
+
+- 已验证：Java 结构、JS 语法、Manifest、包身份、签名、防护链与源码指纹自洽
+- **未真机验证** 授权页跳转与各 ROM 的 FGS 后台启动限制；本轮用户未附截图，
+  若指的不是 DSH 桌宠页那个开关（例如底座设置里的 AI 悬浮球），需补截图再定位
+- `fluid` / `vscreen` 两个开关只改 prefs，不强制要求悬浮窗权限
+- 虚拟屏实时画面仍需 Shizuku，与本修复无关
+- 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload 为第三方二进制，
+  再分发请确认许可
