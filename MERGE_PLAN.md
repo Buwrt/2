@@ -2471,3 +2471,101 @@ Manifest 里 `SYSTEM_ALERT_WINDOW`、`FOREGROUND_SERVICE`、
 - 虚拟屏实时画面仍需 Shizuku，与本修复无关
 - 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload 为第三方二进制，
   再分发请确认许可
+
+
+---
+
+## 三十六、阶段 AF：首次启动 10 步权限向导（与上游 DSH 一致）
+
+### 需求与截图
+
+用户给出上游首次启动页截图：`第 1 / 10 步`、`首次使用 · 配置手机权限`、
+`存储权限`、说明「不给的话，AI 无法保存任何文件」、
+`当前状态：已授权`（绿）、蓝色主按钮 `已授权 ✓`、
+底部 `跳过这页 / 上一步 / 下一步`。要求「第一次启动时先给权限」。
+
+### 上游实现（源码定位，非猜测）
+
+`harness_src/android-app/src/com/deepseek/harness/MainActivity.java`
+L2488–L2898，注释写着「v1.13.12 重做」：
+
+- `GuidePage`（title / desc / actionLabel / provider / action）
+- `buildGuidePages()` 定义 **9 个权限页**，`renderGuidePage()` 在
+  `guideIndex == guidePages.size()` 时渲染**第 10 页（完成页）**
+  → `total = pages.size() + 1 = 10`，与截图「第 1 / 10 步」精确对上
+- 每页状态行 `PermRow` + `refreshAllStatuses()`（从系统设置授权回来刷新）
+- `guideFinish()` 写 `setup_done=true` → `showEngineScreen(); startEngine()`
+- 配色在 `res/values/colors.xml`：`accent_brand #4D6BFE`、
+  `shell_bg_light #F7F8FB`、`text_on_light #1F2328`、
+  `status_green #1F9D6B`、`status_red #D9503F`
+
+### 之前为什么「仍然不补」
+
+第三十二章写过「原生冷启动控制台 / 8 页权限向导：与单图标同屏冲突」。
+冲突点很具体：上游 `showPermissionScreen()` 用 **`setContentView(root)`**
+把整个 Activity 窗口换掉，走完再 `showEngineScreen()` 重建引擎界面。
+本包 `MainActivity.contentRoot` 里同时住着底座 WebView、AiPanel 面板、
+悬浮球，直接换 content view 会把 GitHub 客户端整个抹掉，违背「点开就是
+githup、AI 同屏」的既定设计。
+
+### 这轮怎么解决
+
+新增 `com.hubmobile.app.harness.PermissionWizard`（638 行），
+**逐项移植上游 9 页 + 完成页**，只改四处：
+
+| # | 上游 | 本包 | 原因 |
+|---|---|---|---|
+| ① | `setContentView(root)` | `host.addView(root, MATCH_PARENT)` 盖在 contentRoot 顶层 | 保留底座 WebView 与 AI 面板，走完只移除这一层 |
+| ② | `guideFinish() → showEngineScreen(); startEngine()` | 写 `setup_done`、移除覆盖层 | 引擎已在 `AiPanel.attach()` 无条件后台启动，不因向导暂停 |
+| ③ | `showShizukuDialog()` 完整授权链 | 说明弹窗 + 打开 Shizuku | 本版未接入 Shizuku hidden AIDL 服务端，如实标注「可选、不给也完全能用」 |
+| ④ | 完成页「AI 工作区」行 | 改成「权限可在设置里再改 / 引擎已后台启动」 | 本包工作区走 3081 的 GitHub 镜像，不是 SAF 目录 |
+
+其余（文案、字号、颜色、圆角按钮、进度文字、`已授权 ✓` 固定白字 +
+自绘蓝底所以禁用后仍亮蓝、跳过/上一步/下一步、`setup_done`、
+返回系统设置后刷新）全部与上游同构。
+
+### 10 步清单（顺序与上游一致）
+
+1. 存储权限 — READ/WRITE_EXTERNAL_STORAGE 运行时申请
+2. 所有文件访问 — Android 11+ `ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION`
+3. 悬浮窗 — `ACTION_MANAGE_OVERLAY_PERMISSION`（正好衔接阶段 AE 桌宠修复）
+4. 修改系统设置 — `ACTION_MANAGE_WRITE_SETTINGS`
+5. 使用情况访问 — `ACTION_USAGE_ACCESS_SETTINGS`
+6. 安装未知来源应用 — `ACTION_MANAGE_UNKNOWN_APP_SOURCES`
+7. 忽略电池优化 — `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`
+8. 通知权限 — `POST_NOTIFICATIONS` / 通知设置页
+9. Shizuku / Root 特权（可选）
+10. 完成页 —「配置完成」+「开始使用」
+
+### 接入点
+
+- `MainActivity.boot()` 末尾 `PermissionWizard.showIfNeeded()`：
+  `perm_wizard/setup_done` 为 false 才显示，**只在第一次启动**
+- `MainActivity.onResume()` / `onNewIntent()` → `refreshActive()`：
+  从系统设置授权回来，状态行变绿、按钮变 `已授权 ✓`
+- `onRequestPermissionsResult()` → `onPermissionsResult()`（运行时权限两页）
+- `onBackPressed()` → 向导期间消费返回键 = 跳过这页，不退出、不写 done
+- 底座原有的 `TotpService.ensureNotificationPermission()` 在向导期间让路，
+  避免两个系统权限框叠一起（通知权限由第 8 步统一申请）
+- 向导是 edge-to-edge 窗口上的一层，顶部手动让出状态栏高度并切
+  `LIGHT_STATUS_BAR`，收起时还原 `savedSysUi`
+- `JsBridge.openPermissionWizard()` + 设置页「首次使用权限向导」一行：
+  走完后随时可重开逐项改权限（上游控制台「权限」页的等价入口）
+
+### 装完怎么验
+
+覆盖安装 → **完全退出 App 再重进** → 首屏应是
+`第 1 / 10 步 · 首次使用 · 配置手机权限 · 存储权限` 白底蓝按钮页，
+与截图一致。逐项点「去授权」→ 系统设置开完返回，本页立刻变
+「已授权 ✓」；可「跳过这页」；第 10 页点「开始使用」进入 githup。
+**走完一次后不再弹**；想再看去「我的 → 设置 → 首次使用权限向导」。
+
+### 验证与边界（如实）
+
+- 已验证：Java 结构、JS 语法、Manifest、包身份、签名、防护链与源码指纹自洽
+- **未真机验证** 各 ROM 的授权页跳转与 `POST_NOTIFICATIONS` 在
+  targetSdk 28 下的实际弹框行为；每页都可跳过，不会卡死流程
+- 第 9 步 Shizuku 页如实标「可选」，本版不提供特权服务端
+- 引擎仍在后台无条件启动，向导只是 UI 层，不阻塞 AI 能力
+- 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload 为第三方二进制，
+  再分发请确认许可

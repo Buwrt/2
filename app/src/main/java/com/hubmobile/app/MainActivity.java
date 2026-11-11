@@ -139,7 +139,10 @@ public class MainActivity extends Activity {
            开关已经删掉了，所以通知权限得在这里主动要一次。Android 13+
            不给这个权限的话，后台的动态码通知发不出去。只申请不放权限框
            之外的任何东西，用户拒绝也照常用。 */
-        TotpService.ensureNotificationPermission(this);
+        /* 阶段 AF：首次使用向导会统一申请通知权限（第 8/10 步）。
+           向导盖在最上层时底下再弹一个系统权限框会叠成一团，先让开。 */
+        if (!com.hubmobile.app.harness.PermissionWizard.willShow(this))
+            TotpService.ensureNotificationPermission(this);
 
         /* 上次如果崩过，把记录亮出来。
          * 放在最后：启动流程都走完了才提示，免得和首屏抢注意力。 */
@@ -160,6 +163,22 @@ public class MainActivity extends Activity {
             if (pending != null && aiPanel != null) aiPanel.acceptShare(pending);
             if (getIntent() != null && getIntent().getBooleanExtra("open_ai", false)
                     && aiPanel != null) aiPanel.expand();
+        } catch (Throwable ignored) { }
+
+        /* 阶段 AF：与上游 DSH 一致 —— 第一次启动先走 10 步「首次使用 · 配置手机权限」。
+         * 只是盖一层全屏 View，不 setContentView 替换窗口：
+         * 底座 WebView、AI 面板、后台引擎装载都在，用户走完向导直接就能用。
+         * 引擎仍在 AiPanel.attach() 里无条件后台启动，不因向导暂停。 */
+        try {
+            com.hubmobile.app.harness.PermissionWizard.showIfNeeded(this, contentRoot);
+        } catch (Throwable ignored) { }
+    }
+
+    /** 设置页「首次使用权限向导」重新打开（供 NativeBridge 调用）。 */
+    public void showPermissionWizard(boolean force) {
+        try {
+            if (force) com.hubmobile.app.harness.PermissionWizard.reopen(this, contentRoot);
+            else com.hubmobile.app.harness.PermissionWizard.showIfNeeded(this, contentRoot);
         } catch (Throwable ignored) { }
     }
 
@@ -809,6 +828,9 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        /* 阶段 AF：向导第 1/8 步的运行时权限结果 → 刷新「已授权 ✓」 */
+        com.hubmobile.app.harness.PermissionWizard.onPermissionsResult(
+                requestCode, permissions, grantResults);
         if (requestCode == JsBridge.REQ_MEDIA_PERM && bridge != null) {
             bridge.onMediaPermissionResult();
         } else if (requestCode == JsBridge.REQ_CAMERA_PERM && bridge != null) {
@@ -834,6 +856,7 @@ public class MainActivity extends Activity {
            setIntent 让后续 applyExternalUrl 能拿到新链接。 */
         setIntent(intent);
         applyExternalUrl();
+        com.hubmobile.app.harness.PermissionWizard.refreshActive();
         /* 旧「githup AI」桌面图标 / 系统分享会被 HarnessActivity 转到这里 */
         if (aiPanel != null) {
             Intent p = AiPanel.takePendingShare();
@@ -858,7 +881,10 @@ public class MainActivity extends Activity {
         /* 顺手补一次通知权限。用户第一次可能点了「不允许」（那时还没有
            账户、不理解要通知干嘛），之后加完账户回到 App 时再给一次机会。
            已授权时这个方法直接返回，不会重复弹框。 */
-        TotpService.ensureNotificationPermission(this);
+        /* 阶段 AF：从系统设置页授权回来，刷新向导当前页的「已授权 ✓」。 */
+        com.hubmobile.app.harness.PermissionWizard.refreshActive();
+        if (!com.hubmobile.app.harness.PermissionWizard.isActive())
+            TotpService.ensureNotificationPermission(this);
 
         /* 回到前台时把通知轮询挂上。
 
@@ -960,6 +986,8 @@ public class MainActivity extends Activity {
           JavascriptInterface 只能用 @JavascriptInterface 方法，
           拿不到即时的布尔结果。
         */
+        // 阶段 AF：首次使用向导期间，返回键 = 跳过这页（不退出、不写 done）
+        if (com.hubmobile.app.harness.PermissionWizard.onBack()) return;
         // 阶段 L：AI 面板开着时，返回键只收起面板（不退出、也不「退回 githup」）
         if (aiPanel != null && aiPanel.onBackPressed()) return;
         if (webView == null) {

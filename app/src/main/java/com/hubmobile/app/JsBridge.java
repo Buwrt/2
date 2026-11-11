@@ -183,6 +183,18 @@ public class JsBridge {
      * 因为 HarnessActivity 已去掉独立 taskAffinity 并改成 singleTop，
      * 它会压进底座同一个返回栈，按系统返回就回到刚才浏览的位置。
      */
+    /**
+     * 阶段 AF：设置页重新打开「首次使用 · 配置手机权限」10 步向导。
+     * 首次启动由 MainActivity.boot() 自动拉起，不用前端管。
+     */
+    @JavascriptInterface
+    public void openPermissionWizard() {
+        try {
+            if (activity instanceof MainActivity)
+                ((MainActivity) activity).showPermissionWizard(true);
+        } catch (Throwable ignored) {}
+    }
+
     @JavascriptInterface
     public void openAI() {
         try {
