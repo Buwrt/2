@@ -4,7 +4,7 @@
 {"entries": 41426, "changed_files": 29, "replaced_hits": 39, "size": 159794879}
 
 --- work/verify.json ---
-{"size": 161923349, "sha256": "c1a8056e7a0a5cbbf6ad725b0f7d2f9f7fffc220c3e75fbc337327d3aa15d6fb", "payload_size": 159794879, "harness_assets": 122, "guard_ok": true}
+{"size": 161923349, "sha256": "d3dcf8576bc47c4729a1a7b1e2e013db8e48b50fca78fc494d43fc3bbc935a66", "payload_size": 159794879, "harness_assets": 122, "guard_ok": true}
 
 --- work/badging.txt ---
 package: name='com.hubmobile.app' versionCode='1002020' versionName='1.2.20' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34' compileSdkVersionCodename='14'
@@ -75,24 +75,24 @@ Warning: SDK processing. This version only understands SDK XML versions up to 3 
 > Task :app:extractProguardFiles
 > Task :app:mergeReleaseArtProfile
 > Task :app:processReleaseJavaRes NO-SOURCE
-> Task :app:processReleaseManifestForPackage
-> Task :app:mergeReleaseJavaResource
 > Task :app:mergeReleaseShaders FROM-CACHE
 > Task :app:compileReleaseShaders NO-SOURCE
 > Task :app:generateReleaseAssets UP-TO-DATE
-> Task :app:processReleaseResources
+> Task :app:mergeReleaseJavaResource
 > Task :app:mergeReleaseAssets
+> Task :app:processReleaseManifestForPackage
+> Task :app:processApplicationManifestReleaseForBundle
+> Task :app:collectReleaseDependencies
+> Task :app:compressReleaseAssets
+> Task :app:processReleaseResources
+> Task :app:bundleReleaseResources
+> Task :app:sdkReleaseDependencyData
 
 > Task :app:compileReleaseJavaWithJavac
 Note: Some input files use or override a deprecated API.
 Note: Recompile with -Xlint:deprecation for details.
 
 > Task :app:mergeReleaseGeneratedProguardFiles
-> Task :app:processApplicationManifestReleaseForBundle
-> Task :app:collectReleaseDependencies
-> Task :app:bundleReleaseResources
-> Task :app:compressReleaseAssets
-> Task :app:sdkReleaseDependencyData
 > Task :app:validateSigningRelease
 > Task :app:writeReleaseAppMetadata
 > Task :app:writeReleaseSigningConfigVersions
@@ -104,7 +104,7 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:createReleaseApkListingFileRedirect
 > Task :app:assembleRelease
 
-BUILD SUCCESSFUL in 52s
+BUILD SUCCESSFUL in 59s
 37 actionable tasks: 36 executed, 1 from cache
 
 
