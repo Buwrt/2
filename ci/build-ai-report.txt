@@ -42,8 +42,8 @@ n$4.withWorkspace(TaskExecution.java:293)
 	at org.gradle.internal.concurrent.AbstractManagedExecutor$1.run(AbstractManagedExecutor.java:47)
 
 
-BUILD FAILED in 29s
-30 actionable tasks: 29 executed, 1 from cache
+BUILD FAILED in 25s
+22 actionable tasks: 21 executed, 1 from cache
 
 
 --- gradle errors ---
