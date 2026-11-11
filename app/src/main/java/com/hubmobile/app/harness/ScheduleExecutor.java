@@ -209,87 +209,20 @@ public final class ScheduleExecutor {
 
     /** 启动 node 引擎（同 MainActivity.spawnNode 的环境变量；payload 必须已解压）。
      *  端口 = enginePort(ctx)，与主引擎换端口后保持一致。 */
+    /**
+     * 阶段 Y+：定时任务不再自己 spawn node。
+     *
+     * 旧实现是一整套独立 ProcessBuilder：不经过 HarnessBridge.LOCK、不做
+     * 残留清理、不改 sProc/sTokenUrl、还把日志 append 到同一个 dsh-web.log。
+     * 它和主启动并发时两边都挑中 3080，后 listen 的那个报
+     * `EADDRINUSE: 127.0.0.1:3080` → webserver(required) 失败 → 整引擎崩。
+     * 现在统一委托 HarnessBridge.ensureEngine()，只有一个进程会 listen。
+     */
     private static boolean startEngine(Context ctx) {
-        try {
-            File payload = new File(ctx.getFilesDir(), "payload");
-            File node = new File(payload, "runtime/bin/node");
-            // dshroot：v1.5.3 起【内部优先】（主引擎同款——内部存储读内核快，避免真机外部 FUSE
-            // 2 万+ 文件 stat 风暴造成 50-60s 慢启动）；内部缺失时回退本包外部目录
-            //（正式版 DeepSeekHarness / Lite DeepSeekHarnessLite），再回退另一版本目录。
-            File dshroot = null;
-            File internal = new File(payload, "dshroot");
-            if (new File(internal, REL_BINJS).exists()) {
-                dshroot = internal;
-            } else {
-                String selfRoot = ctx.getPackageName().contains(".beta")
-                        ? "DeepSeekHarnessLite" : "DeepSeekHarness";
-                String otherRoot = selfRoot.equals("DeepSeekHarnessLite") ? "DeepSeekHarness" : "DeepSeekHarnessLite";
-                for (String root : new String[]{selfRoot, otherRoot}) {
-                    File ext = new File(android.os.Environment.getExternalStorageDirectory(), root + "/dshroot");
-                    if (new File(ext, REL_BINJS).exists()) { dshroot = ext; break; }
-                }
-            }
-            if (dshroot == null) { log(ctx, "dshroot 未找到"); return false; }
-            File binjs = new File(dshroot, REL_BINJS);
-            File lib = new File(payload, "runtime/lib");
-            File home = new File(payload, "dshhome");
-            File bin = new File(payload, "bin");
-            File tmp = new File(ctx.getCacheDir(), "tmp");
-            if (!tmp.exists()) tmp.mkdirs();
-            if (!node.exists()) { log(ctx, "node 缺失"); return false; }
-            if (!node.canExecute()) node.setExecutable(true, false);
-
-            ProcessBuilder pb = new ProcessBuilder(
-                    node.getAbsolutePath(), "--expose-internals", binjs.getAbsolutePath(),
-                    "web", "--host", "127.0.0.1", "--port", String.valueOf(enginePort(ctx)));
-            java.util.Map<String, String> env = pb.environment();
-            env.put("LD_LIBRARY_PATH", lib.getAbsolutePath());
-            // Termux 共存修复（v1.7.4）：同 MainActivity.spawnNode——内置 node 的 OPENSSLDIR
-            // 编译死为 /data/data/com.termux/files/usr，装了 Termux 时读其 openssl.cnf EACCES
-            // 启动即崩。注入 OPENSSL_CONF 指向 payload 自带的可读配置；存在才注入，避免升级
-            // 中途文件缺失时显式指向不存在的路径反而比原来的 ENOENT 静默更糟。
-            File osslConf = new File(payload, "runtime/etc/openssl.cnf");
-            if (osslConf.exists()) env.put("OPENSSL_CONF", osslConf.getAbsolutePath());
-            env.put("PATH", bin.getAbsolutePath() + ":" +
-                    new File(payload, "runtime/bin").getAbsolutePath() + ":/system/bin:/system/xbin");
-            env.put("HOME", ctx.getFilesDir().getAbsolutePath());
-            env.put("DSH_HOME", home.getAbsolutePath());
-            env.put("TMPDIR", tmp.getAbsolutePath());
-            env.put("TERM", "xterm");
-            env.put("SHIZUKU_APP_ID", ctx.getPackageName());
-            // v1.14.3：原来是死写 "0" —— 定时任务会话里 shizuku_shell / android_* / 虚拟屏**全部缺席**。
-            // 改为真探测（判据同 MainActivity），并把相关环境补齐：
-            //   APP_LOCAL_TOKEN → 默认首选通道就是 App 内嵌桥 /shell，没有它插件会退回抖动的 rish；
-            //   APP_A11Y_PORT   → dsh-tool-accessibility 靠它读屏/点击，缺了「屏幕助手」类工具全不可用。
-            RootShell.Probe rootProbe = probeRoot();
-            env.put("SHIZUKU_AVAILABLE", shizukuAvailable() ? "1" : "0");
-            env.put("ROOT_AVAILABLE", rootProbe.ok ? "1" : "0");
-            env.put("ROOT_SU", rootProbe.suPath);
-            env.put("APP_LOCAL_TOKEN", localToken(ctx));
-            env.put("APP_NOTIFY_PORT", String.valueOf(enginePort(ctx) + 1));
-            env.put("APP_A11Y_PORT", String.valueOf(enginePort(ctx) + 101));
-            pb.redirectErrorStream(true);
-            Process proc = pb.start();
-            // 日志写入 dsh-web.log
-            final File logFile = new File(ctx.getFilesDir(), "dsh-web.log");
-            final InputStream is = proc.getInputStream();
-            new Thread(new Runnable() {
-                @Override public void run() {
-                    try {
-                        FileOutputStream fos = new FileOutputStream(logFile, true);
-                        byte[] b = new byte[4096];
-                        int n;
-                        while ((n = is.read(b)) > 0) { fos.write(b, 0, n); fos.flush(); }
-                        fos.close();
-                    } catch (Throwable ignored) {}
-                }
-            }, "sched-node-log").start();
-            return true;
-        } catch (Throwable t) {
-            Log.w(TAG, "startEngine error", t);
-            return false;
-        }
+        log(ctx, "引擎未运行，走统一启动入口 HarnessBridge.ensureEngine()");
+        return com.hubmobile.app.HarnessBridge.ensureEngine(ctx);
     }
+
 
     /** Create through the authenticated engine RPC wire. */
     private static String createSession(Context ctx) {

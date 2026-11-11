@@ -806,9 +806,19 @@ public final class AiPanel {
             @Override public void onError(String msg) {
                 String brief = msg == null ? "" :
                         (msg.length() > 600 ? "…" + msg.substring(msg.length() - 600) : msg);
+                /* 阶段 Y+：把最常见的 EADDRINUSE 翻成用户能照着做的话，
+                   别再甩一屏英文堆栈。自动重试已在 HarnessBridge.prepare 里做过。 */
+                boolean clash = brief.contains("EADDRINUSE")
+                        || brief.contains("address already in use");
+                String shown = clash
+                        ? "引擎端口 3080 被占用（残留进程 / 后台定时任务 / 上游原版同时运行）。\n"
+                          + "已自动清理并重试；若仍失败：请完全退出本 App 再打开，"
+                          + "或卸载手机上另一个 DeepSeek Harness。\n\n"
+                          + "技术细节：" + brief
+                        : "启动失败：" + brief;
                 err.setVisibility(View.VISIBLE);
-                err.setText("启动失败：" + brief);
-                updateMeta("装载中断");
+                err.setText(shown);
+                updateMeta(clash ? "端口冲突 · 装载中断" : "装载中断");
             }
         });
     }

@@ -83,6 +83,48 @@ public final class HarnessBridge {
         return null;
     }
 
+    /**
+     * 阶段 Y+：给**定时任务 / 前台服务 / 控制台**用的唯一启动入口。
+     *
+     * 原来 ScheduleExecutor 自己有一整套 spawnNode（独立 ProcessBuilder、
+     * 独立端口、独立日志、不经过 LOCK、不设 sProc/sTokenUrl）。它与
+     * HarnessBridge 的启动并发时，两边 pickPort 探测都看到 3080 空闲，
+     * 然后各自起 node —— 谁先 listen 谁赢，输的一方
+     * `listen EADDRINUSE: 127.0.0.1:3080`，webserver(required) 激活失败，
+     * 接着 10 个插件等 webServer 全部 pending，整个引擎 StartupError。
+     *
+     * 现在所有入口都汇到这一个方法：同一把 LOCK、同一套残留清理与端口
+     * 顺延、同一份进程状态。后台任务只要「引擎在跑」，不需要 WebView URL。
+     */
+    public static boolean ensureEngine(Context c) {
+        try {
+            if (existingUrl() != null) return true;
+            android.content.SharedPreferences sp = c.getSharedPreferences(
+                    "dsh_prefs", Context.MODE_PRIVATE);
+            int saved = sp.getInt("engine_port", PORT);
+            /* 本进程刚被系统重建（静态变量已空），但上一次的 node 还活着：
+               直接认定就绪，绝不再起第二个。 */
+            if (saved > 0 && portBusy(saved)) return true;
+            Handler ui = new Handler(Looper.getMainLooper());
+            String url = start(c, ui, new Callback() {
+                @Override public void onStage(String text) {}
+                @Override public void onProgress(long a, long b, long t) {}
+                @Override public void onReady(String u) {}
+                @Override public void onError(String m) {}
+            });
+            return url != null;
+        } catch (Throwable t) {
+            Log.w(TAG, "ensureEngine failed", t);
+            return false;
+        }
+    }
+
+    /** 启动失败重试前清掉指向已死进程的状态，否则 existingUrl() 会一直返回旧值。 */
+    static void resetEngineState() {
+        sProc = null;
+        sTokenUrl = null;
+    }
+
     private static boolean alive(Process p) {
         try { p.exitValue(); return false; } catch (IllegalThreadStateException e) { return true; }
     }
@@ -95,9 +137,28 @@ public final class HarnessBridge {
                     stage(ui, cb, "正在准备 AI 引擎文件…");
                     extract(app, ui, cb);
                     stage(ui, cb, "正在启动本地引擎…");
-                    final String url = start(app, ui, cb);
+                    String url = null;
+                    int attempt = 0;
+                    while (true) {
+                        try { url = start(app, ui, cb); break; }
+                        catch (Throwable t) {
+                            String m = String.valueOf(t.getMessage());
+                            boolean portClash = m.contains("EADDRINUSE")
+                                    || m.contains("address already in use");
+                            if (!portClash || attempt >= 2) throw t;
+                            attempt++;
+                            /* 端口被别人抢先 listen：清掉死进程状态、再杀一次残留、
+                               等端口释放后重走 start()（pickPort 会重新探测并顺延）。 */
+                            resetEngineState();
+                            killStaleEngines(payload(app), PORT);
+                            try { Thread.sleep(900); } catch (InterruptedException ignored) {}
+                            stage(ui, cb, "端口被占用，已清理残留，正在重试（"
+                                    + attempt + "/2）…");
+                        }
+                    }
+                    final String readyUrl = url;
                     ui.post(new Runnable() {
-                        @Override public void run() { cb.onReady(url); }
+                        @Override public void run() { cb.onReady(readyUrl); }
                     });
                 } catch (Throwable t) {
                     Log.e(TAG, "boot failed", t);
@@ -522,8 +583,20 @@ public final class HarnessBridge {
             try { pid = Integer.parseInt(name); } catch (Throwable t) { continue; }
             if (pid == android.os.Process.myPid()) continue;
             String cmd = readCmdline(pid);
-            if (cmd == null || !cmd.contains(marker)) continue;
+            if (cmd == null) continue;
             if (!cmd.contains("bin.js") || !cmd.contains("web")) continue;
+            /* 阶段 Y+：放宽到「同 uid 的任意 DSH node」。定时任务那套旧启动器
+               在 payload 之外也能找到 dshroot，cmdline 未必含本包 payload 路径，
+               但它同样抢 3080。用 uid 锚定，绝不会误伤上游原版 / Termux
+               （不同 uid），也不会碰系统进程。 */
+            boolean mine = cmd.contains(marker);
+            if (!mine) {
+                try {
+                    mine = android.system.Os.stat("/proc/" + pid).st_uid
+                            == android.system.Os.getuid();
+                } catch (Throwable ignored) {}
+            }
+            if (!mine) continue;
             try {
                 android.system.Os.kill(pid, 9);   // SIGKILL：端口必须立刻释放
                 killed++;

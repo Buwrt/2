@@ -1783,3 +1783,136 @@ content:[{type:'text',text}] }` 追加到 `decision.messages`。
 - 总结 / 修改代码仍会把内容发到 DeepSeek 云端；令牌权限越大 AI 经代理
   的能力越大，建议换 fine-grained 最小权限令牌
 - 上游 payload 为第三方二进制，再分发请确认许可
+
+
+---
+
+## 二十九、阶段 Y+：EADDRINUSE 3080 ——「双启动器抢端口」根治
+
+### 真机现象
+
+覆盖安装后打开 AI 面板，开机页显示：
+
+```
+已校验 41,426 / 41,426  ·  本次新增 2
+装载中断
+启动失败：...ueues:90:21)
+Plugins waiting for services (10): web-runtime / open-in-app / ...
+Full diagnostics: /data/user/0/com.hubmobile.app/files/payload/dshhome/logs/startup-...log
+```
+
+用户贴出的完整诊断：
+
+```
+StartupError: dsh: startup failed: 2 required plugins did not activate
+  webserver (required) @deepseek-ai/dsh-host-webserver
+    Error: listen EADDRINUSE: address already in use 127.0.0.1:3080
+  Plugins waiting for services (10): web-runtime (required) webServer,
+    open-in-app webServer, directory-picker webServer, harness-dev-context webApp ...
+```
+
+> ⚠️ 诊断文件开头那句 `WARNING: Raw diagnostics may contain configuration or
+> credential values from plugin errors. Review before sharing.` 不是客套话：
+> 这类日志可能带配置/凭据值，**分享前先过一遍**。本次这份只含端口与堆栈。
+
+### 因果链（单因，不要被 10 个 pending 迷惑）
+
+```
+3080 被占用
+  → webserver(required) listen 失败
+  → 依赖 webServer / webApp 服务的 10 个插件全部 pending
+  → dsh-app-boot 的 required-entry audit 判定 "2 required plugins did not activate"
+  → 写 startup-*.log、node 进程 exit(1)
+  → HarnessBridge.start() 的 alive(p) 变 false
+  → 抛「引擎进程提前退出：+ dsh-web.log 尾部」
+  → 开机页显示整段英文堆栈
+```
+
+所以**不是**插件没装好、不是 AI 能力缺失、不是源码没传全，
+就是**一个端口**。
+
+### 为什么之前「端口顺延 3080→3091」没救回来
+
+先澄清一个旧结论：核查内核后确认 `--port` **是生效的**——
+`bin.js` 的 `parseDshArgs` 用 `allowUnknownOption()/passThroughOptions()`
+把 `web --host 127.0.0.1 --port N` 透传给 `dsh-web-app` 的 `webCommand()`，
+`webStartup.port` 再喂给 `webserver` 行的
+`port: !!js ctx.webStartup.port ?? 3080`。顺延本身没问题。
+
+真正的问题是**包里有两套彼此不知道对方存在的启动器**：
+
+| 启动器 | 位置 | 端口来源 | 是否走 LOCK / 残留清理 |
+|---|---|---|---|
+| 主启动 | `HarnessBridge.start()` | `pickPort(3080)` | ✅ |
+| 后台定时引擎 | `ScheduleExecutor.startEngine()` | `enginePort(ctx)`（默认 3080） | ❌ 独立 `ProcessBuilder` |
+
+`ScheduleExecutor` 那套是历史遗留：独立环境变量、独立端口、
+不设 `sProc`/`sTokenUrl`、还把日志 **append 到同一个 `dsh-web.log`**。
+它自己的注释里甚至已经写着「引擎在跑也判"未就绪"，定时任务于是又去
+拉起一个引擎（EADDRINUSE）」——坑早有记录，只是没根治。
+
+竞态窗口：node 从 `pb.start()` 到真正 `listen` 要加载 4 万文件的插件树，
+好几秒。两边 `pickPort`/`enginePort` 探测时 3080 都是空的 → 都选中 3080
+→ 谁先 listen 谁赢，输的那个报 `EADDRINUSE: 127.0.0.1:3080`。
+**顺延根本没机会介入**，因为失败方拿到的 CLI 参数就是 3080。
+
+覆盖安装又放大了它：系统杀掉 App 主进程，但 `EngineService` 是
+`START_STICKY` 前台服务、通知/定时任务会被拉起，node 子进程也可能变孤儿
+继续占着 3080。
+
+顺带解释截图里的「**本次新增 2**」：每次启动 `extract()` 会发现
+`dshhome/cordis.patch.yml` 与 `profiles/web/cordis.patch.yml` 被我们上一轮
+的插件安装器追加了块、大小与 zip 原版不一致，于是各重写一次。
+安装器在 `start()` 里又会幂等写回去，**属正常现象，不是解压失败**。
+
+### 本轮改动
+
+**① 统一启动入口（根治）**
+
+`HarnessBridge.ensureEngine(Context)`：所有后台入口共用的唯一方法。
+- `existingUrl() != null` → 已在跑，直接返回
+- `portBusy(engine_port)` → 本进程被重建但上次 node 还活着，直接认定就绪
+- 否则走 **`start()`**：同一把 `LOCK`、同一套 `killStaleEngines` +
+  `pickPort`、同一份 `sProc`/`sTokenUrl`、同一条日志
+
+`ScheduleExecutor.startEngine()` 整段独立 `ProcessBuilder` 删除，
+改成一行委托。全仓核查：`"web", "--host"` 形式的独立 spawn **归零**
+（剩下的 `ProcessBuilder` 是 `life.js tick` 之类的本地脚本，不监听端口）。
+
+**② 残留清理放宽到「同 uid 的任意 DSH node」**
+
+旧 `killStaleEngines` 只杀 cmdline 含本包 payload 路径的进程；定时任务那套
+可能从外部 `dshroot` 找 binjs，cmdline 未必含该路径。现改为
+`Os.stat("/proc/<pid>").st_uid == Os.getuid()` 锚定，配合
+`cmdline 含 bin.js + web` 双条件：能清掉本应用所有残留 node，
+**不会误伤上游原版 / Termux（不同 uid）**。
+
+**③ EADDRINUSE 自动重试**
+
+`prepare()` 捕获到 `EADDRINUSE` → `resetEngineState()`（清掉指向死进程的
+`sProc`/`sTokenUrl`，否则 `existingUrl()` 永远返回旧值）→ 再杀一次残留 →
+等 900ms → 重走 `start()`（`pickPort` 重新探测并顺延），最多 2 次。
+开机页同步显示「端口被占用，已清理残留，正在重试（1/2）…」。
+
+**④ 错误文案不再甩一屏英文**
+
+`AiPanel.onError()` 识别端口冲突，改成：
+「引擎端口 3080 被占用（残留进程 / 后台定时任务 / 上游原版同时运行）。
+已自动清理并重试；若仍失败：请完全退出本 App 再打开，或卸载手机上
+另一个 DeepSeek Harness。」技术细节折叠在后面。
+
+### 仍需用户操作的情况
+
+只有一种：手机上**上游原版** `com.deepseek.harness` 正后台运行并占着 3080。
+它的 uid 与本包不同，我们按设计**不杀别的 App 的进程**；此时
+`pickPort` 会顺延到 3091，本包正常启动 —— 若顺延也失败，卸载上游原版
+或完全退出它即可。
+
+### 验证与边界（如实）
+
+- 已验证：Java 结构、JS 语法、Manifest、包身份、签名、防护链与源码指纹自洽
+- **未真机验证**：定时任务与主启动并发的真实时序；但统一入口后
+  「两个 node 同时 listen」在代码路径上已不可能
+- `life.js tick` 等本地脚本仍用独立 `ProcessBuilder`，它们不监听 TCP，
+  与本次故障无关
+- 诊断日志可能含配置/凭据，分享前请先审阅
