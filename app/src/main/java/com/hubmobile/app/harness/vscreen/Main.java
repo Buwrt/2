@@ -31,6 +31,8 @@ import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.hubmobile.app.harness.LocalBridgeAuth;
+
 /**
  * 虚拟屏特权服务端（app_process / shell 身份，由 Shizuku 或 root 拉起）。
  *

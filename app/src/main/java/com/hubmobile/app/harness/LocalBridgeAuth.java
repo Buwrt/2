@@ -57,6 +57,26 @@ public final class LocalBridgeAuth {
         return false;
     }
 
+    /**
+     * 阶段 AB：上游 vscreen 特权端（app_process / 8999 代理）用这个方法从
+     * 原始 HTTP 头里取出 X-DSH-Token，再与共享密钥比对。本包之前只实现了
+     * authorized()，搬入 vscreen/Main.java 后缺这个符号导致编译失败。
+     */
+    public static String fromHeader(String header) {
+        if (header == null) return "";
+        String low = header.toLowerCase(Locale.US);
+        int i = low.indexOf("x-dsh-token:");
+        if (i >= 0) {
+            int eol = header.indexOf('\r', i);
+            if (eol < 0) eol = header.length();
+            return header.substring(i + 12, eol).trim();
+        }
+        String first = header.split("\r\n", 2)[0];
+        int q = first.indexOf("token=");
+        if (q >= 0) return first.substring(q + 6).split("[&\\s]", 2)[0];
+        return "";
+    }
+
     public static void reject(OutputStream out) throws IOException {
         byte[] b = "{\"ok\":false,\"error\":\"unauthorized\"}".getBytes("UTF-8");
         out.write(("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: "
