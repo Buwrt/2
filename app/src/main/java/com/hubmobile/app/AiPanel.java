@@ -161,6 +161,8 @@ public final class AiPanel {
        这里在面板展开期间切 adjustResize，并手动把面板压到「键盘上沿」，
        让 WebView 真的重新测量。 */
     private int savedSoftInputMode = -1;
+    /** 阶段 AD：底座 boot() 设的 SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN，展开 AI 时临时摘掉。 */
+    private int savedSysUi = -1;
     private int lastKeyboardHeight = -1;
     /** decor 可视区底部（= 键盘上沿的屏幕 y）。阶段 AC 用它做 TOP 锚定。 */
     private int lastVisibleBottom = -1;
@@ -311,26 +313,34 @@ public final class AiPanel {
     }
 
     /**
-     * 阶段 AC：上一轮（AA）方向对但真机没生效，两个硬伤：
-     *  ① MainActivity 是 LAYOUT_FULLSCREEN 的 edge-to-edge 窗口，Android 在
-     *     全屏布局下**会忽略 ADJUST_RESIZE**，decor 根本不缩；
-     *  ② 面板一直是 Gravity.BOTTOM 对齐。键盘弹出时 ADJUST_PAN 把整个
-     *     decor 往上平移，BOTTOM 对齐的面板跟着沉到键盘底下，只剩品牌条
-     *     和一小截工具栏露出来 —— DSH 的白色 composer（fixed bottom:0）
-     *     正好被吞掉，就是用户截图里「工具栏还在、输入框没了」。
+     * 阶段 AD：面板布局。
      *
-     * 这轮彻底不让系统插手：
-     *  · 面板展开期间 SOFT_INPUT_ADJUST_NOTHING（decor 不平移、不缩放）
-     *  · 键盘弹出时面板改 Gravity.TOP，topMargin=状态栏高度，
-     *     height= 可视区底部(r.bottom) − 状态栏高度
-     *     → 面板正好铺满「状态栏下沿 ↔ 键盘上沿」，与上游独立全屏
-     *       Activity 的 WebView 视口完全一致，composer 自然贴回键盘上方
-     *  · WebView 尺寸变化 + 显式派发 resize，兼容前端 visualViewport/100dvh
-     *  · 键盘收起恢复原来的 BOTTOM 68% 抽屉 / 全屏
+     * 键盘弹出时优先让系统干活（窗口已切回普通布局 + ADJUST_RESIZE）：
+     * 检测到 decor 与 root 的高度差 ≈ 键盘高度，就说明系统真的把
+     * contentRoot 缩到了键盘上沿，此时面板直接 MATCH_PARENT 填满 root，
+     * WebView view 变矮 → CSS viewport 更新 → composer 贴回键盘上方。
+     *
+     * 若 ROM 忽略 resize，退回阶段 AC 的 Gravity.TOP 锚定（自己铺满
+     * 「状态栏下沿 ↔ 键盘上沿」），保证任何机型都有解。
+     * 键盘收起恢复原来的 BOTTOM 68% 抽屉 / 全屏。
      */
     private FrameLayout.LayoutParams panelLp(int keyboardHeight, int visibleBottom) {
         int avail = root.getHeight();
         if (keyboardHeight > 0) {
+            /* 阶段 AD：窗口已切回普通布局 + ADJUST_RESIZE，正常 ROM 上系统
+               会把 contentRoot 缩到键盘上沿。此时面板直接填满 root 即可，
+               WebView view 高度随之变化 → CSS viewport 更新 → composer 贴键盘上。
+               判据：decor 与 root 的高度差 ≈ 键盘高度。 */
+            int decorH = 0;
+            try { decorH = act.getWindow().getDecorView().getHeight(); } catch (Throwable ignored) {}
+            boolean systemResized = decorH > 0 && avail > 0
+                    && (decorH - avail) >= Math.max(dp(90), keyboardHeight / 2);
+            if (systemResized) {
+                return new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT, Gravity.BOTTOM);
+            }
+            /* ROM 忽略 resize 的兜底：自己 TOP 锚定到可视区底部。 */
             int top = statusBarHeight();
             int bottom = visibleBottom > 0
                     ? Math.min(visibleBottom, avail)
@@ -355,7 +365,21 @@ public final class AiPanel {
         return lp;
     }
 
-    /** 键盘高度监听：decor 可视区域变小 = 软键盘弹起。 */
+    /**
+     * 阶段 AD：键盘检测不再只靠 OnGlobalLayout。
+     *
+     * AA / AC 两次都失败在**同一个隐藏假设**上：以为键盘弹出一定会触发
+     * OnGlobalLayoutListener。事实是：
+     *   · AA 用 ADJUST_RESIZE，但窗口是 LAYOUT_FULLSCREEN → 系统忽略 resize，
+     *     decor 不变 → OnGlobalLayout 不触发；
+     *   · AC 用 ADJUST_NOTHING → 系统明确「不改变 decor 布局」 → 更不会触发。
+     * 两轮写的 TOP 锚定/压高度代码**一次都没执行**，所以真机看起来没变化。
+     *
+     * 正解与上游同构：展开 AI 时把窗口切回普通布局 + ADJUST_RESIZE，
+     * 让系统真的去缩窗口；检测走 API 30+ setOnApplyWindowInsetsListener
+     * （IME insets 独立于 adjust 模式，必定派发），旧版保留 OnGlobalLayout
+     * —— 在 ADJUST_RESIZE 下窗口真变了，它就会触发。
+     */
     private void installKeyboardWatcher() {
         try {
             final View decor = act.getWindow().getDecorView();
@@ -366,79 +390,120 @@ public final class AiPanel {
                     try {
                         decor.getWindowVisibleDisplayFrame(r);
                         int kb = decor.getHeight() - r.bottom;
-                        /* API 30+ 双保险：ADJUST_NOTHING 下部分 ROM 的
-                           getWindowVisibleDisplayFrame 不随 IME 变化，直接读 insets。 */
-                        if (Build.VERSION.SDK_INT >= 30) {
-                            android.view.WindowInsets wi = decor.getRootWindowInsets();
-                            if (wi != null) {
-                                int ime = wi.getInsets(
-                                        android.view.WindowInsets.Type.ime()).bottom;
-                                if (ime > kb) kb = ime;
-                            }
-                        }
-                        if (kb < dp(90)) kb = 0;          // 导航栏/状态栏差异不算键盘
-                        int vb = r.bottom;
-                        if (kb == lastKeyboardHeight && vb == lastVisibleBottom) return;
-                        lastKeyboardHeight = kb;
-                        lastVisibleBottom = vb;
-                        /* 落盘：真机若仍不对，导日志就能看到每次可视区变化，
-                           不用再靠猜「是不是键盘事件没触发」。 */
-                        com.hubmobile.app.harness.UpstreamParity.diagLog(
-                                act.getApplicationContext(), "IME",
-                                "kb=" + kb + " visibleBottom=" + vb
-                                + " decor=" + decor.getHeight() + " expanded=" + expanded);
-                        if (expanded && panel != null) {
-                            panel.setLayoutParams(panelLp(kb, vb));
-                            if (web != null) {
-                                web.requestLayout();
-                                /* DSH 前端有 visualViewport / 100dvh 监听，
-                                   尺寸变了再显式派发一次 resize，避免漏帧。 */
-                                if (trustedDoc && Build.VERSION.SDK_INT >= 19)
-                                    web.evaluateJavascript(
-                                        "try{window.dispatchEvent(new Event('resize'));}catch(e){}",
-                                        null);
-                            }
-                            ui.post(new Runnable() {
-                                @Override public void run() {
-                                    if (!destroyed && web != null) web.requestLayout();
-                                }
-                            });
-                        }
+                        if (kb < dp(90)) kb = 0;
+                        /* API30+ 由 insets 通道权威判定；layout 通道的
+                           visibleFrame 在部分 ROM 上不随 IME 变化，别让它
+                           把已经检测到的键盘又归零，造成两路来回震荡。 */
+                        if (Build.VERSION.SDK_INT >= 30 && kb == 0 && lastKeyboardHeight > 0)
+                            return;
+                        onKeyboardChanged(kb, r.bottom, "layout");
                     } catch (Throwable ignored) {}
                 }
             };
             decor.getViewTreeObserver().addOnGlobalLayoutListener(kbWatcher);
+            /* API 30+：IME insets 是独立通道，ADJUST_RESIZE 与否都会派发。 */
+            if (Build.VERSION.SDK_INT >= 30) {
+                decor.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+                    @Override public android.view.WindowInsets onApplyWindowInsets(
+                            View v, android.view.WindowInsets insets) {
+                        try {
+                            int ime = insets.getInsets(
+                                    android.view.WindowInsets.Type.ime()).bottom;
+                            if (ime < dp(90)) ime = 0;
+                            decor.getWindowVisibleDisplayFrame(r);
+                            onKeyboardChanged(ime, r.bottom, "insets");
+                        } catch (Throwable ignored) {}
+                        /* 不消费：返回系统默认分发，ADJUST_RESIZE 继续生效 */
+                        return v.onApplyWindowInsets(insets);
+                    }
+                });
+            }
         } catch (Throwable ignored) {}
     }
 
+    /** 两路检测汇到这里，统一刷新面板 + 派发 resize + 落盘诊断。 */
+    private void onKeyboardChanged(int kb, int visibleBottom, String source) {
+        if (destroyed) return;
+        if (kb == lastKeyboardHeight && visibleBottom == lastVisibleBottom) return;
+        lastKeyboardHeight = kb;
+        lastVisibleBottom = visibleBottom;
+        int decorH = 0, rootH = 0;
+        try {
+            decorH = act.getWindow().getDecorView().getHeight();
+            rootH = root.getHeight();
+        } catch (Throwable ignored) {}
+        com.hubmobile.app.harness.UpstreamParity.diagLog(
+                act.getApplicationContext(), "IME",
+                "kb=" + kb + " visibleBottom=" + visibleBottom
+                + " decor=" + decorH + " root=" + rootH
+                + " resized=" + (decorH > 0 && rootH > 0 && decorH - rootH >= Math.max(dp(90), kb / 2))
+                + " src=" + source + " expanded=" + expanded);
+        if (expanded && panel != null) {
+            panel.setLayoutParams(panelLp(kb, visibleBottom));
+            if (web != null) {
+                web.requestLayout();
+                if (trustedDoc && Build.VERSION.SDK_INT >= 19)
+                    web.evaluateJavascript(
+                            "try{window.dispatchEvent(new Event('resize'));}catch(e){}", null);
+            }
+            ui.post(new Runnable() {
+                @Override public void run() {
+                    if (!destroyed && web != null) web.requestLayout();
+                }
+            });
+        }
+    }
+
     /**
-     * 面板展开期间：让系统**完全不要动 decor**（不 pan、不 resize），
-     * 可视区由 installKeyboardWatcher 自己算、面板自己 TOP 锚定。
-     * 收起时先收键盘再延迟还原底座的 adjustPan，避免键盘还开着就被平移。
+     * 阶段 AD：与上游同构 —— 展开 AI 时把窗口**切回普通（非全屏布局）窗口**。
+     *
+     * 底座 boot() 设了 SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | LAYOUT_STABLE，
+     * Android 在全屏布局窗口下会忽略 ADJUST_RESIZE（AA 就栽在这）。
+     * 上游 MainActivity 没有这个 flag，默认 adjustResize 就能让 WebView
+     * 随键盘缩小 —— 这才是「composer 稳稳浮在键盘上方」的真正原因。
+     *
+     * 展开：摘掉 LAYOUT_FULLSCREEN + ADJUST_RESIZE
+     * 收起：先收键盘，再还原底座的全屏 flag 与 adjustPan|stateHidden
      */
     private void applySoftInput(boolean aiMode) {
         try {
-            android.view.Window w = act.getWindow();
+            final android.view.Window w = act.getWindow();
+            final View decor = w.getDecorView();
             if (savedSoftInputMode < 0) savedSoftInputMode = w.getAttributes().softInputMode;
+            if (savedSysUi < 0) savedSysUi = decor.getSystemUiVisibility();
             if (aiMode) {
+                int vis = savedSysUi
+                        & ~View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        & ~View.SYSTEM_UI_FLAG_FULLSCREEN;
+                decor.setSystemUiVisibility(vis | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_VISIBLE);
                 w.setSoftInputMode(
-                        android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+                        android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                         | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_UNCHANGED);
+                com.hubmobile.app.harness.UpstreamParity.diagLog(
+                        act.getApplicationContext(), "SYSUI",
+                        "AI 展开：摘掉 LAYOUT_FULLSCREEN，切 ADJUST_RESIZE");
+                /* 主动请求一次 insets 分发，确保键盘状态立刻同步 */
+                if (Build.VERSION.SDK_INT >= 20) decor.requestApplyInsets();
             } else {
-                /* 先收键盘：否则还原 adjustPan 的那一帧会把整个窗口顶上去 */
                 try {
                     android.view.inputmethod.InputMethodManager imm =
                             (android.view.inputmethod.InputMethodManager)
                                     act.getSystemService(Context.INPUT_METHOD_SERVICE);
-                    android.os.IBinder token = w.getDecorView().getWindowToken();
+                    android.os.IBinder token = decor.getWindowToken();
                     if (imm != null && token != null)
                         imm.hideSoftInputFromWindow(token, 0);
                 } catch (Throwable ignored) {}
                 ui.postDelayed(new Runnable() {
                     @Override public void run() {
                         if (destroyed) return;
-                        try { act.getWindow().setSoftInputMode(savedSoftInputMode); }
-                        catch (Throwable ignored) {}
+                        try {
+                            act.getWindow().setSoftInputMode(savedSoftInputMode);
+                            act.getWindow().getDecorView().setSystemUiVisibility(savedSysUi);
+                            com.hubmobile.app.harness.UpstreamParity.diagLog(
+                                    act.getApplicationContext(), "SYSUI",
+                                    "AI 收起：还原底座全屏 flag 与 adjustPan");
+                        } catch (Throwable ignored) {}
                     }
                 }, 120);
             }
@@ -909,7 +974,7 @@ public final class AiPanel {
 
     public void expand() {
         if (destroyed) return;
-        /* 阶段 AC：不让系统 pan/resize decor，键盘可视区由本类自己接管。 */
+        /* 阶段 AD：切回普通窗口 + ADJUST_RESIZE，让系统像上游一样缩窗口。 */
         applySoftInput(true);
         ensureConsent();
 
@@ -980,7 +1045,7 @@ public final class AiPanel {
         expanded = false;
         lastKeyboardHeight = -1;
         lastVisibleBottom = -1;
-        /* 阶段 AC：先收键盘再延迟还原 adjustPan，避免还原帧把窗口顶上去。 */
+        /* 阶段 AD：先收键盘，再延迟还原底座全屏 flag 与 adjustPan。 */
         applySoftInput(false);
         panel.setVisibility(View.GONE);
         bubble.setVisibility(ballEnabled ? View.VISIBLE : View.GONE);

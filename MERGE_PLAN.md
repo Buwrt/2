@@ -2277,3 +2277,96 @@ AA 写的「键盘期间压到 `avail − status − kb`」用的还是 `root.ge
 - 键盘监听只在 `expanded` 时改布局，不影响纯逛 GitHub
 - 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload 为第三方二进制，
   再分发请确认许可
+
+
+---
+
+## 三十四、阶段 AD：为什么 AA / AC 两次「修好」真机都没变
+
+### 用户复现（17:37）
+
+上游打开键盘，白色圆角 composer（`发消息或创建任务…` + `DeepSeek-V4…`
++ 蓝色发送键）稳稳浮在键盘上方；本包依旧不行。
+
+### 确凿根因：两轮代码**一次都没执行**
+
+AA 和 AC 都建立在同一个没验证的假设上：**键盘弹出会触发
+`ViewTreeObserver.OnGlobalLayoutListener`**。事实相反：
+
+| 轮次 | 键盘模式 | decor 是否变 | OnGlobalLayout | 结果 |
+|---|---|---|---|---|
+| AA | `ADJUST_RESIZE` | **不变**（窗口是 `LAYOUT_FULLSCREEN`，Android 在全屏布局下忽略 resize） | 不触发 | 压高度代码没跑，面板保持 68% BOTTOM |
+| AC | `ADJUST_NOTHING` | **明确不变**（这个模式的定义就是系统不动 decor） | 更不触发 | TOP 锚定代码没跑，键盘直接盖住 composer |
+
+所以两轮写的「键盘期间把面板压到 `avail − status − kb`」在真机上
+`lastKeyboardHeight` 一直是 0 / -1，面板从头到尾都是那个 68% 底部抽屉，
+键盘一盖，DSH `position:fixed; bottom:0` 的 composer 就被吞掉 ——
+与用户截图「品牌条 + 工具栏 + 键盘，输入框没了」完全吻合。
+
+**这不是 ROM 差异，是事件根本没发生**，从源码就能推出来，不需要真机。
+
+### 上游为什么能
+
+上游 `MainActivity` 没有 `SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN`，
+是普通窗口 + 默认 `adjustResize`：键盘弹出 → 系统真的把 content 缩到
+键盘上沿 → WebView view 高度变化 → CSS viewport 更新 →
+`bottom:0` 的 composer 自然贴到键盘上方。**这才是本质差异**。
+
+底座 `MainActivity.boot()` 为了 edge-to-edge 设了
+`LAYOUT_FULLSCREEN | LAYOUT_STABLE`，阶段 L 把 DSH 搬进同屏面板时
+没把这个差异一起处理。
+
+### 阶段 AD：与上游同构，让系统干活，自己只做兜底
+
+1. **展开 AI 时把窗口切回普通布局**
+   摘掉 `SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN` / `FULLSCREEN`，
+   保留 `LAYOUT_STABLE | VISIBLE`；`savedSysUi` 存原值，收起时还原
+   → `ADJUST_RESIZE` 不再被系统忽略
+2. **`SOFT_INPUT_ADJUST_RESIZE | STATE_UNCHANGED`**
+   键盘弹出由系统缩 contentRoot，WebView view 真的变矮
+3. **键盘检测不再依赖 OnGlobalLayout**
+   API 30+ `decor.setOnApplyWindowInsetsListener` 读
+   `WindowInsets.Type.ime().bottom`（IME insets 独立于 adjust 模式，
+   必定派发）；返回 `v.onApplyWindowInsets(insets)` 不消费，
+   系统 resize 继续生效。API 24–29 保留 OnGlobalLayout ——
+   在 ADJUST_RESIZE 下窗口真变了，它就会触发
+4. **防震荡**：API 30+ 时 layout 通道不许把已检测到的键盘归零，
+   归零只由 insets 判定
+5. **面板布局双路**
+   `decorH − rootH ≈ kb` → 系统已 resize → 面板 `MATCH_PARENT`
+   填满缩小的 root；否则 → 回退阶段 AC 的 `Gravity.TOP` 锚定
+6. 两路统一走 `onKeyboardChanged()`：刷新布局 + `requestLayout()`
+   + 派发 `resize` + 写 `IME kb=… root=… resized=… src=insets/layout`
+   到 `diagnostics.log`；窗口切换另写 `SYSUI` 行
+7. 收起面板先收键盘，延迟 120ms 还原底座全屏 flag 与
+   `adjustPan|stateHidden`
+8. 保留 `setTextZoom(100)`
+
+### 这次和前两次的本质区别
+
+前两次都在**跟系统抢键盘**（不让系统动、自己算可视区），
+代价是必须依赖一个不会触发的事件。这次**让系统像上游一样干活**，
+自己只在系统没干成时兜底，且检测通道换成必定派发的 IME insets。
+
+### 装完怎么验 / 仍不对怎么定位
+
+覆盖安装 → 完全退出重进 → 点开 AI 球 → 点输入区唤起键盘：
+白色 composer 应浮在键盘上方，能打字、选模型、发送。
+
+若仍不对，兜底页「查看诊断日志」应能看到：
+- `SYSUI AI 展开：摘掉 LAYOUT_FULLSCREEN，切 ADJUST_RESIZE`
+- `IME kb=8xx … resized=true src=insets`
+
+**没有 SYSUI 行** = 装的不是这版；**有 SYSUI 但 kb 一直 0** =
+insets 没派发（把日志发我）；**resized=false** = ROM 忽略 resize，
+应自动走 TOP 兜底。
+
+### 验证与边界（如实）
+
+- 已验证：Java 结构、JS 语法、Manifest、包身份、签名、防护链与源码指纹自洽
+- **未真机验证** IME insets 派发时序与全屏 flag 切换时状态栏外观变化；
+  键盘期间状态栏会由透明变实心（与上游普通窗口一致），收起后还原
+- `dp(90)` 阈值：更小的高度差当导航栏差异忽略
+- 键盘监听只在 `expanded` 时改布局，不影响纯逛 GitHub
+- 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload 为第三方二进制，
+  再分发请确认许可
