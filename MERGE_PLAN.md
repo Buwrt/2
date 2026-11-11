@@ -2670,6 +2670,9 @@ AiPanel 面板、悬浮球。分栏不换 content view：
 ### 验证与边界（如实）
 
 - 已验证：Java 结构、JS 语法、Manifest、包身份、签名、防护链与源码指纹自洽
+- 首次构建因 `AiPanel.setSplitMode()` 里把 `UpstreamParity.diagLog` 写成
+  未限定简写（该类在 `com.hubmobile.app.harness` 包，AiPanel 在
+  `com.hubmobile.app` 且未 import）编译失败，改成全限定后重出，构建全绿
 - **未真机验证** 具体折叠机型的屏幕开合时序（部分 ROM 开合瞬间
   `screenWidthDp` 与实测像素不同步，已用 `OnLayoutChangeListener` 兜底重算）
 - 判定同时覆盖平板横屏 / 大屏自由窗口，不只是折叠屏；若只想在折叠屏生效，

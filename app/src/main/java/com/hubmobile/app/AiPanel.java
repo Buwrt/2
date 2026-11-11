@@ -969,7 +969,8 @@ public final class AiPanel {
             try { applyBarInsets(); } catch (Throwable ignored) {}
         }
         try {
-            UpstreamParity.diagLog(act.getApplicationContext(), "SPLIT",
+            com.hubmobile.app.harness.UpstreamParity.diagLog(
+                    act.getApplicationContext(), "SPLIT",
                     "AiPanel splitMode=" + on + " width=" + widthPx + " expanded=" + expanded);
         } catch (Throwable ignored) {}
     }
