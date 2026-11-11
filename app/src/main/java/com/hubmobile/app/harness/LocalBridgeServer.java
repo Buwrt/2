@@ -42,13 +42,14 @@ import java.util.Locale;
  *   /changelog 更新日志
  *
  * 网页从 127.0.0.1:<enginePort> 跨端口 fetch 本桥，必须回 CORS 头；
- * Origin/Referer 被严格限制在回环 3080~3091，别的页面连不上。
+ * Origin/Referer 被严格限制在回环 3090~3099，别的页面连不上。
  */
 public final class LocalBridgeServer {
 
     private static final String TAG = "gh-bridge";
     public static final int PORT = 3081;
-    private static final int ENGINE_MIN = 3080, ENGINE_MAX = 3092;
+    private static final int ENGINE_MIN = com.hubmobile.app.harness.EnginePorts.DEFAULT,
+            ENGINE_MAX = com.hubmobile.app.harness.EnginePorts.MAX;
 
     private static volatile LocalBridgeServer sInstance;
     private final Context app;
@@ -215,7 +216,8 @@ public final class LocalBridgeServer {
     }
 
     private String cors(String origin) {
-        String allow = originOk(origin) ? origin : "http://127.0.0.1:3080";
+        String allow = originOk(origin) ? origin : "http://127.0.0.1:"
+                + com.hubmobile.app.harness.EnginePorts.get(app);
         return "Access-Control-Allow-Origin: " + allow + "\r\n"
                 + "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
                 + "Access-Control-Allow-Headers: content-type, x-dsh-token\r\n"
@@ -326,7 +328,9 @@ public final class LocalBridgeServer {
     private String status() {
         boolean a11y = HarnessAccessibilityService.getInstance() != null;
         return "{\"ok\":true,\"app\":\"githup\",\"version\":\"1.2.20\","
-                + "\"versionCode\":1002020,\"enginePort\":3080,\"bridgePort\":3081,"
+                + "\"versionCode\":1002020,\"enginePort\":"
+                + com.hubmobile.app.harness.EnginePorts.get(app)
+                + ",\"bridgePort\":3081,"
                 + "\"a11yPort\":3181,\"overlay\":" + OverlayService.statusJson(app)
                 + ",\"a11yConnected\":" + a11y
                 + ",\"shizuku\":false,\"vscreenPrivilege\":false,"

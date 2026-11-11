@@ -41,7 +41,8 @@ import java.util.zip.ZipInputStream;
 public final class HarnessBridge {
 
     private static final String TAG = "HarnessBridge";
-    public static final int PORT = 3080;
+    /** 阶段 Z：离开 3080。详见 com.hubmobile.app.harness.EnginePorts。 */
+    public static final int PORT = com.hubmobile.app.harness.EnginePorts.DEFAULT;
     private static final String BASE = "http://127.0.0.1:" + PORT;
 
     private static volatile Process sProc;
@@ -101,10 +102,10 @@ public final class HarnessBridge {
             if (existingUrl() != null) return true;
             android.content.SharedPreferences sp = c.getSharedPreferences(
                     "dsh_prefs", Context.MODE_PRIVATE);
-            int saved = sp.getInt("engine_port", PORT);
+            int saved = com.hubmobile.app.harness.EnginePorts.get(c);
             /* 本进程刚被系统重建（静态变量已空），但上一次的 node 还活着：
                直接认定就绪，绝不再起第二个。 */
-            if (saved > 0 && portBusy(saved)) return true;
+            if (portBusy(saved)) return true;
             Handler ui = new Handler(Looper.getMainLooper());
             String url = start(c, ui, new Callback() {
                 @Override public void onStage(String text) {}
@@ -383,7 +384,12 @@ public final class HarnessBridge {
             // 「引擎进程提前退出」最常见的原因。上游 MainActivity 有 findEnginePid/killEngineNow，
             // 精简桥这里必须补上等价逻辑，只杀 cmdline 带本 payload 路径的自己的引擎。
             killStaleEngines(dir, PORT);
-            int port = pickPort(PORT);
+            /* 阶段 Z：真 bind 探测（不是 connect），并把实得端口写进用户层 patch
+               与 dsh_prefs —— CLI --port 与内核兜底两条通道对齐到同一个端口。 */
+            int port = com.hubmobile.app.harness.EnginePorts.pick(PORT);
+            com.hubmobile.app.harness.EnginePorts.save(c, port);
+            com.hubmobile.app.harness.EnginePorts.applyPatch(
+                    new File(dir, "dshhome"), port);
             sActivePort = port;
             final String base = "http://127.0.0.1:" + port;
             stage(ui, cb, "本地引擎端口 " + port + "，正在拉起 node…");
@@ -439,6 +445,8 @@ public final class HarnessBridge {
             } catch (Throwable ignored) {}
             env.put("APP_NOTIFY_PORT", "3081");
             env.put("APP_A11Y_PORT", "3181");
+            /* 部分插件/技能用 DSH_WEB_URL 定位引擎，默认写死 3080；显式给真实端口。 */
+            env.put("DSH_WEB_URL", "http://127.0.0.1:" + port);
             env.put("VS_DEX", "");
             env.put("SHIZUKU_DEX", "");
             android.content.SharedPreferences dsh = c.getSharedPreferences(
@@ -608,6 +616,7 @@ public final class HarnessBridge {
         }
     }
 
+    /** 只用于判断「是否已有引擎在跑」；**不再**用于挑选端口（见 EnginePorts.bindable）。 */
     private static boolean portBusy(int port) {
         java.net.Socket s = null;
         try {
@@ -621,12 +630,9 @@ public final class HarnessBridge {
         }
     }
 
-    /** 万一孤儿杀不掉或端口被别的进程占着，顺延找空端口，不让引擎直接崩。 */
+    /** 阶段 Z：废弃。保留薄封装，统一走 EnginePorts 的真 bind 探测。 */
     private static int pickPort(int from) {
-        for (int i = 0; i < 12; i++) {
-            if (!portBusy(from + i)) return from + i;
-        }
-        return from;
+        return com.hubmobile.app.harness.EnginePorts.pick(from);
     }
 
     /** 把 /system/etc/security/cacerts 合成一份 PEM，供内置 curl / git 走 HTTPS。 */

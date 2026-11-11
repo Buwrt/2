@@ -811,7 +811,7 @@ public final class AiPanel {
                 boolean clash = brief.contains("EADDRINUSE")
                         || brief.contains("address already in use");
                 String shown = clash
-                        ? "引擎端口 3080 被占用（残留进程 / 后台定时任务 / 上游原版同时运行）。\n"
+                        ? "引擎端口被占用（残留进程 / 后台定时任务 / 上游原版同时运行）。\n"
                           + "已自动清理并重试；若仍失败：请完全退出本 App 再打开，"
                           + "或卸载手机上另一个 DeepSeek Harness。\n\n"
                           + "技术细节：" + brief
@@ -1252,7 +1252,8 @@ public final class AiPanel {
             h = h.toLowerCase(java.util.Locale.US);
             if (!"127.0.0.1".equals(h) && !"localhost".equals(h)) return false;
             int p = u.getPort();
-            return p >= 3080 && p < 3092;
+            return p >= com.hubmobile.app.harness.EnginePorts.DEFAULT
+                    && p < com.hubmobile.app.harness.EnginePorts.MAX;
         } catch (Throwable t) { return false; }
     }
 

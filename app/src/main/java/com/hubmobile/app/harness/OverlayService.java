@@ -71,7 +71,7 @@ public class OverlayService extends Service {
         String p = ctx != null ? ctx.getPackageName() : "";
         if (p.contains("beta")) return 3082;
         if (p.contains("compat")) return 3084;
-        return 3080;
+        return com.hubmobile.app.harness.EnginePorts.DEFAULT;
     }
 
     private static final String PREFS = "dsh_prefs";
@@ -152,7 +152,7 @@ public class OverlayService extends Service {
     private volatile boolean vscreenPreviewRunning = false;
     private final Handler vscreenHandler = new Handler(Looper.getMainLooper());
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private int enginePort = 3080;
+    private int enginePort = com.hubmobile.app.harness.EnginePorts.DEFAULT;
 
     private float touchX, touchY, startX, startY;
     private boolean dragging = false;

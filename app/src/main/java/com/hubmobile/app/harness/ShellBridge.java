@@ -72,7 +72,8 @@ public final class ShellBridge {
             JSONObject o = new JSONObject();
             o.put("ok", true).put("app", "githup").put("version", "1.2.20")
                     .put("versionCode", 1002020)
-                    .put("enginePort", 3080).put("bridgePort", 3081).put("a11yPort", 3181)
+                    .put("enginePort", com.hubmobile.app.harness.EnginePorts.get(ctx))
+                    .put("bridgePort", 3081).put("a11yPort", 3181)
                     .put("payloadReady", ready).put("a11yConnected", a11y)
                     .put("root", RootShell.probe().ok)
                     .put("shizuku", shizukuAvailable())
@@ -92,7 +93,9 @@ public final class ShellBridge {
             JSONObject en = new JSONObject();
             en.put("running", engineUp).put("booting", false).put("busy", false)
                     .put("state", engineUp ? "引擎运行中" : "未启动")
-                    .put("meta", engineUp ? "127.0.0.1:3080" : "由 githup AI 入口管理");
+                    .put("meta", engineUp ? "127.0.0.1:"
+                            + com.hubmobile.app.harness.EnginePorts.get(ctx)
+                            : "由 githup AI 入口管理");
             o.put("engine", en);
 
             // ---- 救援 ----

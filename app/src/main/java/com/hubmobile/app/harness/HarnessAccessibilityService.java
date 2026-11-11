@@ -141,6 +141,9 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
         int port = 3181;
         try {
             String pkg = getPackageName();
+            /* 阶段 Z：这里的 3080 只用来算无障碍端口 3181（+101），
+               与 HarnessBridge 注入的 APP_A11Y_PORT=3181 必须一致；
+               引擎本体已迁到 3090 段，不跟着改，否则插件连不上读屏服务。 */
             int defaultEngine = pkg.contains("beta") ? 3082 : pkg.contains("compat") ? 3084 : 3080;
             port = defaultEngine + 101;
             SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);

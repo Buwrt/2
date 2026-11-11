@@ -76,7 +76,8 @@ public final class LocalFence {
             h = h.toLowerCase(Locale.US);
             if (!"127.0.0.1".equals(h) && !"localhost".equals(h)) return false;
             int p = u.getPort() == -1 ? 80 : u.getPort();
-            return p >= 3080 && p < 3092;
+            return p >= com.hubmobile.app.harness.EnginePorts.DEFAULT
+                    && p < com.hubmobile.app.harness.EnginePorts.MAX;
         } catch (Exception invalid) { return false; }
     }
 

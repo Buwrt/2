@@ -771,6 +771,13 @@ public class VoiceManager {
     }
 
     private int getEnginePort() {
+        /* 阶段 Z：优先读启动时落盘的真实端口，主引擎顺延时也能连上。 */
+        try {
+            int saved = context.getSharedPreferences("dsh_prefs", Context.MODE_PRIVATE)
+                    .getInt("engine_port", 0);
+            if (saved >= com.hubmobile.app.harness.EnginePorts.DEFAULT
+                    && saved < com.hubmobile.app.harness.EnginePorts.MAX) return saved;
+        } catch (Throwable ignored) {}
         try {
             String p = context.getPackageName();
             if (p != null) {
@@ -778,7 +785,7 @@ public class VoiceManager {
                 if (p.endsWith(".compat")) return 3084;
             }
         } catch (Throwable ignored) {}
-        return 3080;
+        return com.hubmobile.app.harness.EnginePorts.DEFAULT;
     }
 
     // ==================== 热词唤醒开关 (Hotword Wake-Up) ====================

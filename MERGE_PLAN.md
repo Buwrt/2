@@ -1916,3 +1916,129 @@ StartupError: dsh: startup failed: 2 required plugins did not activate
 - `life.js tick` 等本地脚本仍用独立 `ProcessBuilder`，它们不监听 TCP，
   与本次故障无关
 - 诊断日志可能含配置/凭据，分享前请先审阅
+
+
+---
+
+## 三十、阶段 Z：第二次 EADDRINUSE 3080 ——「探测层」才是真凶，改用 3090 段
+
+### 现象
+
+装了第二十九章的新包（统一入口），真机**仍**报：
+
+```
+webserver (required)  Error: listen EADDRINUSE: address already in use 127.0.0.1:3080
+Plugins waiting for services (10): web-runtime(required) webServer, ...
+```
+
+与上一轮日志逐字相同。说明第二十九章的「双启动器竞态」判断**只对了一半**：
+统一入口消除了包内双启动，但 3080 上仍有占用者，且我的防护没兜住。
+
+### 为什么上一轮没修好（诚实复盘）
+
+关键线索：**日志里端口始终是 3080**。
+如果 `pickPort` 真的顺延过，报错端口应该是 3091/3082 之类。
+报错 3080 意味着 `--port 3080` 原样传给了 node —— 即 `pickPort(3080)`
+返回了 3080，**它认为端口是空的**。
+
+查 `pickPort` 原实现：
+
+```java
+private static boolean portBusy(int port) {
+    Socket s = new Socket();
+    s.connect(new InetSocketAddress("127.0.0.1", port), 250);  // ← 问题
+    return true;   // 连得上 = 有人在 listen
+}
+```
+
+`connect` 只能回答「有没有人在 listen」，**不能**回答「我能不能 bind」；
+250ms 超时在部分 ROM 的回环策略下会把**已被占用**的端口判成空闲。
+于是 3080 被选中 → node 加载 4 万文件插件树几秒后 listen → 撞上占用者。
+
+占用者是谁？两种都不需要再猜：
+
+| 候选 | uid | 为什么杀不掉 |
+|---|---|---|
+| 覆盖安装前**旧版本**留下的孤儿 node | 同 uid | `killStaleEngines` 依赖 `/proc/<pid>/cmdline`，Android 10+ 对其它进程有 SELinux 读取限制，真机上很可能一个都读不到 |
+| 手机上的**上游原版** `com.deepseek.harness` | 不同 uid | 按设计不杀别的 App 的进程 |
+
+`OverlayService.java` 里的上游注释其实早就写明这个坑：
+「三套 App 同时安装会抢同一个 3080（表现为 EADDRINUSE）」。
+
+另外顺手确认了 `--port` **是生效的**：`bin.js` 的 `parseDshArgs` 把
+`web --host/--port` 透传为 `cmdlineArgs` → `dsh-cmdline.parseCmdline()`
+→ `webCommand()` → `webStartup.port` → `webserver` 配置行
+`port: !!js ctx.webStartup.port ?? 3080`。所以问题不在 CLI，
+在「我们喂给 CLI 的那个数字」。
+
+### 本轮改动：不再依赖探测结果去猜 3080 能不能用
+
+**① 引擎整体迁到 3090 段**（新建 `EnginePorts.java` 作唯一真相来源）
+
+`DEFAULT = 3090`、`MAX = 3100`。避开：
+3080/3082/3084（上游正式/Lite/兼容三版本）、3081（本包本地桥）、
+3181（无障碍）。上游原版和旧残留都占不到这一段。
+
+**② `pickPort` 改用 ServerSocket 真 bind 探测**
+
+```java
+new ServerSocket(); setReuseAddress(false);
+bind(new InetSocketAddress("127.0.0.1", p), 1);  // bind 成功 = 我能 listen
+```
+
+`bind` 比 `connect` 严格：TIME_WAIT、被别进程 listen、SELinux 拒绝都会
+直接抛异常。顺延范围 3090–3099。
+
+**③ 用户层 patch 双保险（关键）**
+
+往 `$DSH_HOME/cordis.patch.yml` 追加幂等 `- id: webserver` 覆盖块，
+把 bundle 层的 `port: !!js ctx.webStartup.port ?? 3080` 改成
+`?? <本次实测端口>`（其余 5 个 config 键全部 restate，因为 patch 按 id
+替换整份 config）。这样**即便 CLI --port 没被解析**，引擎也不会回落到
+内核默认的 3080。每次起 node 前重写（`extract()` 会先把 patch 还原成
+zip 原版，所以必须在 start() 里写）。
+
+**④ 端口落盘，所有后台组件跟随真实端口**
+
+`EnginePorts.save()` 把选定端口写进 `dsh_prefs.engine_port`。
+`ScheduleExecutor.enginePort()` / `VoiceManager.getEnginePort()` /
+`OverlayService` / `ShellBridge` / `LocalBridgeServer.statusJson()` 全部改为
+读它，不再各自硬编码 3080。这一条同时修掉了另一个隐藏 bug：
+主引擎顺延端口后，后台任务以前永远连 3080 → 判定「引擎没跑」→ 又拉起一个。
+
+**⑤ 围栏范围同步**
+
+`LocalBridgeServer.ENGINE_MIN/MAX`、`LocalFence`、
+`AiPanel` / `HarnessActivity` 的回环 URL 校验，全部从
+`[3080,3092)` 改成 `[3090,3100)`；CORS 默认 Origin 与 `/status` 的
+`enginePort` 改成动态值。给 node 注入 `DSH_WEB_URL`（部分技能默认写死 3080）。
+
+**⑥ 保留但降级**：`killStaleEngines` 仍会尝试清同 uid 残留，
+`prepare()` 的 EADDRINUSE 自动重试仍在；但**不再把它们当兜底**——
+真正的兜底是「根本不用 3080」。
+
+### 不变的东西
+
+- 本地桥仍 3081、无障碍仍 3181（`APP_NOTIFY_PORT` / `APP_A11Y_PORT` 不动；
+  `HarnessAccessibilityService` 的 `3080+101=3181` 保留，注释已说明它只用于
+  算 a11y 端口，不跟随引擎迁移）
+- 启动入口仍是唯一的 `HarnessBridge.ensureEngine()`（第二十九章成果保留）
+- 包名 / 版本 / 官方签名 / 防护链 / 双向 `/app/ui/*` 能力全部不变
+
+### 装完怎么操作
+
+覆盖安装 → **完全退出 App 再重进** → 开机页会显示
+「本地引擎端口 3090，正在拉起 node…」。出现 3090 就说明本版已生效；
+若仍显示 3080，说明装的还是旧包。
+
+### 验证与边界（如实）
+
+- 已验证：Java 结构、JS 语法、Manifest、包身份、签名、防护链与源码指纹自洽
+- **未真机验证** 3090 段在这台设备上确实空闲；但 3090 不在上游三版本
+  (3080/3082/3084)、本包桥 (3081)、无障碍 (3181) 的取值里，且 bind 探测
+  失败会自动顺延到 3099
+- 若 3090–3099 全被占（极罕见），`pickPort` 回退 DEFAULT 并交给
+  `prepare()` 的 EADDRINUSE 重试；此时开机页会明确提示端口冲突
+- 用户层 `- id: webserver` 覆盖依赖 cordis「按 id 替换 config」语义；
+  根 `dshhome/cordis.patch.yml` 是最后应用的 patch 层，优先级最高
+- 诊断日志可能含配置/凭据值，分享前请先审阅

@@ -33,6 +33,14 @@ public final class ScheduleExecutor {
     /** 引擎端口：按包名派生（v1.13）。旧实现三套都硬编码 3080 —— Lite/兼容版的定时任务
      *  会探测并连接到**正式版**的引擎上（跨版本串台，与 v1.11 修过的插件端口串台同源）。 */
     private static int enginePort(Context ctx) {
+        /* 阶段 Z：主引擎可能顺延端口，必须读启动时落盘的真实端口，
+           否则后台任务永远连 3080 → 判定「引擎没跑」→ 又拉起一个。 */
+        try {
+            int saved = ctx.getSharedPreferences("dsh_prefs", Context.MODE_PRIVATE)
+                    .getInt("engine_port", 0);
+            if (saved >= com.hubmobile.app.harness.EnginePorts.DEFAULT
+                    && saved < com.hubmobile.app.harness.EnginePorts.MAX) return saved;
+        } catch (Throwable ignored) {}
         try {
             String p = ctx.getPackageName();
             if (p != null) {
@@ -40,7 +48,7 @@ public final class ScheduleExecutor {
                 if (p.endsWith(".compat")) return 3084;
             }
         } catch (Throwable ignored) {}
-        return 3080;
+        return com.hubmobile.app.harness.EnginePorts.DEFAULT;
     }
 
     /** Shizuku 是否可用：判据与 MainActivity.shizukuAvailable() 保持一致（binder 活 + 已授权）。
