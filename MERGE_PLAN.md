@@ -2042,3 +2042,93 @@ zip 原版，所以必须在 start() 里写）。
 - 用户层 `- id: webserver` 覆盖依赖 cordis「按 id 替换 config」语义；
   根 `dshhome/cordis.patch.yml` 是最后应用的 patch 层，优先级最高
 - 诊断日志可能含配置/凭据值，分享前请先审阅
+
+
+---
+
+## 三十一、阶段 AA：为什么上游有输入框、同屏面板里却没有
+
+### 两张截图
+
+| | 图 1（上游 / 期望） | 图 2（本包 / 实际） |
+|---|---|---|
+| 顶栏 | DSH 自己的 `Greeting` | 原生品牌条 `githup AI · DeepSeek Harness · 复位 · ⛶` |
+| 输入区 | 圆角白色 composer：`发消息或创建任务, / 调用指令, @ 文件…` + `DeepSeek-V4…` + 蓝色发送键 | **完全不见**，只剩下面那排工具图标 |
+| 底部 | composer + 工具栏 + 系统键盘 | 工具栏 + 系统键盘，中间空了一大截 |
+| 正文字号 | 正常 | 明显偏大，标题被裁 |
+
+用户问的是「为什么上游的输入可以成为第一张图片，而我的根本看不到输入框」。
+
+### 根因：DSH 住进了**别人的 window**，键盘模式没跟着搬
+
+三处源码逐条对照，结论非常干净：
+
+| 位置 | windowSoftInputMode | WebView 字号 |
+|---|---|---|
+| 上游 `harness/android-app` 的 `MainActivity`（图 1） | **Manifest 未设置**（系统默认按可滚动 View 走 `adjustResize`） | `setTextZoom(100)` ✅ |
+| 本包 `.HarnessActivity`（独立全屏入口，阶段 L 之前用过） | `adjustResize|stateHidden` ✅ | — |
+| 本包 `.MainActivity`（**现在 DSH 实际所在的 window**） | `adjustPan|stateHidden` ❌ | `setTextZoom` **缺失** ❌ |
+
+阶段 L 为了「桌面只留一个图标、点开即 GitHub、AI 同屏」，把
+`HarnessActivity` 的 LAUNCHER 摘掉，DSH 改挂在 `MainActivity` 的
+`contentRoot` 上一层 `AiPanel` 面板（68% 抽屉 / 全屏）。**Activity 换了，
+键盘行为却没跟着换**：
+
+- 上游 / `HarnessActivity`：独立全屏 Activity + `adjustResize`。
+  键盘弹出 → window 真的变矮 → WebView 重新测量 → DSH 前端
+  `position:fixed; bottom:0` / `100dvh` 的 composer 自动贴到键盘上沿 → 图 1。
+- 本包 `MainActivity`：`adjustPan`。键盘弹出时系统把**整个 window 平移**
+  去露焦点，但 **WebView 高度不变**；DSH 的固定底栏按原视口算还在屏幕最底，
+  正好被键盘盖住。`adjustPan` 对 WebView 内部 `contenteditable` 的焦点位置
+  又常常算不准，于是内容被往上顶、标题被裁、composer 挤出屏幕 → 图 2。
+
+叠加第二个差异：`AiPanel.configure()` 少了 `setTextZoom(100)`（上游
+`MainActivity.java` L498 有）。WebView 会跟随系统「字体大小 / 显示大小」
+设置放大整页，图 2 的字明显更大，composer 更易被挤出视口。
+
+`MainActivity` 还用了 `SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | LAYOUT_STABLE`
+（edge-to-edge），这种窗口下光把 Manifest 改成 `adjustResize` 在部分版本
+也不一定可靠 —— 所以必须**手动压缩面板**。
+
+### 本轮改动（只动 `AiPanel.java`）
+
+1. **`setTextZoom(100)`** 补进 `configure()`，与上游逐字对齐，
+   系统大字体不再撑大 DSH 页面。
+2. **键盘高度监听**：`decor.getWindowVisibleDisplayFrame()` 算键盘高度，
+   `expanded` 时把面板高度压到
+   `root.height − statusBarHeight − keyboardHeight`（顶部让状态栏、底部正好到
+   键盘上沿），并对 WebView `requestLayout()`。
+   这样**不管 windowSoftInputMode 是什么**，WebView 都真的变矮，触发
+   `resize` / `visualViewport` 变化，DSH 的固定输入栏重新贴回键盘上方。
+3. **运行时切键盘模式**：`expand()` 期间
+   `setSoftInputMode(ADJUST_RESIZE | STATE_UNCHANGED)`，`collapse()` /
+   `onDestroy()` 还原成底座原本的 `adjustPan|stateHidden` —— 不影响
+   GitHub 客户端自己的搜索框 / 评论框。
+4. `panelLp(int keyboardHeight)` 重载；原有的 `OnLayoutChangeListener`
+   改为跟随键盘高度，避免键盘期间把面板又改回 68% 抽屉。
+5. `onDestroy()` 注销 `OnGlobalLayoutListener`，防泄漏。
+
+### 为什么之前没发现
+
+阶段 W 修「点 AI 放大没反应 / 有延迟」时只处理了**展开动画 + 缩放比例**，
+当时键盘没弹起，composer 还在视口内；真机一旦点输入框唤起键盘，
+`adjustPan` 的平移就把输入栏吞了。属于「布局尺寸对了、输入法窗口策略没对」。
+
+### 装完怎么验证
+
+覆盖安装 → 完全退出重进 → 点开 AI 球 → **点一下输入区唤起键盘**：
+composer 应像图 1 那样浮在键盘上方，能正常打字、选模型、发送。
+收起面板后回 GitHub 客户端，搜索框键盘行为应与以前一致。
+
+### 验证与边界（如实）
+
+- 已验证：Java 结构、JS 语法、Manifest、键盘配置三处对照、包身份、
+  签名、防护链与源码指纹自洽
+- **未真机验证** 键盘弹出时序与 DSH 前端对 `resize` 的响应；
+  但手动压缩 WebView 高度是 Android 上最可靠的兜底，不依赖前端配合
+- 键盘监听阈值 `dp(90)`：小于它的高度差当导航栏/状态栏差异忽略，
+  极少数全面屏手势条机型可能需微调
+- 全屏 `⛶` 与 68% 抽屉两种形态都走同一套压缩逻辑；键盘期间面板会
+  临时占满可视区域（与上游全屏观感一致），收起键盘即恢复
+- 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload
+  为第三方二进制，再分发请确认许可

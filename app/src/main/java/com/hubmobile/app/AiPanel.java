@@ -110,6 +110,17 @@ public final class AiPanel {
     /** 阶段 Y：本次进程内是否已弹过风险确认，避免拒绝后反复骚扰。 */
     private static boolean sConsentAsked = false;
 
+    /* 阶段 AA：键盘与输入法。上游 DSH 是独立全屏 Activity（默认 adjustResize），
+       键盘弹出时 window 变矮，DSH 的 fixed 底栏自然贴在键盘上方（图 1）。
+       我们把 DSH 塞进 MainActivity 的叠加面板后，底座用的是
+       adjustPan|stateHidden：整个 window 平移但 WebView 高度不变，
+       DSH 的输入框被键盘盖住/推到屏幕外（图 2 只剩工具栏 + 键盘）。
+       这里在面板展开期间切 adjustResize，并手动把面板压到「键盘上沿」，
+       让 WebView 真的重新测量。 */
+    private int savedSoftInputMode = -1;
+    private int lastKeyboardHeight = -1;
+    private android.view.ViewTreeObserver.OnGlobalLayoutListener kbWatcher;
+
     /* 阶段 X：当前仓库卡。原生层渲染，零 LLM token。 */
     private LinearLayout repoStrip;
     private TextView repoCard;
@@ -176,6 +187,7 @@ public final class AiPanel {
         bubble = buildBubble();
         root.addView(bubble, bubbleLp());
         makeDraggable(bubble);
+        installKeyboardWatcher();
         ballEnabled = com.hubmobile.app.harness.GhBridge.ballOn(act);
         bubble.setVisibility(ballEnabled ? View.VISIBLE : View.GONE);
 
@@ -186,7 +198,8 @@ public final class AiPanel {
         root.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
             @Override public void onLayoutChange(View v, int l, int t, int r, int b,
                                                  int ol, int ot, int or, int ob) {
-                if (expanded && panel != null) panel.setLayoutParams(panelLp());
+                if (expanded && panel != null)
+                    panel.setLayoutParams(panelLp(lastKeyboardHeight > 0 ? lastKeyboardHeight : 0));
             }
         });
 
@@ -248,9 +261,21 @@ public final class AiPanel {
     }
 
     private FrameLayout.LayoutParams panelLp() {
+        return panelLp(lastKeyboardHeight > 0 ? lastKeyboardHeight : 0);
+    }
+
+    /**
+     * keyboardHeight > 0 时：面板占满「可视区域」，顶部让出状态栏、
+     * 底部正好到键盘上沿。WebView 随之变矮并触发 resize，
+     * DSH 的 position:fixed / 100dvh 输入栏才能重新贴到键盘上方。
+     */
+    private FrameLayout.LayoutParams panelLp(int keyboardHeight) {
         int avail = root.getHeight();
         int h;
-        if (fullHeight) {
+        if (keyboardHeight > 0) {
+            h = avail > 0 ? Math.max(dp(200), avail - statusBarHeight() - keyboardHeight)
+                          : ViewGroup.LayoutParams.MATCH_PARENT;
+        } else if (fullHeight) {
             /* 全屏但**不顶到状态栏**：底部对齐，顶部让出状态栏高度。 */
             h = avail > 0 ? Math.max(dp(200), avail - statusBarHeight())
                           : ViewGroup.LayoutParams.MATCH_PARENT;
@@ -260,6 +285,52 @@ public final class AiPanel {
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, h, Gravity.BOTTOM);
         return lp;
+    }
+
+    /** 键盘高度监听：decor 可视区域变小 = 软键盘弹起。 */
+    private void installKeyboardWatcher() {
+        try {
+            final View decor = act.getWindow().getDecorView();
+            final android.graphics.Rect r = new android.graphics.Rect();
+            kbWatcher = new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
+                @Override public void onGlobalLayout() {
+                    if (destroyed) return;
+                    try {
+                        decor.getWindowVisibleDisplayFrame(r);
+                        int kb = decor.getHeight() - r.bottom;
+                        if (kb < dp(90)) kb = 0;          // 导航栏/状态栏差异不算键盘
+                        if (kb == lastKeyboardHeight) return;
+                        lastKeyboardHeight = kb;
+                        if (expanded && panel != null) {
+                            panel.setLayoutParams(panelLp(kb));
+                            if (web != null) web.requestLayout();
+                            /* 布局落定后再请求一次，确保 WebView 收到尺寸变化 */
+                            ui.post(new Runnable() {
+                                @Override public void run() {
+                                    if (!destroyed && web != null) web.requestLayout();
+                                }
+                            });
+                        }
+                    } catch (Throwable ignored) {}
+                }
+            };
+            decor.getViewTreeObserver().addOnGlobalLayoutListener(kbWatcher);
+        } catch (Throwable ignored) {}
+    }
+
+    /** 面板展开期间改用 adjustResize；收起还原底座原本的 adjustPan。 */
+    private void applySoftInput(boolean aiMode) {
+        try {
+            android.view.Window w = act.getWindow();
+            if (savedSoftInputMode < 0) savedSoftInputMode = w.getAttributes().softInputMode;
+            if (aiMode) {
+                w.setSoftInputMode(
+                        android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                        | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_UNCHANGED);
+            } else {
+                w.setSoftInputMode(savedSoftInputMode);
+            }
+        } catch (Throwable ignored) {}
     }
 
     private FrameLayout.LayoutParams bubbleLp() {
@@ -726,6 +797,7 @@ public final class AiPanel {
 
     public void expand() {
         if (destroyed) return;
+        applySoftInput(true);          // 阶段 AA：与上游一样让 WebView 随键盘 resize
         ensureConsent();
 
         /* 每次打开都把视口比例拉回 100%，避免上一次被放大/全屏的状态带过来，
@@ -772,6 +844,8 @@ public final class AiPanel {
 
     public void collapse() {
         expanded = false;
+        lastKeyboardHeight = -1;
+        applySoftInput(false);         // 还原底座的 adjustPan，别影响 GitHub 搜索框
         panel.setVisibility(View.GONE);
         bubble.setVisibility(ballEnabled ? View.VISIBLE : View.GONE);
         disableNfc();
@@ -916,6 +990,9 @@ public final class AiPanel {
         s.setSupportZoom(false);
         s.setBuiltInZoomControls(false);
         s.setDisplayZoomControls(false);
+        /* 阶段 AA：与上游 MainActivity 完全一致。缺这一行时 WebView 会跟随
+           系统「字体大小/显示大小」设置把 DSH 页面整体放大，输入框更容易被挤出视口。 */
+        s.setTextZoom(100);
         /* 阶段 T：接住 window.open("about:blank")，配合下面的 onCreateWindow。
            阶段 U：连非手势触发的 window.open 也允许，避免内核差异把它静默吞掉。 */
         s.setSupportMultipleWindows(true);
@@ -1291,6 +1368,12 @@ public final class AiPanel {
 
     public void onDestroy() {
         destroyed = true;
+        applySoftInput(false);
+        try {
+            if (kbWatcher != null)
+                act.getWindow().getDecorView().getViewTreeObserver()
+                   .removeOnGlobalLayoutListener(kbWatcher);
+        } catch (Throwable ignored) {}
         disableNfc();
         try { NfcStore.setArmListener(null); } catch (Throwable ignored) {}
         if (draftInput != null) draftInput.destroy();
