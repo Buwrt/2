@@ -2569,3 +2569,111 @@ githup、AI 同屏」的既定设计。
 - 引擎仍在后台无条件启动，向导只是 UI 层，不阻塞 AI 能力
 - 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload 为第三方二进制，
   再分发请确认许可
+
+
+---
+
+## 三十七、阶段 AG：折叠屏展开 —— 右半 githup 本体，左半 AI 全屏
+
+### 需求
+
+用户：折叠屏展开时，右边显示 githup 本体软件，左边自动打开 AI 全屏模式；
+合上应回到原来的单屏叠加抽屉。
+
+### 判定口径（沿用底座已建立的权威判据）
+
+`app.js applyDeviceClass()` 1.2.20 已用
+`Configuration.smallestScreenWidthDp >= 600` 判平板 / 折叠展开，
+这里保持一致，再要求当前宽度足够左右各放一栏：
+
+```
+smallestScreenWidthDp >= 600   → 大屏（折叠内屏 / 平板），手机横屏不算
+screenWidthDp          >= 720  → 当前宽度足够分两半
+```
+
+- 合上折叠屏：smallest 回落 320–400 → 自动退出分栏
+- 手机横屏：smallest 仍 360–400 → 不触发（不会误分栏）
+- 平板横屏 / 自由窗口拉宽：同样触发，符合「大屏双栏」语义
+
+**不用 Jetpack WindowManager**：本工程 `dependencies { }` 为空，
+且 Manifest 已声明
+
+```
+android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|fontScale"
+android:resizeableActivity="true"
+```
+
+开合 / 旋转 / 自由窗口变化**不重建 Activity**，`onConfigurationChanged`
+直接重排即可，底座 WebView 的登录态、滚动位置零丢失。
+
+### 布局做法（不换窗口、不新建 Activity）
+
+`MainActivity.contentRoot` 是 FrameLayout，里面同时住着底座 WebView、
+AiPanel 面板、悬浮球。分栏不换 content view：
+
+| 元素 | 分栏态 | 合上 |
+|---|---|---|
+| 底座 WebView | `FrameLayout.LayoutParams(paneW, MATCH_PARENT, Gravity.END)` 右半 | `MATCH_PARENT` 整屏 |
+| AiPanel 面板 | `panelLp()` 固定 `Gravity.START` + 宽 `paneW` + 全高，常驻展开 | 68% 底部抽屉 |
+| 悬浮球 | 隐藏（左半已常驻 AI，入口无意义） | 按设置页开关 |
+| 中间 | 1dp 竖分隔线 `#E5E7EB`，`leftMargin=paneW` | 移除 |
+
+`AiPanel` 新增 `splitMode` / `splitWidth`：
+- `panelLp()` 最前面返回左半全高（键盘弹出时随 `ADJUST_RESIZE`
+  缩到键盘上沿，阶段 AD 的 composer 贴键盘成果保留）
+- `setSplitMode(true, w)` 复用 `expand()`（桥自愈 / consent /
+  引擎装载显示），再钉死布局、`fullHeight=true`、隐藏球
+- `collapse()` 与 `onBackPressed()` 在分栏态被 guard：AI 不收起，
+  返回键交回底座 WebView 处理路由
+- `setBubbleEnabled()` 在分栏态始终隐藏球，避免设置页开关把球放回来
+
+`FoldableSplit` 负责判定、重排、分隔线、`OnLayoutChangeListener`
+（自由窗口拖拽改宽度时重算半屏宽）、首帧 `post` 一帧等测量完成。
+幂等：`want == on && half == paneW` 直接返回；只有
+「原本是分栏、现在合上」才跑 `exitSplit()`，手机首帧不会白跑一次
+`collapse()`。
+
+### 前端字号（一个容易忽略的坑）
+
+展开时 `deviceInfo()` 返回的仍是**整机** `smallestScreenWidthDp = 600+`，
+但底座只占右半（约 360–400dp）。若前端照旧按平板档把 UI 字号放大
+1.10–1.22 倍，半屏里会挤得难受。
+
+解决：
+- `JsBridge.deviceInfo()` 新增 `splitPane: FoldableSplit.isSplit()`
+  —— 走原生状态而不是注入的全局变量，页面 reload / WebView 未加载完
+  时也不会丢
+- `app.js applyDeviceClass()` 读到 `splitPane` 就强制回手机档
+  （`--ui-scale: 1`），`window.__githupSplitPane` 作为即时注入的补充
+- 退出分栏清标志，平板 / 大屏识别照常生效
+
+### 与既有约束的兼容
+
+- **单图标同屏不变**：仍是一个 `MainActivity`，没有第二个 LAUNCHER
+- **引擎照常后台启动**：`AiPanel.attach()` 无条件拉起，分栏只是布局
+- **首次 10 步权限向导**：盖在顶层，用户在向导上走完才看到左右分栏，
+  互不干扰
+- **输入框贴键盘**：`panelLp()` 分栏分支用 `root.getHeight()`，
+  ADJUST_RESIZE 下 root 变矮，composer 仍贴键盘
+- **桌宠 / 3081 桥 / 令牌权限**：一行未动
+
+### 装完怎么验
+
+覆盖安装 → 完全退出重进：
+
+1. **合上折叠屏**：与现在一样，githup 整屏；设置页开关决定悬浮球
+2. **展开**：自动变成左右两栏 —— 左边 AI（全高、常驻、可直接对话），
+   右边 githup 客户端，中间一条细分隔线；悬浮球消失
+3. **再合上**：自动回整屏叠加抽屉，AI 收起，悬浮球按开关恢复
+4. 旋转 / 拖自由窗口宽度：两栏自动重算半屏宽
+
+### 验证与边界（如实）
+
+- 已验证：Java 结构、JS 语法、Manifest、包身份、签名、防护链与源码指纹自洽
+- **未真机验证** 具体折叠机型的屏幕开合时序（部分 ROM 开合瞬间
+  `screenWidthDp` 与实测像素不同步，已用 `OnLayoutChangeListener` 兜底重算）
+- 判定同时覆盖平板横屏 / 大屏自由窗口，不只是折叠屏；若只想在折叠屏生效，
+  需要铰链角度传感器（无公开 framework API），目前按「大屏双栏」处理
+- 竖持展开（宽 < 720dp）不分栏，仍是叠加抽屉 —— 太窄硬分两半体验更差
+- 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload 为第三方二进制，
+  再分发请确认许可

@@ -172,6 +172,23 @@ public class MainActivity extends Activity {
         try {
             com.hubmobile.app.harness.PermissionWizard.showIfNeeded(this, contentRoot);
         } catch (Throwable ignored) { }
+
+        /* 阶段 AG：折叠屏展开 / 大屏横持时，右半 githup 本体、左半 AI 全屏常驻。
+         * 合上自动回到原来的叠加抽屉。判定与重排都在 FoldableSplit 里，
+         * 这里只挂上监听；首帧尺寸由它自己 post 一帧再算。 */
+        try {
+            if (webView != null && aiPanel != null)
+                com.hubmobile.app.harness.FoldableSplit.attach(
+                        this, contentRoot, webView, aiPanel);
+        } catch (Throwable ignored) { }
+    }
+
+    /** 阶段 AG：折叠屏开合 / 旋转 / 自由窗口改变宽度。
+     *  Manifest 已声明 configChanges，Activity 不重建，这里只重排两栏。 */
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        try { com.hubmobile.app.harness.FoldableSplit.refresh(); } catch (Throwable ignored) {}
     }
 
     /** 设置页「首次使用权限向导」重新打开（供 NativeBridge 调用）。 */
@@ -899,6 +916,8 @@ public class MainActivity extends Activity {
                     "(function(){try{if(window.AppOnResume)window.AppOnResume();}catch(e){}})()", null);
         }
         if (aiPanel != null) aiPanel.onResume();
+        /* 回到前台再判一次屏幕状态（部分 ROM 切后台折叠时不派 config 变化） */
+        try { com.hubmobile.app.harness.FoldableSplit.refresh(); } catch (Throwable ignored) {}
     }
 
     @Override
@@ -922,6 +941,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        try { com.hubmobile.app.harness.FoldableSplit.detach(); } catch (Throwable ignored) {}
         if (aiPanel != null) { aiPanel.onDestroy(); aiPanel = null; }
         com.hubmobile.app.harness.UiBridge.unbind(this);
         super.onDestroy();

@@ -1325,6 +1325,10 @@ public class JsBridge {
             o.put("screenHeightDp", c.screenHeightDp);
             o.put("densityDpi", activity.getResources().getDisplayMetrics().densityDpi);
             o.put("tablet", c.smallestScreenWidthDp >= 600);
+            /* 阶段 AG：折叠屏展开时底座只占右半屏，前端据此回手机档 UI 字号。
+               走原生状态而不是 WebView 注入的全局变量 —— 页面 reload / WebView
+               还没加载完时全局标志会丢，deviceInfo() 每次调用都是权威值。 */
+            o.put("splitPane", com.hubmobile.app.harness.FoldableSplit.isSplit());
             return o.toString();
         } catch (Throwable t) {
             return "{}";

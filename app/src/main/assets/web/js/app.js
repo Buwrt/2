@@ -66,11 +66,12 @@
        不会改变手机上的任何显示。代码字号仍只由 --code-font（设置项）决定，
        不参与缩放，免得用户刚选的 12/13/15/17px 在平板上被悄悄改掉。 */
     applyDeviceClass: function () {
-      var kind = 'phone', band = 'phone', scale = 1, sw = 0;
+      var kind = 'phone', band = 'phone', scale = 1, sw = 0, splitPane = false;
       try {
         if (window.NativeBridge && typeof window.NativeBridge.deviceInfo === 'function') {
           var info = JSON.parse(window.NativeBridge.deviceInfo() || '{}') || {};
           sw = +info.smallestWidthDp || 0;
+          splitPane = !!info.splitPane;   /* 阶段 AG：右半屏时不放大 UI 字号 */
         }
       } catch (e) {}
       if (!sw) {
@@ -89,6 +90,13 @@
         if (sw >= 960)      { band = 'xl'; scale = 1.22; }
         else if (sw >= 720) { band = 'lg'; scale = 1.16; }
         else                { band = 'md'; scale = 1.10; }
+      }
+      /* 阶段 AG：折叠屏展开时底座只占右半屏（约 360–400dp），
+         此时若仍按整机的 smallestWidthDp 判成平板并放大 UI 字号，
+         半屏里会挤得难受。原生分栏会写入这个标志，强制回手机档；
+         合上分栏清掉标志，平板/大屏识别照常生效。 */
+      if (splitPane || window.__githupSplitPane) {
+        kind = 'phone'; band = 'phone'; scale = 1;
       }
       var root = document.documentElement;
       root.setAttribute('data-device', kind);

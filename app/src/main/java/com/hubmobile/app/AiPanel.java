@@ -107,6 +107,9 @@ public final class AiPanel {
     private volatile boolean trustedDoc = false;
     private boolean expanded = false;
     private boolean fullHeight = false;
+    /** 阶段 AG：折叠屏展开时 AI 固定占左半屏（全高常驻），不再是可收起抽屉。 */
+    private boolean splitMode = false;
+    private int splitWidth = 0;
     /** 阶段 R：设置页开关控制的可移动悬浮球显隐，**默认隐藏**。 */
     private boolean ballEnabled = false;
     private boolean webReady = false;
@@ -325,6 +328,20 @@ public final class AiPanel {
      * 键盘收起恢复原来的 BOTTOM 68% 抽屉 / 全屏。
      */
     private FrameLayout.LayoutParams panelLp(int keyboardHeight, int visibleBottom) {
+        /* 阶段 AG：分栏态忽略抽屉/全屏标志，固定「左半 + 全高」。
+           root 在 ADJUST_RESIZE 下已随键盘变矮，用 MATCH_PARENT 等价的高度
+           让键盘弹出时自动缩到键盘上沿，composer 仍贴键盘（阶段 AD 成果保留）。 */
+        if (splitMode) {
+            int top = statusBarHeight();
+            int h = root.getHeight() > 0
+                    ? Math.max(dp(200), root.getHeight() - top)
+                    : ViewGroup.LayoutParams.MATCH_PARENT;
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    splitWidth > 0 ? splitWidth : ViewGroup.LayoutParams.MATCH_PARENT,
+                    h, Gravity.START);
+            lp.topMargin = top;
+            return lp;
+        }
         int avail = root.getHeight();
         if (keyboardHeight > 0) {
             /* 阶段 AD：窗口已切回普通布局 + ADJUST_RESIZE，正常 ROM 上系统
@@ -915,10 +932,54 @@ public final class AiPanel {
         } catch (Throwable ignored) {}
     }
 
+    /**
+     * 阶段 AG：折叠屏展开 / 合上的切换入口，由 FoldableSplit 调用。
+     *
+     * on=true  → AI 固定左半屏、全高、常驻展开；悬浮球隐藏；
+     *            走 expand() 是为了复用桥自愈、consent、引擎装载显示逻辑，
+     *            此时 panelLp() 已经走 splitMode 分支，所以不会盖住右半本体。
+     * on=false → 先关标志再 collapse()（否则会被 guard 挡住），
+     *            由 collapse() 还原底座全屏 flag / adjustPan 与悬浮球显隐。
+     */
+    public void setSplitMode(boolean on, int widthPx) {
+        if (destroyed) return;
+        splitMode = on;
+        splitWidth = widthPx;
+        if (on) {
+            if (bubble != null) bubble.setVisibility(View.GONE);
+            if (!expanded) {
+                expand();
+            } else {
+                panel.setVisibility(View.VISIBLE);
+                panel.setLayoutParams(panelLp());
+            }
+            fullHeight = true;
+            if (fullBtn != null) fullBtn.setText("⤡");
+            try { applyBarInsets(); } catch (Throwable ignored) {}
+            if (web != null) {
+                web.requestLayout();
+                try { web.evaluateJavascript(
+                        "try{window.dispatchEvent(new Event('resize'));}catch(e){}", null); }
+                catch (Throwable ignored) {}
+            }
+        } else {
+            fullHeight = false;
+            if (fullBtn != null) fullBtn.setText("⛶");
+            collapse();               // splitMode 已关，guard 放行
+            try { applyBarInsets(); } catch (Throwable ignored) {}
+        }
+        try {
+            UpstreamParity.diagLog(act.getApplicationContext(), "SPLIT",
+                    "AiPanel splitMode=" + on + " width=" + widthPx + " expanded=" + expanded);
+        } catch (Throwable ignored) {}
+    }
+
     /** 设置页开关切换时即时生效：关掉就把球藏起来，并收起已展开的面板。 */
     public void setBubbleEnabled(boolean on) {
         ballEnabled = on;
         if (bubble == null) return;
+        /* 阶段 AG：左半已常驻 AI，悬浮球入口没有意义，始终隐藏。 */
+        if (splitMode) { bubble.setVisibility(View.GONE); return; }
         if (!on && expanded) collapse();
         else bubble.setVisibility(expanded ? View.GONE : (on ? View.VISIBLE : View.GONE));
     }
@@ -1045,6 +1106,8 @@ public final class AiPanel {
     }
 
     public void collapse() {
+        /* 阶段 AG：分栏态 AI 常驻左半，任何收起请求都不生效。 */
+        if (splitMode) return;
         expanded = false;
         lastKeyboardHeight = -1;
         lastVisibleBottom = -1;
@@ -1057,6 +1120,8 @@ public final class AiPanel {
 
     /** 返回键：面板开着时先收起，不退出 App，也不「退回 githup」。 */
     public boolean onBackPressed() {
+        /* 阶段 AG：分栏态左右都在，返回键交回底座 WebView 处理路由，不收 AI。 */
+        if (splitMode) return false;
         if (expanded) { collapse(); return true; }
         return false;
     }
