@@ -1506,9 +1506,6 @@ var ed = UI.$('#edit', host);
         /* 阶段 R：真实连通自检 —— 用户能亲手确认 AI 到底看不看得到、改不改得动 */
         setItem('chart', window.I18n.t('GitHub 连通自检'),
           window.I18n.t('点一下，实测令牌能读/写哪些仓库'), 'ghSelfTest') +
-        /* 阶段 AF：与上游 DSH 一致的首次使用 10 步权限向导，可随时重开 */
-        setItem('shield', window.I18n.t('首次使用权限向导'),
-          window.I18n.t('逐项配置手机权限'), 'permWizard') +
         /* 阶段 V：这个开关是「AI 零权限感知页面 + 同名库克隆」的总闸。
            打开时必须先弹风险确认，用户点「同意」才生效并展开 AI 面板。 */
         switchItem('eye', window.I18n.t('AI 感知与克隆'),
@@ -1611,7 +1608,43 @@ var ed = UI.$('#edit', host);
           : '<div class="set-group"><button class="set-row" id="login"><span class="ico">' + window.icon('key', 16) + '</span><span class="k">' + L('settings.login') + '</span></button></div><div class="set-note">' + L('settings.note.login') + '</div>');
 
       UI.$$('[data-s]', host).forEach(function (b) {
+        /* 阶段 AH：设置页不再显示「首次使用权限向导」这一行，
+           但「走完后随时逐项重配权限」的能力不能少 —— 隐藏入口：
+           长按「设备类型」行 700ms 重新打开 10 步向导。
+           不新增任何可见 UI；单击「设备类型」的行为完全不变。 */
+        if (b.getAttribute('data-s') === 'device') {
+          var lpTimer = null, lpAt = null;
+          var lpCancel = function () {
+            if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+            lpAt = null;
+          };
+          b.addEventListener('pointerdown', function (ev) {
+            if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+            lpAt = { x: ev.clientX || 0, y: ev.clientY || 0 };
+            lpTimer = setTimeout(function () {
+              lpTimer = null; lpAt = null;
+              b.__wizardLongPressed = true;   // 让紧随其后的 click 被吞掉
+              if (!window.NativeBridge || !window.NativeBridge.openPermissionWizard) {
+                UI.toast(window.I18n.t('当前版本不支持')); return;
+              }
+              window.NativeBridge.openPermissionWizard();
+              UI.toast(window.I18n.t('已重新打开权限向导'));
+            }, 700);
+          });
+          b.addEventListener('pointermove', function (ev) {
+            if (!lpAt) return;
+            if (Math.abs((ev.clientX || 0) - lpAt.x) > 12 ||
+                Math.abs((ev.clientY || 0) - lpAt.y) > 12) lpCancel();
+          });
+          ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (t) {
+            b.addEventListener(t, lpCancel);
+          });
+          /* 屏蔽长按后 WebView 弹的系统菜单，避免盖住刚打开的向导 */
+          b.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
+        }
         b.onclick = function () {
+          /* 长按已消费：本次 click 不再走「设备类型」的单击逻辑 */
+          if (b.__wizardLongPressed) { b.__wizardLongPressed = false; return; }
           var k = b.getAttribute('data-s');
           if (k === 'theme') UI.choose(L('settings.appearance'), [
             { key: 'auto', label: L('settings.appearance.auto'), icon: 'device-desktop' },
@@ -1637,13 +1670,6 @@ var ed = UI.$('#edit', host);
               ? window.I18n.t('已显示 AI 悬浮球，可拖动；点开即可和 AI 对话')
               : window.I18n.t('已隐藏 AI 悬浮球；引擎仍在后台运行，GitHub 权限仍跟随登录令牌'));
             window.Router.reload();
-            return;
-          }
-          /* 阶段 AF：重新走一遍 10 步权限向导 */
-          if (k === 'permWizard') {
-            if (!window.NativeBridge || !window.NativeBridge.openPermissionWizard)
-              return UI.toast(window.I18n.t('当前版本不支持'));
-            window.NativeBridge.openPermissionWizard();
             return;
           }
           /* 阶段 R：拿当前登录令牌真打一次 GitHub REST，把结果摆给用户看 */

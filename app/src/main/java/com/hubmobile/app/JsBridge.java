@@ -184,8 +184,9 @@ public class JsBridge {
      * 它会压进底座同一个返回栈，按系统返回就回到刚才浏览的位置。
      */
     /**
-     * 阶段 AF：设置页重新打开「首次使用 · 配置手机权限」10 步向导。
-     * 首次启动由 MainActivity.boot() 自动拉起，不用前端管。
+     * 阶段 AH：重新打开「首次使用 · 配置手机权限」10 步向导。
+     * 首次启动由 MainActivity.boot() 自动拉起；走完后由设置页长按
+     * 「设备类型」行触发（设置页已无可见入口，能力保留）。
      */
     @JavascriptInterface
     public void openPermissionWizard() {

@@ -191,7 +191,8 @@ public class MainActivity extends Activity {
         try { com.hubmobile.app.harness.FoldableSplit.refresh(); } catch (Throwable ignored) {}
     }
 
-    /** 设置页「首次使用权限向导」重新打开（供 NativeBridge 调用）。 */
+    /** 阶段 AH：长按设置页「设备类型」行重新打开权限向导（供 NativeBridge 调用）。
+     *  设置页已无可见入口，原生能力保留。 */
     public void showPermissionWizard(boolean force) {
         try {
             if (force) com.hubmobile.app.harness.PermissionWizard.reopen(this, contentRoot);

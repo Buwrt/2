@@ -101,7 +101,8 @@ public final class PermissionWizard {
         return true;
     }
 
-    /** 设置页「首次使用权限向导」重新打开（强制，不改 done 标记）。 */
+    /** 阶段 AH：隐藏入口（长按设置页「设备类型」行）重新打开 10 步向导。
+     *  设置页不再显示可见入口，功能保留；强制打开，不改 done 标记。 */
     public static void reopen(Activity a, FrameLayout h) {
         if (a == null || h == null) return;
         if (sActive != null) return;
@@ -409,7 +410,7 @@ public final class PermissionWizard {
         if (finishPage) {
             TextView t = cText("配置完成", 22, C_TEXT, true);
             body.addView(t, cTop(dp(18)));
-            body.addView(cText("权限可以随时在「我的 → 设置 → 首次使用权限向导」里再改。\n\n现在可以进入 githup 了，AI 引擎已在后台启动。",
+            body.addView(cText("权限可以随时在「我的 → 设置 → 长按『设备类型』」里重新逐项配置。\n\n现在可以进入 githup 了，AI 引擎已在后台启动。",
                     13.5f, C_SUB, false), cTop(dp(10)));
             return;
         }
