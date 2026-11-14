@@ -36,7 +36,10 @@
     return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
 
   var OWNER = 'Buwrt';
-  var REPO = 'githup';
+  /* 阶段 AI（四轮审计修复） B2：本包是 Buwrt/2 的合并版。写死 'githup' 会让用户被
+     「同版本号不同指纹」诱导装回 1.2MB 底座包，AI 引擎直接消失，
+     且 Buwrt/2 未来的 Release 永远触达不到。CI 已加断言防复发。 */
+  var REPO = '2';
   var MANIFEST = 'version.json';   // 仓库根目录的版本清单（Release 的备用来源）
   var RAW_BASE = 'https://raw.githubusercontent.com/' + OWNER + '/' + REPO + '/main';
   var SKIP_KEY = 'updSkipVersion'; // 用户主动跳过的新版本号
@@ -238,7 +241,10 @@
       }
       var d = r.data;
       if (d.draft || d.prerelease) return { ok: false, current: cur, reason: 'no-release' };
-      var latest = String(d.tag_name || d.name || '').replace(/^[Vv]/, '');
+      /* 阶段 AI（四轮审计修复） B2：合并版 tag 是 v1.2.20-merged，后缀不参与版本比较，
+         否则未来发新版时 tag 也会被 parse 成同一代而漏掉升级。 */
+      var latest = String(d.tag_name || d.name || '')
+        .replace(/^[Vv]/, '').replace(/-(?:merged|ai|release)$/i, '');
       var asset = pickApk(d.assets);
       if (!asset) return { ok: false, current: cur, reason: 'no-release' };
       /*

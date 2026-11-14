@@ -2749,3 +2749,73 @@ AiPanel 面板、悬浮球。分栏不换 content view：
   首次启动向导与全部权限逻辑不受影响
 - 之前明文出现过的 `ghp_` 令牌建议立刻撤销；上游 payload 为第三方二进制，
   再分发请确认许可
+
+
+---
+
+## 三十九、阶段 AI：四轮审计 bug 账本全量修复（三库）
+
+用户给来一份四轮静态审计账本，要求「查看三个库是否都有这种 bug，
+有就修复三个库中的所有 bug，并打包 APK」。
+
+### 逐库核查结论（线上源码逐项比对，不靠印象）
+
+| 项 | Buwrt/2 | githup | githup-release |
+|---|---|---|---|
+| B2 更新通道 REPO | 命中（写成 githup） | **不适用**（本就该是 githup） | **不适用** |
+| B1 底部白边 | 命中 | 命中 | 命中 |
+| B8 allowBackup | 命中 | 命中 | 命中 |
+| B10 桥令牌明文 | 命中 | **不适用**（无本地桥） | **不适用** |
+| B3 旧版导航栏估算 | 命中 | 命中 | 命中 |
+| B4 cap 32px | 命中 | 命中 | 命中 |
+| B5 src_sha256 旧值 | 命中 | **否**（894009bb = 本库 api.js 值） | **否** |
+| B6 apk 校验文件 | 命中（指向空处） | 部分（v1.2.18 值错） | 部分（同左） |
+| B9 明文降级面 | 命中（含全局 cleartext） | 部分（无 cleartext 属性） | 部分 |
+| B7 冷启动白闪 | 命中 | 命中 | 命中 |
+| 观感 lightNav 初值 | 命中 | 命中 | 命中 |
+
+**关键判断：同一个 diff 不能打三遍。** 底座库的 `REPO='githup'` 是正确值，
+改成 `'2'` 会让底座用户被「升级」成 161MB 合并包，正好把 B2 掉个头。
+B5 在底座库也是自洽的（改了反而制造不一致）。B10 依赖的本地桥只有合并版有。
+
+### 修法与取舍
+
+- **B2**（仅 Buwrt/2）：`REPO='2'`；Release tag 后缀 `-merged` 剥掉再比较版本；
+  CI 加断言「产物 updater.js 的 REPO == github.repository 后半段」防复发
+- **B1/B7/观感**（三库）：底板 `contentRoot` 改透明，`windowBackground`
+  指向 `@color/splash_bg`，新增 `values-night`（`#010409` + light 图标 flag 取反）。
+  **刻意不加 `LAYOUT_HIDE_NAVIGATION`**：阶段 AD 的键盘修复与阶段 AG 的折叠屏
+  分栏都依赖现有 decor 布局，动 flag 的回归风险远大于收益；底色跟随主题后
+  透明导航栏露出的不再是硬编码白，视觉问题等价消除
+- **B8**（三库）：`allowBackup="false"`，去掉 `fullBackupContent`
+- **B10**（仅 Buwrt/2）：`LocalBridgeAuth.token()` 改存 `SecurePrefs`
+  （AndroidKeyStore + AES-GCM），首次读取清掉旧的 `dsh_prefs` 明文文件；
+  `LocalBridgeServer` 两处「Keystore」文案订正为区分两类令牌
+- **B3**（三库）：SDK<R 分支改用 `getWindowVisibleDisplayFrame` 与 realMetrics
+  之差实测，不再读写死的 48dp、不再假设导航栏可见
+- **B4**（三库）：`applySafeInsets` 的 cap 上限 32 → 48
+- **B5**（仅 Buwrt/2）：根因是 `build-ai.yml` 回写段 `vj.update()` 根本没写
+  `src_sha256`，手工改文件治不好。CI 回写时从产物 `api.js` 提取并写入，
+  同时加断言；Release 完成后 `version.json` 与包内常量一致
+- **B6**：Buwrt/2 删除 17/18/19 三张空头支票；底座两库这些文件对应
+  本库真实发布过的 Release，只把 v1.2.18 的错值改成服务端 digest
+- **B9**（三库）：`Http.hostUsable()` 逐跳强制 https；`WebViewActivity`
+  的外链 `http://` 自动升级 https。Buwrt/2 的全局 `usesCleartextTraffic=true`
+  **保留**（node 回环 `http://127.0.0.1:3090` 必需），但注明理由；
+  用 NSC 只放行 loopback 需要赌各 ROM 对 IP domain 的解析，未真机验证不冒这个险
+
+### 同步重算
+
+改了 `app.js` / `updater.js` / Java / 新增资源，三个库都重跑了
+`gen-srcfingerprint.py` 与 `gen-guard.py`：包内 `SRC_SHA256`、
+`assets.sha`、`GuardKeys.java` 与源码自洽，不会因为 assets 变动被第 3 环拦下。
+
+### 如实边界
+
+- 已验证：Java 结构、JS 语法、Manifest/XML、指纹与清单自洽、包身份与官方签名
+- **未真机验证**：各 ROM 的 `values-night` 首帧取色、SDK<R 的可见区域差值、
+  http→https 升级后个别仅支持 http 的站点可达性
+- 审计里「干净面」有一处硬错已订正：`LocalBridgeAuth` 原来用的是
+  `SharedPreferences` 明文 UUID（不是 Keystore），正是本轮 B10
+- 审计最后建议「把补丁打到 Buwrt/2 与 Buwrt/githup 两个库」方向反了，
+  且四处文件清单漏了 `themes.xml`；本次按三库各自的真实状态分别处理

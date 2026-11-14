@@ -1,7 +1,6 @@
 package com.hubmobile.app.harness;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -22,12 +21,19 @@ public final class LocalBridgeAuth {
     private LocalBridgeAuth() {}
 
     public static String token(Context c) {
-        SharedPreferences p = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        String t = p.getString(KEY, "");
+        /* 阶段 AI（四轮审计修复） B10：改存 SecurePrefs（AndroidKeyStore + AES-GCM），
+           不再是 dsh_prefs 里明文 UUID。叠加 B8 的 allowBackup=false，
+           adb backup / 云备份账号失陷也拿不到 /shell 的桥凭据。
+           首次读取时顺手清掉旧版留下的明文文件。 */
+        String t = com.hubmobile.app.SecurePrefs.get(c, KEY, "");
         if (t == null || t.length() < 16) {
             t = java.util.UUID.randomUUID().toString().replace("-", "")
                     + java.util.UUID.randomUUID().toString().replace("-", "");
-            p.edit().putString(KEY, t).apply();
+            com.hubmobile.app.SecurePrefs.put(c, KEY, t);
+            try {
+                c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                        .edit().clear().apply();
+            } catch (Throwable ignored) {}
         }
         return t;
     }

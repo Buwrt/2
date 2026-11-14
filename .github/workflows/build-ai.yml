@@ -17,6 +17,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: 阶段 AI（四轮审计修复） Assert updater channel and fingerprints
+        run: |
+          python3 - <<'PY'
+          import os,re,sys
+          s=open('app/src/main/assets/web/js/updater.js',encoding='utf-8').read()
+          m=re.search(r"var REPO = '([^']+)'",s)
+          expect=os.environ['REPO']
+          if not m or m.group(1)!=expect:
+              sys.exit('B2 回归: updater.js REPO=%s != %s'%(m.group(1) if m else None,expect))
+          api=open('app/src/main/assets/web/js/api.js',encoding='utf-8').read()
+          f=re.search(r"SRC_SHA256\s*:\s*'([0-9a-f]{64})'",api)
+          if not f: sys.exit('B5 回归: api.js 缺 SRC_SHA256')
+          vj=__import__('json').load(open('version.json',encoding='utf-8'))
+          # 构建前的清单可以滞后（本次构建会回写），但常量必须存在
+          print('updater channel OK =',expect,'| SRC_SHA256 =',f.group(1)[:12])
+          PY
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -275,16 +291,25 @@ jobs:
                   '正式安装包在 Release：\n'
                   'https://github.com/Buwrt/2/releases/download/%s/githup-v1.2.20.apk\n\n'
                   'SHA-256 `%s`\n\n'
-                  '桌面有两个图标：`githup` = GitHub 客户端，`githup AI` = DeepSeek Harness。\n'
+                  '桌面只有一个 `githup` 图标：GitHub 客户端与 AI 面板同屏共存。\n'
                   '首次进入 githup AI 需展开 %d 个引擎文件，请耐心等进度走完；'
                   '随后在 AI 界面里配置 DeepSeek API Key 即可对话。\n') % (
                       len(data)//1048576, TAG, sha, M['entries'])
           print('put readme',put('apk/README.md',readme.encode(),'docs: APK 位置和首次使用说明')[0])
+          # 阶段 AI（四轮审计修复） B5：回写时补上 src_sha256。原来 vj.update() 没这个键，
+          # 清单里永远是底座旧值 894009bb…，且没有消费方所以一直没暴露。
+          import re as _re
+          _api=open('app/src/main/assets/web/js/api.js',encoding='utf-8').read()
+          _m=_re.search(r"SRC_SHA256\s*:\s*'([0-9a-f]{64})'",_api)
+          if not _m: raise SystemExit('B5: 产物 api.js 里取不到 SRC_SHA256')
+          srcsha=_m.group(1)
           vj=json.load(open('version.json',encoding='utf-8')) if os.path.exists('version.json') else {}
           vj.update({'version':'1.2.20','name':'githup v1.2.20（合并版 · 含 AI 引擎）',
                      'published':'2026-11-10','size':len(data),'sha256':sha,
+                     'src_sha256':srcsha,
                      'apk':'https://github.com/Buwrt/2/releases/download/%s/githup-v1.2.20.apk'%TAG,
-                     'notes':'底座 githup + DeepSeek Harness 内核；桌面双入口；官方签名；versionCode 1002020。'})
+                     'notes':'底座 githup + DeepSeek Harness 内核；单图标同屏；官方签名；versionCode 1002020。'})
+          print('B5 src_sha256 =',srcsha)
           print('put version.json',put('version.json',(json.dumps(vj,ensure_ascii=False,indent=2)+'\n').encode(),'chore: version.json 指向含 AI 引擎的正式包')[0])
           open('work/release-id.txt','w').write(str(rid))
           PY

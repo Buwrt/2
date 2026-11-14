@@ -1000,7 +1000,10 @@ public final class LocalBridgeServer {
     /**
      * 阶段 O：/gh/* —— GitHub 能力的本机代理，权限完全跟随登录令牌。
      *
-     * 令牌始终锁在 App 的 Keystore 里，DSH 只拿到一个不含凭据的回环 URL。
+     * 阶段 AI（四轮审计修复） B10：两类令牌分开说清楚 ——
+ * GitHub 访问令牌由 SecurePrefs 存在 AndroidKeyStore(AES-GCM) 里；
+ * 本地桥鉴权令牌同样改存 SecurePrefs（原来是 dsh_prefs 明文 UUID）。
+ * DSH 拿到的始终只是不含任何凭据的回环 URL。
      * 路由：
      *   GET  /gh/help                 → 自描述用法（AI 一 curl 就知道，不用翻文档）
      *   GET  /gh/repos                → 当前令牌可见的仓库清单（含私有库）
@@ -1080,7 +1083,7 @@ public final class LocalBridgeServer {
     /** AI 主动 curl 一下就能拿到完整用法，不必先读工作区里的 GITHUP.md。 */
     private String ghHelp() {
         return "{\"ok\":true,\"name\":\"githup GitHub bridge\","
-                + "\"auth\":\"令牌由 githup 客户端保管在设备 Keystore；本地址不含任何凭据\","
+                + "\"auth\":\"令牌由 App 经 SecurePrefs/Keystore 加密保管；本地址不含任何凭据\","
                 + "\"scope\":\"你的权限 = githup 当前登录令牌的权限（含私有库与写操作）；换账号或退出登录后即时变化，没有任何固定令牌\","
                 + "\"zero_permission_page\":\"GET /app/context 可零系统权限读到 githup 当前页面与仓库；须用户已在设置页同意\","
                 + "\"clone\":\"POST /app/clone-repo 把改好的文件以同名仓库上传到当前登录账号\","
