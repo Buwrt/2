@@ -4,7 +4,7 @@
 {"entries": 41426, "changed_files": 29, "replaced_hits": 39, "size": 159794879}
 
 --- work/verify.json ---
-{"size": 161948002, "sha256": "32e91e5f61c4abbd39437964bb7657edce55b1868a27ff505ae77be2b0516384", "payload_size": 159794879, "harness_assets": 122, "guard_ok": true}
+{"size": 161948002, "sha256": "41acacbcbf00e9bfc735db40d71c8170d954969e878f4d6425b3edafe40c5250", "payload_size": 159794879, "harness_assets": 122, "guard_ok": true}
 
 --- work/badging.txt ---
 package: name='com.hubmobile.app' versionCode='1002020' versionName='1.2.20' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34' compileSdkVersionCodename='14'
@@ -28,7 +28,7 @@ upload via curl below
 del old apk/ 404
 put sha 200
 put readme 200
-B5 src_sha256 = 145cf86f7a4b504ae6cda9352c9150f589e70387d7bca7ba47f9004edbe69a7b
+B5 src_sha256 = 5941120db2bdc3a3abc86bfd95079f1a88707d5f194890b23b71b007b2a46688
 put version.json 200
 
 
@@ -74,13 +74,13 @@ Warning: SDK processing. This version only understands SDK XML versions up to 3 
 > Task :app:processReleaseMainManifest
 > Task :app:processReleaseManifest
 > Task :app:extractProguardFiles
-> Task :app:mergeReleaseArtProfile
 > Task :app:processReleaseJavaRes NO-SOURCE
+> Task :app:mergeReleaseArtProfile
+> Task :app:processReleaseManifestForPackage
 > Task :app:mergeReleaseShaders FROM-CACHE
 > Task :app:compileReleaseShaders NO-SOURCE
-> Task :app:processReleaseManifestForPackage
-> Task :app:generateReleaseAssets UP-TO-DATE
 > Task :app:mergeReleaseJavaResource
+> Task :app:generateReleaseAssets UP-TO-DATE
 > Task :app:processReleaseResources
 > Task :app:mergeReleaseAssets
 
@@ -91,12 +91,12 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:mergeReleaseGeneratedProguardFiles
 > Task :app:processApplicationManifestReleaseForBundle
 > Task :app:collectReleaseDependencies
-> Task :app:compressReleaseAssets
 > Task :app:bundleReleaseResources
 > Task :app:sdkReleaseDependencyData
 > Task :app:validateSigningRelease
 > Task :app:writeReleaseAppMetadata
 > Task :app:writeReleaseSigningConfigVersions
+> Task :app:compressReleaseAssets
 > Task :app:minifyReleaseWithR8
 > Task :app:compileReleaseArtProfile
 > Task :app:shrinkReleaseRes
@@ -105,7 +105,7 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:createReleaseApkListingFileRedirect
 > Task :app:assembleRelease
 
-BUILD SUCCESSFUL in 1m 8s
+BUILD SUCCESSFUL in 1m 11s
 37 actionable tasks: 36 executed, 1 from cache
 
 
