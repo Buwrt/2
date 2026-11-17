@@ -5,7 +5,7 @@
   "published": "2026-11-10",
   "size": 161952098,
   "sha256": "ed4841bafe4bcddee9e9f0f3352b0d9afcdd57956b9be00754778d445f8ba414",
-  "src_sha256": "5ca83fede6a30ee642de0c49fb9de73179a6a11bf45f7c6814e6c9c603b00897",
+  "src_sha256": "877b52641b94ca2f60a51207d176b77f72fd57b2b1c9cfb3e1fc50d5ff97867c",
   "notes": "底座 githup + DeepSeek Harness 内核；单图标同屏；官方签名；versionCode 1002020。",
   "_说明": "更新检测的数据来源。App 会先查仓库的 Release，没有 Release 或取不到 APK 附件时读这个文件。apk 字段写 Release 附件直链（安装包不提交进仓库）。发新版本时改 version / apk / notes / size / sha256 / src_sha256 即可 —— 每次都必须是新包自己的值。历史上这里漏改过（版本号没变、值却是上一个包的），用户点「检查更新」会看到「你已是最新版本」，所以 size / sha256 一经改动就必须跟着重新对一遍。"
 }
