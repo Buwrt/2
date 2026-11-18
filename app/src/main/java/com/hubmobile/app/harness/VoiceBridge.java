@@ -93,6 +93,7 @@ public final class VoiceBridge {
             }
             return status();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return err(String.valueOf(t.getMessage()));
         }
     }
@@ -111,6 +112,7 @@ public final class VoiceBridge {
                     .put("isSpeaking", vm.isSpeaking());
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return err(String.valueOf(t.getMessage()));
         }
     }
@@ -133,12 +135,14 @@ public final class VoiceBridge {
                 return o.toString();
             }
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return err(String.valueOf(t.getMessage()));
         }
     }
 
     private static String err(String m) {
         try { return new JSONObject().put("ok", false).put("error", m).toString(); }
-        catch (Throwable t) { return "{\"ok\":false,\"error\":\"voice bridge error\"}"; }
+        catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return "{\"ok\":false,\"error\":\"voice bridge error\"}"; }
     }
 }

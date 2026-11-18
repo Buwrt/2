@@ -37,6 +37,7 @@ public final class VsreenBridgeService {
             Object perm = c.getMethod("checkSelfPermission").invoke(null);
             return perm instanceof Integer && ((Integer) perm) == PackageManager.PERMISSION_GRANTED;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         }
     }
@@ -50,7 +51,8 @@ public final class VsreenBridgeService {
                     android.os.Environment.getExternalStorageDirectory(),
                     "DeepSeekHarness/vscreen/vscreen_shizuku.jar");
             return ext.isFile() && ext.length() > 1024;
-        } catch (Throwable t) { return false; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
     }
 
     /** 控制台 /overlay 的 vscreen 状态字段。 */
@@ -64,7 +66,8 @@ public final class VsreenBridgeService {
                     .put("running", sVscreenRunning)
                     .put("shizuku", sh).put("coreJar", jar)
                     .put("reason", reason).toString();
-        } catch (Throwable t) { return "{\"available\":false}"; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return "{\"available\":false}"; }
     }
 
     /** 通知/桌宠面板点「开虚拟屏」：不假装成功，把真实缺什么说出来。 */

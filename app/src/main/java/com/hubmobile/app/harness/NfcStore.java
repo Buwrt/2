@@ -89,6 +89,7 @@ public final class NfcStore {
                 lastJson = p.getString(KEY_LAST_JSON, null);
                 if (!isArmedLocked()) armedAt = 0L; // 上次退出时已过 TTL：直接清掉
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 Log.w(TAG, "init failed", t);
             }
             initialized = true;
@@ -143,6 +144,7 @@ public final class NfcStore {
                 ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                         .edit().putLong(KEY_ARMED_AT, armedAt).apply();
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 Log.w(TAG, "persist armedAt failed", t);
             }
         }
@@ -151,6 +153,7 @@ public final class NfcStore {
             try {
                 l.onArmChanged(on);
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 Log.w(TAG, "arm listener failed", t);
             }
         }
@@ -178,6 +181,7 @@ public final class NfcStore {
             persist(ctx);
             Log.i(TAG, "tag recorded: " + o.optString("idHex", "?"));
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "recordTag failed", t);
             try {
                 JSONObject e = new JSONObject();
@@ -224,6 +228,7 @@ public final class NfcStore {
         try {
             ndef = Ndef.get(tag);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             o.put("ndefError", "get(Ndef) failed: " + t.getMessage());
         }
         if (ndef != null) {
@@ -243,6 +248,7 @@ public final class NfcStore {
                     if (uri != null) o.put("uri", uri);
                 }
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 o.put("ndefError", String.valueOf(t.getMessage()));
             } finally {
                 try { ndef.close(); } catch (Throwable ignored) {}
@@ -409,6 +415,7 @@ public final class NfcStore {
             hw = a != null;
             enabled = a != null && a.isEnabled();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "adapter query failed", t);
         }
         boolean armed = isArmed();
@@ -507,6 +514,7 @@ public final class NfcStore {
                         .edit().putString(KEY_LAST_JSON, lastJson).apply();
             } catch (Throwable ignored) {}
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "persist failed", t);
         }
     }
@@ -520,6 +528,7 @@ public final class NfcStore {
             w.write(content);
             w.flush();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "write " + f.getName() + " failed", t);
         } finally {
             try { if (w != null) w.close(); } catch (Throwable ignored) {}

@@ -76,6 +76,7 @@ public final class AccountDefaultRoute {
             Log.i(TAG, "account route: signedIn=" + signedIn
                     + " patch=" + patch.getAbsolutePath());
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "apply failed", t);
         }
     }
@@ -123,6 +124,7 @@ public final class AccountDefaultRoute {
             in.close();
             return new String(buf, 0, off, StandardCharsets.UTF_8);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "";
         }
     }

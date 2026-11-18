@@ -34,6 +34,7 @@ public class AlarmReceiver extends BroadcastReceiver {
                 if (next != null) {
                     try { ScheduleAlarms.register(ctx, next); }
                     catch (RuntimeException e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
                         ScheduleExecutor.log(ctx, "下次闹钟登记失败 taskId=" + id + ": " + e);
                     }
                 }
@@ -73,6 +74,7 @@ public class AlarmReceiver extends BroadcastReceiver {
                 }
             }
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             ScheduleExecutor.log(ctx, "闹钟处理失败 taskId=" + id + ": " + t);
         }
     }
@@ -99,6 +101,7 @@ public class AlarmReceiver extends BroadcastReceiver {
                     .setSmallIcon(R.mipmap.ic_launcher)
                     .setContentIntent(pi).setAutoCancel(true).build());
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             ScheduleExecutor.log(ctx, "任务通知失败: " + t);
         }
     }

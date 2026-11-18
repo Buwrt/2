@@ -276,6 +276,7 @@ public class OverlayService extends Service {
             }});
             return "{\"ok\":true,\"queued\":true,\"show\":" + show + "}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}";
         }
     }
@@ -495,7 +496,8 @@ public class OverlayService extends Service {
     /** v1.37：通知栏按钮文字随虚拟屏状态变。 */
     private String vscreenLabel() {
         try { return VsreenBridgeService.isVscreenRunning() ? "关虚拟屏" : "开虚拟屏"; }
-        catch (Throwable t) { return "虚拟屏"; }
+        catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return "虚拟屏"; }
     }
 
     /**
@@ -582,6 +584,7 @@ public class OverlayService extends Service {
             c.drawCircle(r, r, r - p.getStrokeWidth() / 2f, p);
             return out;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }
@@ -614,6 +617,7 @@ public class OverlayService extends Service {
             if (out != src) src.recycle();
             return out;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }
@@ -770,6 +774,7 @@ public class OverlayService extends Service {
             logVis("pet.json ok: lines=" + petLines.length + " ballDp=" + petBallDp
                     + " crop=" + petCropX + "," + petCropY + " autoHide=" + petAutoHideMs);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             logVis("pet.json load failed: " + t);
         }
     }
@@ -789,7 +794,8 @@ public class OverlayService extends Service {
 
     private static int parseColorSafe(String s, int def) {
         try { return (s == null || s.isEmpty()) ? def : android.graphics.Color.parseColor(s); }
-        catch (Throwable t) { return def; }
+        catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return def; }
     }
 
     /**
@@ -822,6 +828,7 @@ public class OverlayService extends Service {
             petLineIdx++;
             return s;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "我在。";
         }
     }
@@ -854,6 +861,7 @@ public class OverlayService extends Service {
             if ("peak".equals(kind)) return peakBubbleText();
             return nextPetLine();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return nextPetLine();
         }
     }
@@ -901,6 +909,7 @@ public class OverlayService extends Service {
                     try { c.disconnect(); } catch (Throwable ignored) {}
                 }
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 logVis("balance 查询失败: " + t);   // ⚠️ 只记异常，绝不记 key
             }
             if (txt != null) { balanceText = txt; balanceAt = System.currentTimeMillis(); }
@@ -948,6 +957,7 @@ public class OverlayService extends Service {
             String[] p = hm.split(":");
             return Integer.parseInt(p[0].trim()) * 60 + Integer.parseInt(p[1].trim());
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return -1;
         }
     }
@@ -992,6 +1002,7 @@ public class OverlayService extends Service {
             if (best == Integer.MAX_VALUE) return "";
             return String.format(java.util.Locale.US, "%02d:%02d", best / 60, best % 60);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "";
         }
     }
@@ -1294,6 +1305,7 @@ public class OverlayService extends Service {
             } catch (Throwable ignored) {}
             logVis("card show");
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             logVis("card show failed: " + t);
         }
     }
@@ -1348,6 +1360,7 @@ public class OverlayService extends Service {
             int diff = cardText.getBottom() - (cardScroll.getScrollY() + cardScroll.getHeight());
             return diff <= dp(24);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return true;
         }
     }
@@ -1687,6 +1700,7 @@ public class OverlayService extends Service {
                 }
             }
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             logVis("credentials 读取失败: " + t);
         }
         return null;
@@ -1787,6 +1801,7 @@ public class OverlayService extends Service {
             if (delay > 0) bubbleHandler.postDelayed(bubbleHider, delay);
             logVis("bubble show: " + text + " at(" + bx + "," + by + ") offY=" + offY);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             logVis("bubble show failed: " + t);
         }
     }
@@ -1840,6 +1855,7 @@ public class OverlayService extends Service {
             int w = rootView.getWidth(), h = rootView.getHeight();
             return rawX >= loc[0] && rawX <= loc[0] + w && rawY >= loc[1] && rawY <= loc[1] + h;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         }
     }
@@ -1862,6 +1878,7 @@ public class OverlayService extends Service {
             return rawX >= loc[0] - pad && rawX <= loc[0] + w + pad
                     && rawY >= loc[1] - pad && rawY <= loc[1] + h + pad;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         }
     }
@@ -1910,6 +1927,7 @@ public class OverlayService extends Service {
             r.close();
             return last;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }
@@ -1933,6 +1951,7 @@ public class OverlayService extends Service {
             int semi = v.indexOf(';');
             return semi > 0 ? v.substring(0, semi) : v;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }
@@ -1962,6 +1981,7 @@ public class OverlayService extends Service {
             c.disconnect();
             return new String(out.toByteArray(), "UTF-8");
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }
@@ -1982,6 +2002,7 @@ public class OverlayService extends Service {
             }
             return best;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }
@@ -2020,6 +2041,7 @@ public class OverlayService extends Service {
             org.json.JSONObject err = result.optJSONObject("error");
             return new SendResult(err != null ? err.optString("message", "发送失败") : "发送失败", null);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return new SendResult(String.valueOf(t.getMessage()), null);
         }
     }
@@ -2119,6 +2141,7 @@ public class OverlayService extends Service {
             f.setReadable(true, false);
             return f;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }
@@ -2170,6 +2193,7 @@ public class OverlayService extends Service {
             if (line == null || line.isEmpty()) return null;
             return new JSONObject(line);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         } finally {
             if (p != null) { try { p.destroy(); } catch (Throwable ignored) {} }
@@ -2214,6 +2238,7 @@ public class OverlayService extends Service {
             if (replyText == null || replyText.getText().length() == 0) return false;
             return lastReplyShown != null && !lastReplyShown.isEmpty();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         }
     }
@@ -2333,6 +2358,7 @@ public class OverlayService extends Service {
                 return new JSONObject().put("ok", true).put("user", user)
                         .put("userAt", userAt).put("reply", reply).put("replyAt", replyAt);
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 return null;
             }
         }
@@ -3218,7 +3244,8 @@ public class OverlayService extends Service {
 
     /** v1.69：面板输入框当前是否有焦点（= 用户正在面板里打字）。 */
     private boolean inputHasFocus() {
-        try { return chatInputView != null && chatInputView.hasFocus(); } catch (Throwable t) { return false; }
+        try { return chatInputView != null && chatInputView.hasFocus(); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
     }
 
     /**
@@ -3322,6 +3349,7 @@ public class OverlayService extends Service {
                     + ",\"balanceAgeSec\":" + (s.balanceAt == 0L ? -1 : (System.currentTimeMillis() - s.balanceAt) / 1000)
                     + "}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}";
         }
     }
@@ -3490,6 +3518,7 @@ public class OverlayService extends Service {
             // getWidth() 还是旧值"，一次性摆正就够。
             settleAfterLayout();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             // v1.49：无障碍覆盖窗被拒（无障碍服务没开/被系统收回）时回退到老的应用覆盖窗，
             // 至少还能显示，不至于整个浮窗消失。
             try {
@@ -3500,6 +3529,7 @@ public class OverlayService extends Service {
                 wm.addView(rootView, lp);
                 settleAfterLayout();
             } catch (Throwable t2) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t2);
                 stopSelf();
             }
         }
@@ -3667,6 +3697,7 @@ public class OverlayService extends Service {
             }});
             return "{\"ok\":true,\"queued\":true}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}";
         }
     }
@@ -3772,6 +3803,7 @@ public class OverlayService extends Service {
             return rawX >= loc[0] && rawX <= loc[0] + panelView.getWidth()
                     && rawY >= loc[1] && rawY <= loc[1] + panelView.getHeight();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         }
     }
@@ -4258,6 +4290,7 @@ public class OverlayService extends Service {
             try { in.close(); } catch (Throwable ignored) {}
             return body.toString("UTF-8").contains("<title>DeepSeek Harness</title>");
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         } finally {
             if (c != null) c.disconnect();
@@ -4268,7 +4301,8 @@ public class OverlayService extends Service {
     private boolean bodyContains(HttpURLConnection c, String needle) {
         try {
             InputStream in = null;
-            try { in = c.getInputStream(); } catch (Throwable t) { in = c.getErrorStream(); }
+            try { in = c.getInputStream(); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); in = c.getErrorStream(); }
             if (in == null) return false;
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             byte[] buf = new byte[2048];
@@ -4277,6 +4311,7 @@ public class OverlayService extends Service {
             try { in.close(); } catch (Throwable ignored) {}
             return out.toString("UTF-8").contains(needle);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         }
     }
@@ -4304,11 +4339,13 @@ public class OverlayService extends Service {
                 if (name == null || name.isEmpty() || !Character.isDigit(name.charAt(0))) continue;
                 File fdDir = new File(d, "fd");
                 String[] fds;
-                try { fds = fdDir.list(); } catch (Throwable t) { fds = null; }
+                try { fds = fdDir.list(); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); fds = null; }
                 if (fds == null) continue;   // 别的 uid 的进程：无权读，跳过
                 for (String fd : fds) {
                     String target;
-                    try { target = new File(fdDir, fd).getCanonicalPath(); } catch (Throwable t) { continue; }
+                    try { target = new File(fdDir, fd).getCanonicalPath(); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); continue; }
                     int i = target.indexOf("/dshhome/sessions/");
                     if (i < 0) continue;
                     if (!target.endsWith("/session.lock")) continue;
@@ -4318,6 +4355,7 @@ public class OverlayService extends Service {
             }
             return out;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }
@@ -4455,6 +4493,7 @@ public class OverlayService extends Service {
             else c.startService(i);
             return true;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             /* 阶段 AE：以前这里 catch(ignored) 把异常整个吞掉，服务到底有没有
                起来桥一概不知，只能回假成功。现在落盘 + startService 兜底。 */
             com.hubmobile.app.harness.UpstreamParity.diagLog(c, "OVERLAY",
@@ -4463,6 +4502,7 @@ public class OverlayService extends Service {
                 c.startService(i);
                 return true;
             } catch (Throwable t2) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t2);
                 com.hubmobile.app.harness.UpstreamParity.diagLog(c, "OVERLAY",
                         "startService fallback failed: " + t2);
                 return false;
@@ -4490,6 +4530,7 @@ public class OverlayService extends Service {
             }
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":true,\"running\":" + on + ",\"visible\":" + vis + "}";
         }
     }
@@ -4509,6 +4550,7 @@ public class OverlayService extends Service {
         try {
             return rootView != null && rootView.getParent() != null && panelVisible;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         }
     }

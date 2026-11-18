@@ -127,7 +127,10 @@ public final class HarnessBridge {
             });
             return url != null;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "ensureEngine failed", t);
+            com.hubmobile.app.Diag.e(com.hubmobile.app.Diag.ENGINE,
+                    "AI 引擎启动失败", "ensureEngine 抛异常", t);
             return false;
         }
     }
@@ -155,8 +158,11 @@ public final class HarnessBridge {
                     while (true) {
                         try { url = start(app, ui, cb); break; }
                         catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                             String m = String.valueOf(t.getMessage());
-                            boolean portClash = m.contains("EADDRINUSE")
+                            com.hubmobile.app.Diag.e(com.hubmobile.app.Diag.ENGINE,
+                "引擎端口被占用 EADDRINUSE", m, t);
+        boolean portClash = m.contains("EADDRINUSE")
                                     || m.contains("address already in use");
                             if (!portClash || attempt >= 2) throw t;
                             attempt++;
@@ -174,6 +180,7 @@ public final class HarnessBridge {
                         @Override public void run() { cb.onReady(readyUrl); }
                     });
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     Log.e(TAG, "boot failed", t);
                     final String msg = String.valueOf(t.getMessage());
                     ui.post(new Runnable() {
@@ -302,16 +309,20 @@ public final class HarnessBridge {
                     Os.link(src.getAbsolutePath(), link.getAbsolutePath());
                     made++;
                 } catch (Throwable e1) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e1);
                     try {
                         Os.symlink(target, link.getAbsolutePath());
                         made++;
                     } catch (Throwable e2) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e2);
                         try { copyFile(src, link); made++; }
-                        catch (Throwable e3) { Log.w(TAG, "link failed " + linkName, e3); }
+                        catch (Throwable e3) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e3); Log.w(TAG, "link failed " + linkName, e3); }
                     }
                 }
             }
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "applyLinks failed", t);
         } finally {
             try { if (r != null) r.close(); } catch (Throwable ignored) {}
@@ -337,10 +348,12 @@ public final class HarnessBridge {
                 File src = new File(kernel, line), dst = new File(prof, line);
                 if (!src.isDirectory() || dst.exists()) continue;
                 try { Os.symlink(src.getAbsolutePath(), dst.getAbsolutePath()); made++; }
-                catch (Throwable t) { Log.w(TAG, "profile kernel link failed: " + line, t); }
+                catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); Log.w(TAG, "profile kernel link failed: " + line, t); }
             }
             if (made > 0) Log.i(TAG, "profile kernel links restored: " + made);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "ensureProfileKernelLinks failed", t);
         } finally {
             try { if (r != null) r.close(); } catch (Throwable ignored) {}
@@ -553,6 +566,7 @@ public final class HarnessBridge {
             String s = new String(all, 0, off, "UTF-8");
             return s.length() > max ? s.substring(s.length() - max) : s;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "";
         }
     }
@@ -570,6 +584,7 @@ public final class HarnessBridge {
             for (int i = 0; i < n; i++) sb.append(b[i] == 0 ? ' ' : (char) b[i]);
             return sb.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }
@@ -600,7 +615,8 @@ public final class HarnessBridge {
             String name = f.getName();
             if (name.isEmpty() || !Character.isDigit(name.charAt(0))) continue;
             int pid;
-            try { pid = Integer.parseInt(name); } catch (Throwable t) { continue; }
+            try { pid = Integer.parseInt(name); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); continue; }
             if (pid == android.os.Process.myPid()) continue;
             String cmd = readCmdline(pid);
             if (cmd == null) continue;
@@ -636,6 +652,7 @@ public final class HarnessBridge {
             s.connect(new java.net.InetSocketAddress("127.0.0.1", port), 250);
             return true;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         } finally {
             try { if (s != null) s.close(); } catch (Throwable ignored) {}
@@ -667,6 +684,7 @@ public final class HarnessBridge {
             fos.close();
             return out;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }

@@ -112,6 +112,7 @@ public final class KernelStore {
             int n = in.read(buf);
             return n <= 0 ? "" : new String(buf, 0, n, "UTF-8").trim();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "";
         } finally {
             try { if (in != null) in.close(); } catch (Throwable ignored) {}
@@ -124,6 +125,7 @@ public final class KernelStore {
             File f = new File(tree, "REVISION");
             return f.isFile() ? readText(f).trim() : "";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "";
         }
     }
@@ -155,6 +157,7 @@ public final class KernelStore {
             }
             return v;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "read active failed", t);
             return null;
         }
@@ -188,6 +191,7 @@ public final class KernelStore {
             }
             return tree;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "resolve active failed", t);
             return null;
         }
@@ -206,6 +210,7 @@ public final class KernelStore {
                 writeText(activeFile(c), o.toString());
                 return null;
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 return "写激活指针失败：" + t;
             }
         }
@@ -218,6 +223,7 @@ public final class KernelStore {
                 File f = activeFile(c);
                 if (f.exists()) f.delete();
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 Log.w(TAG, "deactivate failed", t);
             }
         }
@@ -253,6 +259,7 @@ public final class KernelStore {
                         + ") 旧，指针已挪到 " + stale.getName() + "，本次改用内置树");
                 return stale.getName();
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 Log.w(TAG, "park stale pointer failed", t);
                 return null;
             }
@@ -333,6 +340,7 @@ public final class KernelStore {
                     }
                     b.sizeBytes = o.optLong("sizeBytes", b.sizeBytes);
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     b.note = "manifest 解析失败";
                 }
             } else {
@@ -363,6 +371,7 @@ public final class KernelStore {
                 try {
                     doInstall(ctx, b, cb);
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     String m = t.getMessage() == null ? t.toString() : t.getMessage();
                     cb.onDone(false, "安装失败：" + m);
                 }
@@ -459,14 +468,16 @@ public final class KernelStore {
     public static String kernelVersionAt(File tree) {
         try {
             return new JSONObject(readText(new File(tree, KPKG))).optString("version", "");
-        } catch (Throwable t) { return ""; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return ""; }
     }
 
     // ---------------------------------------------------------------- 小工具
 
     public static String sha256(File f) throws IOException {
         MessageDigest md;
-        try { md = MessageDigest.getInstance("SHA-256"); } catch (Exception e) { throw new IOException("no sha256"); }
+        try { md = MessageDigest.getInstance("SHA-256"); } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); throw new IOException("no sha256"); }
         InputStream in = new FileInputStream(f);
         try {
             byte[] buf = new byte[1 << 20];

@@ -76,6 +76,7 @@ public class EngineService extends Service {
             mediaSession.setActive(true);
             Log.i(TAG, "MediaSession for headset buttons initialized");
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "initMediaSession failed", t);
         }
     }

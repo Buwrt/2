@@ -77,6 +77,7 @@ public class LogShareProvider extends ContentProvider {
         try {
             return new String(Base64.decode(b64, Base64.URL_SAFE | Base64.NO_WRAP));
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }
@@ -98,6 +99,7 @@ public class LogShareProvider extends ContentProvider {
             }
             return false;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         }
     }
@@ -112,6 +114,7 @@ public class LogShareProvider extends ContentProvider {
             String b64 = Base64.encodeToString(absolutePath.getBytes(), Base64.URL_SAFE | Base64.NO_WRAP);
             return Uri.parse("content://" + authorityOf(ctx) + "/abs/" + b64);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }
@@ -139,6 +142,7 @@ public class LogShareProvider extends ContentProvider {
             if (ctx == null) return null;
             return new File(shareDir(ctx), name);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         }
     }

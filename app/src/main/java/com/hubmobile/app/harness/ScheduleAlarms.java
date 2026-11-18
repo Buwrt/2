@@ -29,10 +29,12 @@ final class ScheduleAlarms {
             if (Build.VERSION.SDK_INT >= 21) am.setAlarmClock(new AlarmManager.AlarmClockInfo(t.triggerAt, showPi), pi);
             else am.setExact(AlarmManager.RTC_WAKEUP, t.triggerAt, pi);
         } catch (RuntimeException e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
             try {
                 if (Build.VERSION.SDK_INT >= 23) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, t.triggerAt, pi);
                 else am.setExact(AlarmManager.RTC_WAKEUP, t.triggerAt, pi);
-            } catch (RuntimeException unavailable) { am.set(AlarmManager.RTC_WAKEUP, t.triggerAt, pi); }
+            } catch (RuntimeException unavailable) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, unavailable); am.set(AlarmManager.RTC_WAKEUP, t.triggerAt, pi); }
         }
     }
     private static void collect(Context ctx, Set<PendingIntent> out, int code, Intent i) {
@@ -61,7 +63,8 @@ final class ScheduleAlarms {
                 // still suppresses the target; a hash collision or shared slot cannot lose a peer.
                 for (ScheduledTaskStore.Task peer : new ScheduledTaskStore(ctx.getFilesDir()).list()) register(ctx, peer);
                 cancelAll(am, old); return null;
-            } catch (Exception e) { return "旧闹钟清理延后: " + e.toString(); }
+            } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); return "旧闹钟清理延后: " + e.toString(); }
         }
     }
     /** Cancellation succeeds durably even if AlarmManager cleanup must be retried later. */
@@ -76,7 +79,8 @@ final class ScheduleAlarms {
                 Set<PendingIntent> exact = new LinkedHashSet<PendingIntent>();
                 collect(ctx, exact, id.hashCode(), intent(ctx, new ScheduledTaskStore.Task(id, 1, "once", 0, "")));
                 cancelAll(am, exact);
-            } catch (RuntimeException e) { return "取消已登记，闹钟清理延后: " + e.toString(); }
+            } catch (RuntimeException e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); return "取消已登记，闹钟清理延后: " + e.toString(); }
             // For unknown IDs we cannot know who owns the shared slot. The tombstone is enough.
             return known ? retireLegacy(ctx, id) : null;
         }

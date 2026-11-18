@@ -96,6 +96,7 @@ public final class RootShell {
             return new Probe(ok, true, executable,
                     "exit=" + exitCode + ", su=" + executable + (compact.length() > 0 ? ", output=" + compact : ""));
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             String message = t.getMessage();
             return new Probe(false, !"su".equals(executable), executable, "start failed: " + executable
                     + (message == null ? "" : " (" + message + ")"));

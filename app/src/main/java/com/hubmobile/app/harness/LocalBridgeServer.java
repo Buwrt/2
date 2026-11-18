@@ -94,11 +94,13 @@ public final class LocalBridgeServer {
                                 @Override public void run() { handle(s); }
                             }, "gh-bridge-conn").start();
                         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                             if (!running) break;
                             try { Thread.sleep(100); } catch (Throwable ignored) {}
                         }
                     }
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     Log.w(TAG, "local bridge stopped", t);
                 } finally {
                     running = false;
@@ -127,7 +129,8 @@ public final class LocalBridgeServer {
             if (!"http".equalsIgnoreCase(u.getScheme())) return false;
             int p = u.getPort();
             return p >= ENGINE_MIN && p < ENGINE_MAX;
-        } catch (Throwable t) { return false; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
     }
 
     private String header(String raw, String key) {
@@ -217,6 +220,7 @@ public final class LocalBridgeServer {
             write(out, 200, cors(origin), resp);
             s.close();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "conn error", t);
             try { s.close(); } catch (Throwable ignored) {}
         }
@@ -272,6 +276,7 @@ public final class LocalBridgeServer {
             if (path.startsWith("/app/")) return appRoute(path, query, body, method);
             return "{\"ok\":false,\"error\":\"unknown route: " + path + "\"}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -319,6 +324,7 @@ public final class LocalBridgeServer {
                     i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     app.startActivity(i);
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     com.hubmobile.app.harness.UpstreamParity.diagLog(app, "OVERLAY",
                             "open permission page failed: " + t);
                 }
@@ -375,6 +381,7 @@ public final class LocalBridgeServer {
                     .put("needPermission", !canDraw);
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return OverlayService.statusJson(app);
         }
     }
@@ -397,6 +404,7 @@ public final class LocalBridgeServer {
                     .put("permission", OverlayService.canDraw(app));
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":true,\"running\":true,\"visible\":true}";
         }
     }
@@ -411,6 +419,7 @@ public final class LocalBridgeServer {
                     .put("engine", "githup AI");
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":true}";
         }
     }
@@ -460,10 +469,12 @@ public final class LocalBridgeServer {
                 i.setDataAndType(uri, mime == null ? "*/*" : mime);
                 i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
                 try { app.startActivity(i); }
-                catch (Throwable t) { return "{\"ok\":false,\"error\":\"no app can open this file\"}"; }
+                catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return "{\"ok\":false,\"error\":\"no app can open this file\"}"; }
             }
             return "{\"ok\":true}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -500,6 +511,7 @@ public final class LocalBridgeServer {
             }
             return "{\"ok\":true}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -519,6 +531,7 @@ public final class LocalBridgeServer {
                     ? cm.getPrimaryClip().getItemAt(0).getText() : "";
             return "{\"ok\":true,\"content\":" + q(String.valueOf(c)) + "}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -556,6 +569,7 @@ public final class LocalBridgeServer {
             }
             return "{\"ok\":" + ok + ",\"key\":" + q(key) + ",\"value\":" + q(value) + "}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -581,6 +595,7 @@ public final class LocalBridgeServer {
             app.startActivity(i);
             return "{\"ok\":true}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -633,6 +648,7 @@ public final class LocalBridgeServer {
                     .put("note", probe.ok ? "经 su 提权执行" : "仅在 App 自身 uid 下执行，非 Shizuku特权");
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -646,7 +662,8 @@ public final class LocalBridgeServer {
     }
 
     private static int exitOf(Process p) {
-        try { return p.exitValue(); } catch (Throwable t) { return -1; }
+        try { return p.exitValue(); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return -1; }
     }
 
     /** /usage：应用使用统计（需 PACKAGE_USAGE_STATS，Manifest 已声明）。 */
@@ -665,6 +682,7 @@ public final class LocalBridgeServer {
             }
             return UsageStatsHelper.queryUsageJson(app, days);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -730,6 +748,7 @@ public final class LocalBridgeServer {
                     .put("hint", "到点会发通知并尝试投递给 AI 引擎；用 /schedule/cancel 取消");
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -751,6 +770,7 @@ public final class LocalBridgeServer {
             if (cal.getTimeInMillis() <= System.currentTimeMillis()) cal.add(java.util.Calendar.DAY_OF_YEAR, 1);
             return cal.getTimeInMillis();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return -1;
         }
     }
@@ -777,6 +797,7 @@ public final class LocalBridgeServer {
                     .put("note", "局域网共享由引擎侧 lan-mesh 插件提供，本桥只报地址");
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -800,6 +821,7 @@ public final class LocalBridgeServer {
             }
             return unsupported("nfc " + path);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -816,6 +838,7 @@ public final class LocalBridgeServer {
                 if (fs != null) for (java.io.File f : fs) if (f.delete()) n++;
                 return "{\"ok\":true,\"cleared\":" + n + "}";
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
             }
         }
@@ -831,6 +854,7 @@ public final class LocalBridgeServer {
             if (arr.length() == 0) o.put("hint", "暂无归档；开启无障碍服务后由 3181 实时捕获");
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -857,6 +881,7 @@ public final class LocalBridgeServer {
             String body = new String(o.toByteArray(), "UTF-8");
             return body.isEmpty() ? null : body;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return null;
         } finally {
             if (c != null) c.disconnect();
@@ -878,6 +903,7 @@ public final class LocalBridgeServer {
                     .put("shareUri", LogShareProvider.uriForAbs(app, f.getAbsolutePath()).toString());
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -893,6 +919,7 @@ public final class LocalBridgeServer {
             String s = new String(all, 0, off, "UTF-8");
             return s.length() > max ? s.substring(s.length() - max) : s;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "";
         }
     }
@@ -914,6 +941,7 @@ public final class LocalBridgeServer {
                     .put("hint", "完整时光机备份/恢复需上游原生壳流程；本桥提供目录清单与体积");
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -970,6 +998,7 @@ public final class LocalBridgeServer {
             o.put("store", store);
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -993,6 +1022,7 @@ public final class LocalBridgeServer {
             o.put("ok", true).put("storeDir", BuildEnvInstaller.STORE);
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -1046,6 +1076,7 @@ public final class LocalBridgeServer {
             }
             return "{\"ok\":false,\"error\":\"未知的 /app 路由\"}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -1076,6 +1107,7 @@ public final class LocalBridgeServer {
 
             return "{\"ok\":false,\"error\":\"未知的 /gh 路由\"}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -1116,7 +1148,8 @@ public final class LocalBridgeServer {
             if (i < 0) continue;
             if (key.equals(kv.substring(0, i))) {
                 try { return URLDecoder.decode(kv.substring(i + 1), "UTF-8"); }
-                catch (Throwable t) { return kv.substring(i + 1); }
+                catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return kv.substring(i + 1); }
             }
         }
         return def;

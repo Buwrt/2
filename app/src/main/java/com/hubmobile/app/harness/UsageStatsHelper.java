@@ -30,6 +30,7 @@ public class UsageStatsHelper {
                     Process.myUid(), ctx.getPackageName());
             return mode == AppOpsManager.MODE_ALLOWED;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         }
     }
@@ -82,6 +83,7 @@ public class UsageStatsHelper {
             sb.append("]}");
             return sb.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":\"" + String.valueOf(t.getMessage()).replace("\"", "'") + "\"}";
         }
     }

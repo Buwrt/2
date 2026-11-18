@@ -49,7 +49,8 @@ public final class ScheduledTaskStore {
                 if (p.length < 5 || !validId(p[0])) return null;
                 Task t = new Task(p[0], Long.parseLong(p[1]), p[2], Integer.parseInt(p[3]), p[4]);
                 validate(t); return t;
-            } catch (RuntimeException e) { return null; }
+            } catch (RuntimeException e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); return null; }
         }
     }
     private static int[] timeOf(long at) {
@@ -104,7 +105,8 @@ public final class ScheduledTaskStore {
                     Task t = Task.parse(line);
                     if (t != null) s.active.put(t.id, t); else s.unknown.add(line);
                 }
-            } catch (RuntimeException e) { throw new IOException("Invalid task registry metadata", e); }
+            } catch (RuntimeException e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); throw new IOException("Invalid task registry metadata", e); }
         }
         for (String id : lines(legacyCancelled)) if (validId(id)) s.cancelled.add(id);
         for (String id : s.cancelled) s.active.remove(id);
@@ -117,7 +119,8 @@ public final class ScheduledTaskStore {
                 Task t = s.active.get(e.getKey());
                 if (t != null) s.active.put(t.id, t.withLifeTask(e.getValue()));
             }
-        } catch (RuntimeException e) { throw new IOException("Invalid daily/life task metadata", e); }
+        } catch (RuntimeException e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); throw new IOException("Invalid daily/life task metadata", e); }
         return s;
     }
     private void save(State s) throws IOException {

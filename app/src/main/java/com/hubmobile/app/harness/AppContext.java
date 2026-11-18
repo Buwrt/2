@@ -136,7 +136,8 @@ public final class AppContext {
 
     private static JSONObject page(Context c) {
         try { return new JSONObject(p(c).getString(K_PAGE, "{}")); }
-        catch (Throwable t) { return new JSONObject(); }
+        catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return new JSONObject(); }
     }
 
     /** GET /app/context —— AI 一 curl 就能准确回答「我现在在哪个页面、看哪个库」。 */
@@ -179,6 +180,7 @@ public final class AppContext {
                         + "建立同名仓库会用当前登录令牌调用 GitHub 写接口。此操作与作者无关。");
             }
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return err("读取页面状态失败：" + t.getMessage());
         }
         return o.toString();
@@ -251,14 +253,16 @@ public final class AppContext {
                         .put("text", "该仓库速览尚未生成（通常会在你打开仓库页几秒内自动完成）。"
                                 + "请稍后再试一次本端点；不要改为逐文件读取整个仓库。")
                         .toString();
-            } catch (Throwable t) { return err("速览暂不可用"); }
+            } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return err("速览暂不可用"); }
         }
         try {
             JSONObject o = new JSONObject(full);
             return new JSONObject().put("ok", true).put("repo", repo)
                     .put("cached", true).put("card", o.optString("card", ""))
                     .put("text", clip(o.optString("brief", ""), 2200)).toString();
-        } catch (Throwable t) { return err("速览解析失败：" + t.getMessage()); }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return err("速览解析失败：" + t.getMessage()); }
     }
 
     /**
@@ -348,6 +352,7 @@ public final class AppContext {
             out.put("note", "只写入当前登录账号下的同名仓库，原仓库 " + full + " 未被修改。");
             return out.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return err("克隆失败：" + t.getMessage());
         }
     }
@@ -357,7 +362,8 @@ public final class AppContext {
         for (String part : s.split("/", -1)) {
             if (b.length() > 0) b.append('/');
             try { b.append(java.net.URLEncoder.encode(part, "UTF-8").replace("+", "%20")); }
-            catch (Throwable t) { b.append(part); }
+            catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); b.append(part); }
         }
         return b.toString();
     }
@@ -373,6 +379,7 @@ public final class AppContext {
 
     private static String err(String msg) {
         try { return new JSONObject().put("ok", false).put("error", msg).toString(); }
-        catch (Throwable t) { return "{\"ok\":false,\"error\":\"" + msg + "\"}"; }
+        catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return "{\"ok\":false,\"error\":\"" + msg + "\"}"; }
     }
 }

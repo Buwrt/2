@@ -107,6 +107,7 @@ public class GhRepoPickerActivity extends Activity {
                         @Override public void onCancel(DialogInterface d) { close(); }
                     }).show();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Toast.makeText(this, "仓库列表解析失败：" + t.getMessage(), Toast.LENGTH_LONG).show();
             close();
         }

@@ -30,9 +30,11 @@ final class SafeFiles {
                 if (status != 0) throw new IOException("Deletion tool exited " + status);
                 return;
             } catch (InterruptedException interrupted) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, interrupted);
                 Thread.currentThread().interrupt();
                 throw new IOException("Deletion interrupted", interrupted);
-            } catch (IOException failed) { failure = failed; }
+            } catch (IOException failed) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, failed); failure = failed; }
         }
         throw failure == null ? new IOException("Deletion tool unavailable") : failure;
     }

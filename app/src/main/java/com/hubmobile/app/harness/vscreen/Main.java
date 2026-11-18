@@ -104,12 +104,14 @@ public class Main {
             sContext = FakeContext.get();
             log("FakeContext ready (package=" + sContext.getPackageName() + ")", null);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             log("FakeContext init failed, 虚拟屏不可用", t);
         }
 
         try {
             startHttpServer();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             log("HTTP 服务启动失败", t);
             return;
         }
@@ -119,6 +121,7 @@ public class Main {
         try {
             Looper.loop();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             log("Looper.loop 退出", t);
         }
     }
@@ -132,6 +135,7 @@ public class Main {
                     try {
                         Thread.sleep(5000);
                     } catch (InterruptedException e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
                         return;
                     }
                     long idle = System.currentTimeMillis() - sLastRequestAt;
@@ -141,6 +145,7 @@ public class Main {
                     try {
                         closeDisplay();
                     } catch (Throwable t2) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t2);
                         log("看门狗销毁虚拟屏失败", t2);
                     }
                     try {
@@ -209,6 +214,7 @@ public class Main {
                     wakeLock = null;
                 }
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 log("wakeLock.release 失败: " + t.getMessage(), null);
             }
             synchronized (frameLock) {
@@ -220,11 +226,13 @@ public class Main {
             try {
                 virtualDisplay.release();
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 log("virtualDisplay.release 失败: " + t.getMessage(), null);
             }
             try {
                 reader.close();
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 log("reader.close 失败: " + t.getMessage(), null);
             }
         }
@@ -249,6 +257,7 @@ public class Main {
             log("wakeLock 已持有: " + tag, null);
             return wl;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             log("wakeLock 获取失败（息屏后 CPU 可能被挂起）: " + t.getMessage(), null);
             return null;
         }
@@ -284,6 +293,7 @@ public class Main {
             m.invoke(wm, displayId, 0 /* ImePolicy.LOCAL */);
             log("setDisplayImePolicy LOCAL display=" + displayId, null);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             log("setDisplayImePolicy 失败（键盘仍会落到主屏）: " + t, null);
         }
     }
@@ -316,6 +326,7 @@ public class Main {
                     try {
                         img = s.reader.acquireLatestImage();
                     } catch (Throwable t2) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t2);
                         log("acquireLatestImage 异常: " + t2.getMessage(), null);
                     }
                     if (img == null) {
@@ -323,6 +334,7 @@ public class Main {
                         try {
                             Thread.sleep(consecutiveNull > 20 ? 60 : PUMP_IDLE_SLEEP_MS);
                         } catch (InterruptedException e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
                             return;
                         }
                         continue;
@@ -333,6 +345,7 @@ public class Main {
                         s.sawFrame = true;
                         s.frameTs = System.currentTimeMillis();
                     } catch (Throwable t2) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t2);
                         log("copyImageToSession 异常: " + t2.getMessage(), null);
                     } finally {
                         try {
@@ -399,6 +412,7 @@ public class Main {
             Field f = DisplayManager.class.getField(name);
             return f.getInt(null);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return 0;
         }
     }
@@ -516,6 +530,7 @@ public class Main {
             return "{\"ok\":true,\"displayId\":" + id + ",\"width\":" + w
                     + ",\"height\":" + h + ",\"dpi\":" + d + "}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             if (reader != null) {
                 try {
                     reader.close();
@@ -561,6 +576,7 @@ public class Main {
             int code = p.waitFor();
             return "exit=" + code + " " + sb.toString().trim();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "exec失败: " + t;
         }
     }
@@ -672,6 +688,7 @@ public class Main {
                     + ",\"suspectFrozen\":" + suspectFrozen(s)
                     + ",\"scaleX\":1.0,\"scaleY\":1.0}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             bmp.recycle();
             log("写 PNG 失败: " + out.getAbsolutePath(), t);
             return err("写截图失败: " + t);
@@ -698,6 +715,7 @@ public class Main {
             return "{\"ok\":true,\"previewB64\":\"" + b64 + "\",\"width\":" + pw + ",\"height\":" + ph
                     + ",\"screenW\":" + s.width + ",\"screenH\":" + s.height + "}";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return err("预览编码失败: " + t);
         } finally {
             bmp.recycle();
@@ -756,6 +774,7 @@ public class Main {
                         // 具名类而非嵌套匿名类：d8 8.2 在 "匿名类内再套匿名类" 的 class 上会内部 NPE。
                         new Thread(new ConnRunner(sock), "vscreen-http").start();
                     } catch (Throwable e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
                         log("accept 失败: " + e.getMessage(), null);
                     }
                 }
@@ -855,6 +874,7 @@ public class Main {
                 log("HTTP " + path + " " + query + " -> " + summarize(body) + " (" + cost + "ms)", null);
             }
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             log("handle 异常: " + t.getMessage(), null);
         } finally {
             try {
@@ -896,6 +916,7 @@ public class Main {
             String v = qStr(query, key);
             return v == null ? def : (int) Double.parseDouble(v);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return def;
         }
     }
@@ -905,6 +926,7 @@ public class Main {
             String v = qStr(query, key);
             return v == null ? def : Float.parseFloat(v);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return def;
         }
     }
@@ -913,6 +935,7 @@ public class Main {
         try {
             return java.net.URLDecoder.decode(s, "UTF-8");
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return s;
         }
     }

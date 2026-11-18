@@ -61,6 +61,7 @@ public final class AppUi {
                     + "不是截图、不是控件树；要操作请用 POST /app/ui/act。");
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return okText("raw", clip(raw, 1600));
         }
     }
@@ -87,7 +88,8 @@ public final class AppUi {
                     .put("act", "POST /app/ui/act  {\"action\":\"...\",\"arg\":\"...\"}")
                     .put("actions", a)
                     .put("consent_required", true).toString();
-        } catch (Throwable t) { return err("帮助生成失败"); }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return err("帮助生成失败"); }
     }
 
     /** POST /app/ui/act —— 白名单执行，拒绝一切任意 JS。 */
@@ -162,7 +164,8 @@ public final class AppUi {
                 UiBridge.toast("AI 助手：已复制到剪贴板");
                 return new JSONObject().put("ok", true).put("action", "copy")
                         .put("result", "copied").toString();
-            } catch (Throwable t) { return err("复制失败：" + t.getMessage()); }
+            } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return err("复制失败：" + t.getMessage()); }
         } else {
             return err("不支持的动作：" + action + "；可用动作见 GET /app/ui/help");
         }
@@ -175,7 +178,8 @@ public final class AppUi {
             return new JSONObject().put("ok", true).put("action", action)
                     .put("arg", arg).put("result", clip(result, 300))
                     .put("toast", label).toString();
-        } catch (Throwable t) { return err("执行结果解析失败"); }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return err("执行结果解析失败"); }
     }
 
     private static boolean looksDangerous(String s) {
@@ -192,11 +196,13 @@ public final class AppUi {
 
     private static String okText(String k, String v) {
         try { return new JSONObject().put("ok", true).put(k, v).toString(); }
-        catch (Throwable t) { return "{\"ok\":true}"; }
+        catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return "{\"ok\":true}"; }
     }
 
     private static String err(String m) {
         try { return new JSONObject().put("ok", false).put("error", m).toString(); }
-        catch (Throwable t) { return "{\"ok\":false}"; }
+        catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return "{\"ok\":false}"; }
     }
 }

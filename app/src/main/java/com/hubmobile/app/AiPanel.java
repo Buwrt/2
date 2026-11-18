@@ -801,7 +801,8 @@ public final class AiPanel {
                 }
                 boolean consent;
                 try { consent = com.hubmobile.app.harness.AppContext.consent(act); }
-                catch (Throwable t) { consent = false; }
+                catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); consent = false; }
                 if (repoStrip != null) {
                     repoStrip.setVisibility(View.VISIBLE);
                     repoCard.setText(consent
@@ -837,14 +838,16 @@ public final class AiPanel {
         if (repoAction == null) return;
         boolean consent;
         try { consent = com.hubmobile.app.harness.AppContext.consent(act); }
-        catch (Throwable t) { consent = false; }
+        catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); consent = false; }
         repoAction.setText(consent ? "带入对话" : "开启感知");
     }
 
     private void onRepoAction() {
         boolean consent;
         try { consent = com.hubmobile.app.harness.AppContext.consent(act); }
-        catch (Throwable t) { consent = false; }
+        catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); consent = false; }
         if (!consent) { showConsentDialog(); return; }
         if (curBrief.isEmpty()) {
             toast("当前仓库速览还没准备好，稍等一下或检查 GitHub 登录");
@@ -917,7 +920,8 @@ public final class AiPanel {
                             }
                         });
                     } else fallbackCopy(text);
-                } catch (Throwable t) { fallbackCopy(text); }
+                } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); fallbackCopy(text); }
             }
         });
     }
@@ -1490,6 +1494,7 @@ public final class AiPanel {
                     resultMsg.sendToTarget();
                     return true;
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     return false;
                 }
             }
@@ -1538,6 +1543,7 @@ public final class AiPanel {
                     }
                     return launchFilePicker(params);
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     com.hubmobile.app.harness.UpstreamParity.diagLog(act, "ATTACH", "onShowFileChooser 失败 " + t);
                     cancelFileChooser();
                     return false;
@@ -1563,6 +1569,7 @@ public final class AiPanel {
             if (isLoopback(url)) return false;          // DSH 自己，交回 WebView
             return openExternally(u);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return true;
         }
     }
@@ -1586,7 +1593,8 @@ public final class AiPanel {
             h = h.toLowerCase(java.util.Locale.US);
             return h.equals("127.0.0.1") || h.equals("localhost")
                     || h.equals("::1") || h.equals("[::1]");
-        } catch (Throwable t) { return false; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
     }
 
     /**
@@ -1614,6 +1622,7 @@ public final class AiPanel {
             toast("登录链接已在浏览器打开；完成后切回本 App（回环回调由引擎接收）");
             return true;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             toast("无法打开外部链接");
             return true;
         }
@@ -1677,6 +1686,7 @@ public final class AiPanel {
             dm.enqueue(req);
             toast("已开始下载，通知栏可查看");
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             openExternally(android.net.Uri.parse(url));
         }
     }
@@ -1718,6 +1728,7 @@ public final class AiPanel {
                     act.startActivity(ext);
                     toast("已跳转到浏览器；完成授权后切回本 App");
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     try { openExternally(Uri.parse(url)); } catch (Throwable ignored) {}
                 }
             }
@@ -1737,7 +1748,8 @@ public final class AiPanel {
                 if (t.contains("image") || t.contains("*/*") || t.trim().isEmpty()) return true;
             }
             return false;
-        } catch (Throwable t) { return true; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return true; }
     }
 
     private boolean launchFilePicker(WebChromeClient.FileChooserParams params) {
@@ -1751,6 +1763,7 @@ public final class AiPanel {
             act.startActivityForResult(Intent.createChooser(i, "选择附件"), REQ_FILE_CHOOSER);
             return true;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             com.hubmobile.app.harness.UpstreamParity.diagLog(act, "ATTACH", "文件选择器启动失败 " + t);
             cancelFileChooser();
             return false;
@@ -1769,6 +1782,7 @@ public final class AiPanel {
             i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             act.startActivityForResult(i, REQ_CAMERA_CAPTURE);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             com.hubmobile.app.harness.UpstreamParity.diagLog(act, "ATTACH", "拍照启动失败 " + t);
             cameraOutputUri = null;
             launchFilePicker(null);       // 相机不可用时退回文件选择，绝不「点了没反应」
@@ -1878,7 +1892,8 @@ public final class AiPanel {
             int p = u.getPort();
             return p >= com.hubmobile.app.harness.EnginePorts.DEFAULT
                     && p < com.hubmobile.app.harness.EnginePorts.MAX;
-        } catch (Throwable t) { return false; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
     }
 
     // ==================== NFC / 生命周期 ====================

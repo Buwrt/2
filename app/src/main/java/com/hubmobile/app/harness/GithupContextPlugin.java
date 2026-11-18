@@ -114,6 +114,7 @@ public final class GithupContextPlugin {
 
             Log.i(TAG, "apply consent=" + on + " dshHome=" + dshHome.getAbsolutePath());
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "apply failed", t);
         }
     }
@@ -142,7 +143,8 @@ public final class GithupContextPlugin {
             while (off < b.length) { int n = in.read(b, off, b.length - off); if (n < 0) break; off += n; }
             in.close();
             return new String(b, 0, off, StandardCharsets.UTF_8);
-        } catch (Throwable t) { return ""; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return ""; }
     }
 
     private static void write(File f, String s) throws Exception {

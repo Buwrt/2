@@ -188,7 +188,8 @@ public final class ShellBridge {
             readLifeDbState(lf);
             o.put("life", lf);
             try { o.put("schedules", ScheduleBridge.list(ctx)); }
-            catch (Throwable t) { o.put("schedules", new JSONObject().put("items", new JSONArray())); }
+            catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); o.put("schedules", new JSONObject().put("items", new JSONArray())); }
 
             o.put("note", (GhBridge.enabled(ctx)
                     ? "GitHub 权限跟随登录令牌（含私有库与写操作，令牌不出设备）；"
@@ -198,6 +199,7 @@ public final class ShellBridge {
                         : "虚拟屏与特权 shell 需安装 Shizuku 并授权"));
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":" + LocalBridgeServer.q(String.valueOf(t.getMessage())) + "}";
         }
     }
@@ -223,6 +225,7 @@ public final class ShellBridge {
             }
             kn.put("store", store);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             try { kn.put("error", String.valueOf(t.getMessage())); } catch (Throwable ignored) {}
         }
         return kn;
@@ -293,7 +296,8 @@ public final class ShellBridge {
                 pick.setType("*/*");
                 pick.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 try { ctx.startActivity(pick); return ok("已打开文件选择器，选 .zip / .dshbackup 后由引擎侧恢复流程接手"); }
-                catch (Throwable t) { return fail("无法打开文件选择器：" + t.getMessage()); }
+                catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return fail("无法打开文件选择器：" + t.getMessage()); }
             }
 
             // ---- 通知历史 / 日志 ----
@@ -302,7 +306,8 @@ public final class ShellBridge {
                     JSONArray h = NotificationArchive.list(ctx.getFilesDir());
                     return new JSONObject().put("ok", true).put("count", h.length())
                             .put("items", h).toString();
-                } catch (Throwable t) { return ok("通知历史：" + t.getMessage()); }
+                } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return ok("通知历史：" + t.getMessage()); }
             }
             if (id.equals("log.view") || id.startsWith("log.")) {
                 if (id.equals("log.clear")) {
@@ -342,7 +347,8 @@ public final class ShellBridge {
                     Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(a));
                     i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     try { ctx.startActivity(i); return ok("已打开链接"); }
-                    catch (Throwable t) { return fail("无法打开：" + t.getMessage()); }
+                    catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return fail("无法打开：" + t.getMessage()); }
                 }
                 return fail("不支持的链接");
             }
@@ -357,7 +363,8 @@ public final class ShellBridge {
                 Intent pick = new Intent(ctx, com.hubmobile.app.GhRepoPickerActivity.class);
                 pick.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 try { ctx.startActivity(pick); return ok("已打开 GitHub 仓库选择器"); }
-                catch (Throwable t) { return fail("打不开仓库选择器：" + t.getMessage()); }
+                catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return fail("打不开仓库选择器：" + t.getMessage()); }
             }
             if (id.equals("update.check")) {
                 return new JSONObject().put("ok", true).put("current", "1.2.20")
@@ -371,7 +378,8 @@ public final class ShellBridge {
                     JSONObject req = new JSONObject(a);
                     JSONObject r = ScheduleBridge.cancel(ctx, req.optString("source", "app"), req.optString("id", ""));
                     return r.toString();
-                } catch (Throwable t) { return fail("取消失败：" + t.getMessage()); }
+                } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return fail("取消失败：" + t.getMessage()); }
             }
 
             // ---- 插件 ----
@@ -394,6 +402,7 @@ public final class ShellBridge {
                         beStage = r == null || r.isEmpty() ? "没有可用来源" : "找到 " + r.size() + " 个来源";
                         if (r == null || r.isEmpty()) beErr = "两个仓库都没有可用的构建环境分卷";
                     } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                         beErr = String.valueOf(t.getMessage()); beStage = "查询失败";
                     } finally { beResolving = false; }
                 }}, "be-resolve").start();
@@ -535,6 +544,7 @@ public final class ShellBridge {
 
             return fail("「" + id + "」需要 Shizuku 特权服务端，本版未接入");
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return fail(String.valueOf(t.getMessage()));
         }
     }
@@ -564,7 +574,8 @@ public final class ShellBridge {
         }
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try { ctx.startActivity(i); return ok("已打开系统设置"); }
-        catch (Throwable t) { return fail("无法打开设置：" + t.getMessage()); }
+        catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return fail("无法打开设置：" + t.getMessage()); }
     }
 
     /** 真打包 dshhome 全站资产到 /sdcard/DeepSeekHarness/backups/（时光机快照）。 */
@@ -583,6 +594,7 @@ public final class ShellBridge {
                     .put("size", out.length()).put("entries", count[0])
                     .put("msg", "时光机快照已生成：" + name).toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return fail("快照失败：" + t.getMessage());
         }
     }
@@ -662,6 +674,7 @@ public final class ShellBridge {
                         .put("summary", (daemon ? "🟢 守护中" : "⚪ 未启动") + " · 待取包裹 " + pkgs);
             } finally { if (db != null) db.close(); }
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             try { lf.put("ready", false).put("summary", "生活助理未初始化"); } catch (Throwable ignored) {}
         }
     }
@@ -675,7 +688,8 @@ public final class ShellBridge {
     }
 
     private boolean engineAlive() {
-        try { return HarnessBridge.isRunning(); } catch (Throwable t) { return false; }
+        try { return HarnessBridge.isRunning(); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
     }
 
     private boolean canDraw() {
@@ -690,7 +704,8 @@ public final class ShellBridge {
             if (!Boolean.TRUE.equals(ping)) return false;
             Object perm = c.getMethod("checkSelfPermission").invoke(null);
             return perm instanceof Integer && ((Integer) perm) == PackageManager.PERMISSION_GRANTED;
-        } catch (Throwable t) { return false; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
     }
 
     /** 解析 "action=fluid&on=1" 这类 query-string 参数；没有该 key 时回退 def。 */
@@ -704,7 +719,8 @@ public final class ShellBridge {
     }
 
     private static int parseInt(String s, int def) {
-        try { return Integer.parseInt(s.trim()); } catch (Throwable t) { return def; }
+        try { return Integer.parseInt(s.trim()); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return def; }
     }
 
     private static String ok(String msg) {
@@ -729,6 +745,7 @@ public final class ShellBridge {
                     .put("installing", beInstalling).put("stage", beStage)
                     .put("resolving", beResolving).put("err", beErr);
             return o.toString();
-        } catch (Throwable t) { return "{\"ok\":false}"; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return "{\"ok\":false}"; }
     }
 }

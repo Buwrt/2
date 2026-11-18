@@ -77,7 +77,8 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
     public static WindowManager accessibilityWindowManager() {
         HarnessAccessibilityService s = instance;
         if (s == null) return null;
-        try { return (WindowManager) s.getSystemService(WINDOW_SERVICE); } catch (Throwable t) { return null; }
+        try { return (WindowManager) s.getSystemService(WINDOW_SERVICE); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return null; }
     }
 
     /** 当前活跃窗口的包名。 */
@@ -151,6 +152,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                 prefs.edit().putInt(KEY_A11Y_PORT, port).apply(); // 顺手纠正历史脏值
             }
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "derive a11y port failed", t);
         }
         startServer(port);
@@ -211,14 +213,17 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                             final Socket s = ss.accept();
                             handleConnection(s);
                         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                             if (ss.isClosed()) break;
                             try { Thread.sleep(100); } catch (InterruptedException interrupted) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, interrupted);
                                 Thread.currentThread().interrupt();
                                 break;
                             }
                         }
                     }
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     Log.w(TAG, "a11y server stopped", t);
                 } finally {
                     try { if (ss != null) ss.close(); } catch (Throwable ignored) {}
@@ -258,6 +263,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
         try {
             return Double.parseDouble(s);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return def;
         }
     }
@@ -325,6 +331,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                     try {
                         respBody = route(path, body);
                     } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                         respBody = jsonError("内部错误: " + t.getMessage());
                     }
                     BufferedWriter w = new BufferedWriter(new OutputStreamWriter(s.getOutputStream(), "UTF-8"));
@@ -333,6 +340,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                     w.flush();
                     s.close();
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     Log.w(TAG, "a11y connection error", t);
                     try { s.close(); } catch (Throwable ignored) {}
                 }
@@ -347,6 +355,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             o.put("error", msg == null ? "未知错误" : msg);
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "{\"ok\":false,\"error\":\"json error\"}";
         }
     }
@@ -408,6 +417,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             }
             return NfcStore.arm(this, on).toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("nfc-arm 失败: " + t.getMessage());
         }
     }
@@ -425,6 +435,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             }
             return NfcStore.lastJsonObj(since).toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("nfc-last 失败: " + t.getMessage());
         }
     }
@@ -437,6 +448,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             o.put("items", NfcStore.historyJson());
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("nfc-history 失败: " + t.getMessage());
         }
     }
@@ -466,6 +478,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                 abs = f.getCanonicalPath();
                 isDir = f.isDirectory();
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 return jsonError("参数解析失败: " + t.getMessage());
             }
             String mime = isDir ? "resource/folder" : LogShareProvider.mimeOfName(abs);
@@ -496,6 +509,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             r.put("mime", mime);
             return r.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("打开失败: " + t.getMessage());
         }
     }
@@ -510,10 +524,12 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             wm.getDefaultDisplay().getRealMetrics(dm);
             return new int[]{dm.widthPixels, dm.heightPixels};
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             try {
                 DisplayMetrics dm = getResources().getDisplayMetrics();
                 return new int[]{dm.widthPixels, dm.heightPixels};
             } catch (Throwable t2) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t2);
                 return new int[]{0, 0};
             }
         }
@@ -584,6 +600,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             }
             dispatchGesture(gb.build(), null, null);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "release all failed", t);
         }
     }
@@ -901,6 +918,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                 o.put("held", held);
                 return o.toString();
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 releaseAllFingersUnlocked();
                 return jsonError("gesture error: " + t.getMessage());
             }
@@ -922,6 +940,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             }
             return executeGesture(ops);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("gesture 参数解析失败: " + t.getMessage());
         }
     }
@@ -949,6 +968,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             ops.put(op);
             return executeGesture(ops);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("touch error: " + t.getMessage());
         }
     }
@@ -963,6 +983,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                 o.put("held", new JSONArray());
                 return o.toString();
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 return jsonError("touch-release error: " + t.getMessage());
             }
         }
@@ -995,6 +1016,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             o.put("held", held);
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("touch-status error: " + t.getMessage());
         }
     }
@@ -1029,6 +1051,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             ops.put(op);
             return executeGesture(ops);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("swipe error: " + t.getMessage());
         }
     }
@@ -1057,6 +1080,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             ops.put(op);
             return executeGesture(ops);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("hold error: " + t.getMessage());
         }
     }
@@ -1075,6 +1099,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             o.put("canScreenshot", Build.VERSION.SDK_INT >= 30);
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("status error: " + t.getMessage());
         }
     }
@@ -1179,6 +1204,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             }
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("dump error: " + t.getMessage());
         }
     }
@@ -1301,6 +1327,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             }
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("dump-display error: " + t.getMessage());
         }
     }
@@ -1310,7 +1337,8 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
      *  退化成投递手势——而手势会被悬浮窗（远程控制/小窗等）吃掉。向上找可点击祖先即可绕过。 */
     private AccessibilityNodeInfo closestClickable(AccessibilityNodeInfo node) {
         Rect nb = new Rect();
-        try { node.getBoundsInScreen(nb); } catch (Throwable t) { return null; }
+        try { node.getBoundsInScreen(nb); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return null; }
         long nArea = (long) Math.max(1, nb.width()) * Math.max(1, nb.height());
         AccessibilityNodeInfo cur = node;
         for (int i = 0; i < 12 && cur != null; i++) {
@@ -1327,6 +1355,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                 }
                 cur = cur.getParent();
             } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 return null;
             }
         }
@@ -1414,7 +1443,8 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             public void visit(AccessibilityNodeInfo node, int depth) {
                 if (node == null) return;
                 Rect bounds = new Rect();
-                try { node.getBoundsInScreen(bounds); } catch (Throwable t) { return; }
+                try { node.getBoundsInScreen(bounds); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return; }
                 if (!bounds.contains(x, y)) return;
                 AccessibilityNodeInfo clickable = closestClickable(node);
                 if (clickable == null) {
@@ -1477,6 +1507,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             o.put("error", "未找到可点击的目标元素（text/desc 未匹配，或元素不可点击）");
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("tap error: " + t.getMessage());
         }
     }
@@ -1493,6 +1524,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                     .build();
             return dispatchGesture(gesture, null, null);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "gesture tap failed", t);
             return false;
         }
@@ -1550,6 +1582,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             o.put("error", ok ? "" : ("输入失败（" + ("paste".equals(mode) ? "粘贴未执行" : "setText 未执行") + "）"));
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("input error: " + t.getMessage());
         }
     }
@@ -1585,6 +1618,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             o.put("error", "未找到可滚动的区域");
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("scroll error: " + t.getMessage());
         }
     }
@@ -1595,6 +1629,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             o.put("ok", performGlobalAction(action));
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("global action error: " + t.getMessage());
         }
     }
@@ -1698,6 +1733,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                             result[0] = o.toString();
                         }
                     } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                         result[0] = jsonError("截图保存失败: " + t.getMessage());
                     } finally {
                         latch.countDown();
@@ -1711,6 +1747,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                 }
             });
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("截图调用失败: " + t.getMessage());
         }
         try {
@@ -1718,6 +1755,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                 return jsonError("截图超时");
             }
         } catch (InterruptedException e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
             return jsonError("截图被中断");
         }
         return result[0] == null ? jsonError("截图无结果") : result[0];
@@ -1759,6 +1797,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             notifEnabled = true;
             Log.i(TAG, "notification event subscribed");
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             notifEnabled = false;
             Log.w(TAG, "subscribe notification events failed", t);
         }
@@ -1774,6 +1813,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
         try {
             return Long.parseLong(s.trim());
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return def;
         }
     }
@@ -1836,6 +1876,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
                 notifLock.notifyAll();  // 唤醒 /notifications-wait 的等待者
             }
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "capture notification failed", t);
         }
     }
@@ -1899,6 +1940,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             o.put("items", notifItemsJson(picked));
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("notifications 失败: " + t.getMessage());
         }
     }
@@ -1943,6 +1985,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             o.put("items", notifItemsJson(picked));
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("notifications-wait 失败: " + t.getMessage());
         }
     }
@@ -1963,6 +2006,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             o.put("seq", cur);
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("notifications-clear 失败: " + t.getMessage());
         }
     }
@@ -1984,6 +2028,7 @@ public class HarnessAccessibilityService extends android.accessibilityservice.Ac
             o.put("max", NOTIF_MAX);
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return jsonError("notifications-status 失败: " + t.getMessage());
         }
     }

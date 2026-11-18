@@ -81,6 +81,7 @@ public class MainActivity extends Activity {
         try {
             boot(savedInstanceState);
         } catch (Throwable e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
             /* 走到这里就说明启动流程炸了。
              * 把堆栈同时做两件事：落盘（CrashLog 已经在 App 里装好写了，
              * 这里再兜一次）＋ 直接画到屏幕上，让用户看得见、截得下来。 */
@@ -216,6 +217,7 @@ public class MainActivity extends Activity {
         try {
             rec = CrashLog.readLast(this);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return;
         }
         if (rec == null || rec.isEmpty()) return;
@@ -604,6 +606,7 @@ public class MainActivity extends Activity {
                             request.deny();
                         }
                     } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                         try { request.deny(); } catch (Throwable ignored) { }
                     }
                 });
@@ -627,6 +630,7 @@ public class MainActivity extends Activity {
                 if (bridge != null) bridge.enqueueWebViewDownload(url, userAgent, name);
                 else openExternal(url);
             } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
                 openExternal(url);
             }
         });
@@ -658,6 +662,7 @@ public class MainActivity extends Activity {
             webView.loadUrl(HOME_URL);
             toastTrouble("页面被系统回收了，正在重新加载", Toast.LENGTH_SHORT);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             finish();       // 实在起不来：干脆收掉，别留一张不会动的图
         }
         return true;
@@ -755,6 +760,7 @@ public class MainActivity extends Activity {
             d.setCanceledOnTouchOutside(false);
             d.show();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             finish();
         }
     }
@@ -798,6 +804,7 @@ public class MainActivity extends Activity {
             if (isWebUrl(url)) i.addCategory(Intent.CATEGORY_BROWSABLE);
             startActivity(i);
         } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
             try {
                 if (!isWebUrl(url)) {
                     Intent web = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
@@ -816,6 +823,7 @@ public class MainActivity extends Activity {
             String s = Uri.parse(url).getScheme();
             return s != null && (s.equalsIgnoreCase("http") || s.equalsIgnoreCase("https"));
         } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
             return false;
         }
     }

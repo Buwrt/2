@@ -52,6 +52,7 @@ public final class GhBridgeDocs {
             write(new File(dshHome, "GITHUP-BRIDGE.md"), ptr);
             Log.i(TAG, "docs installed at " + root.getAbsolutePath());
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             Log.w(TAG, "install failed", t);
         }
     }

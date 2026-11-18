@@ -96,6 +96,7 @@ final class ShareInbox {
             // 对用户和 AI 都更认前者（两者本来就是同一个目录）。
             return wrote ? "/sdcard/DeepSeekHarness/shares/" + day.getName() : null;
         } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
             return null;
         }
     }
@@ -161,6 +162,7 @@ final class ShareInbox {
                     JSONObject file = new JSONObject(); file.put("index", index); file.put("name", name);
                     file.put("mime", mime); file.put("bytes", count); files.put(file); total += count; index++;
                 } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
                     if (!target.getCanonicalFile().getParentFile().equals(dir.getCanonicalFile())) throw new IOException("无效附件路径");
                     if (target.exists() && !target.delete()) throw new IOException("无法清理未完成附件");
                     errors.put(name + ": " + (e.getMessage() == null ? "附件读取失败" : e.getMessage()));

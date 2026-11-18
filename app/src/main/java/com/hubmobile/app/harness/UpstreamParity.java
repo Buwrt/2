@@ -104,13 +104,15 @@ public final class UpstreamParity {
             in.close();
             String s = new String(b, 0, off, StandardCharsets.UTF_8);
             return s.length() > max ? "…" + s.substring(s.length() - max) : s;
-        } catch (Throwable t) { return "(读取失败)"; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return "(读取失败)"; }
     }
 
     // ==================== ② 启动失败计数 + 安全模式 ====================
 
     public static int bootFailures(Context c) {
-        try { return prefs(c).getInt(KEY_BOOT_FAILS, 0); } catch (Throwable t) { return 0; }
+        try { return prefs(c).getInt(KEY_BOOT_FAILS, 0); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return 0; }
     }
 
     public static void noteBootFailure(Context c, String why) {
@@ -124,7 +126,8 @@ public final class UpstreamParity {
     }
 
     public static boolean safeModeActive(Context c) {
-        try { return prefs(c).getBoolean(KEY_SAFE_MODE, false); } catch (Throwable t) { return false; }
+        try { return prefs(c).getBoolean(KEY_SAFE_MODE, false); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
     }
 
     /**
@@ -164,6 +167,7 @@ public final class UpstreamParity {
             return "已旁置 " + moved + " 个配置文件（会话与凭据保留）。\n"
                     + "请完全退出 App 重进；引擎会用出厂配置启动。";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "进入安全模式失败：" + t.getMessage();
         }
     }
@@ -195,6 +199,7 @@ public final class UpstreamParity {
             diagLog(c, "SAFE", "退出安全模式，恢复 " + back + " 个配置");
             return "已恢复 " + back + " 个配置文件。完全退出 App 重进即可。";
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "退出安全模式失败：" + t.getMessage();
         }
     }
@@ -211,7 +216,8 @@ public final class UpstreamParity {
         Thread t = new Thread(new Runnable() {
             @Override public void run() {
                 while (!Thread.currentThread().isInterrupted()) {
-                    try { Thread.sleep(5000); } catch (InterruptedException e) { return; }
+                    try { Thread.sleep(5000); } catch (InterruptedException e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); return; }
                     try {
                         if (userStopped(app)) continue;
                         if (com.hubmobile.app.HarnessBridge.isRunning()) continue;
@@ -249,7 +255,8 @@ public final class UpstreamParity {
     }
 
     public static boolean userStopped(Context c) {
-        try { return prefs(c).getBoolean("engine_stopped_by_user", false); } catch (Throwable t) { return false; }
+        try { return prefs(c).getBoolean("engine_stopped_by_user", false); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
     }
 
     // ==================== ④ 电池优化白名单（上游 checkBatteryOptimization） ====================
@@ -259,7 +266,8 @@ public final class UpstreamParity {
             if (Build.VERSION.SDK_INT < 23) return false;
             PowerManager pm = (PowerManager) c.getSystemService(Context.POWER_SERVICE);
             return pm != null && !pm.isIgnoringBatteryOptimizations(c.getPackageName());
-        } catch (Throwable t) { return false; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
     }
 
     /** 打开系统「忽略电池优化」请求；失败退回电池设置页。 */
@@ -270,6 +278,7 @@ public final class UpstreamParity {
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             c.startActivity(i);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             try {
                 Intent i = new Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);

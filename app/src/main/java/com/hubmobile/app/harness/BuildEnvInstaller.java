@@ -190,6 +190,7 @@ public final class BuildEnvInstaller {
                 try {
                     doInstall(ctx, src, cb);
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     cb.onDone(false, "安装失败：" + (t.getMessage() == null ? t.toString() : t.getMessage()));
                 }
             }
@@ -431,6 +432,7 @@ public final class BuildEnvInstaller {
                 // 下载成功，退出循环
                 return;
             } catch (IOException e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
                 if (cancelFlag) throw e;
                 lastErr = e;
                 // 继续尝试下一个候选源
@@ -542,7 +544,8 @@ public final class BuildEnvInstaller {
             int n;
             while ((n = in.read(b)) > 0) bo.write(b, 0, n);
             return new String(bo.toByteArray(), "UTF-8");
-        } catch (Throwable t) { return ""; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return ""; }
     }
 
     private static String tail(String s) {
@@ -564,6 +567,7 @@ public final class BuildEnvInstaller {
             for (byte x : d) sb.append(String.format("%02x", x));
             return sb.toString();
         } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
             throw new IOException("算 sha256 失败：" + e.getMessage());
         } finally { closeQuietly(in); }
     }
@@ -663,6 +667,7 @@ public final class BuildEnvInstaller {
             return (st.st_mode & android.system.OsConstants.S_IFMT)
                     == android.system.OsConstants.S_IFLNK;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         }
     }

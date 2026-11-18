@@ -425,7 +425,8 @@ public class HarnessActivity extends Activity {
             int p = u.getPort();
             return p >= com.hubmobile.app.harness.EnginePorts.DEFAULT
                     && p < com.hubmobile.app.harness.EnginePorts.MAX;
-        } catch (Throwable t) { return false; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
     }
 
     private void enableNfc() {

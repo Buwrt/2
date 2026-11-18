@@ -57,7 +57,8 @@ public final class RepoBrief {
         String b = cachedBrief(c, repo);
         if (b.isEmpty()) return "";
         try { return new JSONObject(b).optString("card", ""); }
-        catch (Throwable t) { return ""; }
+        catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return ""; }
     }
 
     /** 页面变化时调；命中缓存直接回调，否则异步抓一次。 */
@@ -80,7 +81,8 @@ public final class RepoBrief {
                 try {
                     JSONObject o = new JSONObject(result.isEmpty() ? "{}" : result);
                     cb.done(repo, o.optString("card", ""), o.optString("brief", ""));
-                } catch (Throwable t) { cb.done(repo, "", ""); }
+                } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); cb.done(repo, "", ""); }
             }
         });
     }
@@ -149,6 +151,7 @@ public final class RepoBrief {
                     .put("ts", System.currentTimeMillis())
                     .toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "";
         }
     }
@@ -159,6 +162,7 @@ public final class RepoBrief {
             if (!o.optBoolean("ok", false)) return new JSONObject();
             JSONObject d = o.optJSONObject("data");
             return d == null ? new JSONObject() : d;
-        } catch (Throwable t) { return new JSONObject(); }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return new JSONObject(); }
     }
 }

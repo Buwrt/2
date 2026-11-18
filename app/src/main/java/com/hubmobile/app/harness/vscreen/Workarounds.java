@@ -34,6 +34,7 @@ public final class Workarounds {
             mSystemThreadField.setAccessible(true);
             mSystemThreadField.setBoolean(ACTIVITY_THREAD, true);
         } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
             throw new AssertionError(e);
         }
     }

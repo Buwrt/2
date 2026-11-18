@@ -252,6 +252,7 @@ public class VoiceManager {
                         }
                     });
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     Log.w(TAG, "initTts exception", t);
                 }
             }
@@ -344,6 +345,7 @@ public class VoiceManager {
                     if (dictationOwner == owner) endDictation(owner, null, "听写超时，请重试", false);
                 }}, 60000);
             } catch (Throwable e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
                 if (dictationOwner == owner) endDictation(owner, null, e.getMessage() == null ? "无法启动听写" : e.getMessage(), false);
                 else owner.onError(e.getMessage() == null ? "无法启动听写" : e.getMessage());
             }
@@ -358,7 +360,8 @@ public class VoiceManager {
                 mainHandler.postDelayed(new Runnable() { public void run() {
                     if (dictationOwner == owner) endDictation(owner, null, "语音识别未返回，请重试", false);
                 }}, 15000);
-            } catch (Throwable e) { endDictation(owner, null, "无法结束收音", false); }
+            } catch (Throwable e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); endDictation(owner, null, "无法结束收音", false); }
         }});
     }
     public void cancelDictation(final VoiceCallback owner) {
@@ -454,6 +457,7 @@ public class VoiceManager {
                         notifyStateChange("listening", "正在聆听...");
                     }
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     Log.w(TAG, "startListening error", t);
                     lastError = t.getMessage();
                     isListening = false;
@@ -475,6 +479,7 @@ public class VoiceManager {
                         notifyStateChange("recognizing", "正在识别文字...");
                     }
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     Log.w(TAG, "stopListening error", t);
                 }
             }
@@ -495,6 +500,7 @@ public class VoiceManager {
                         scheduleHotwordRestart(300);
                     }
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     Log.w(TAG, "cancelListening error", t);
                 }
             }
@@ -764,6 +770,7 @@ public class VoiceManager {
                     }
                     Log.i(TAG, "Voice prompt submitted to DSH successfully: " + promptText);
                 } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                     Log.w(TAG, "submitVoiceCommand error", t);
                 }
             }

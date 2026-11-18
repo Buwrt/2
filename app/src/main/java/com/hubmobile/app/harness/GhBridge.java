@@ -179,11 +179,14 @@ public final class GhBridge {
             out.put("ok", r.code >= 200 && r.code < 300).put("status", r.code);
             try { out.put("data", new JSONObject(text)); }
             catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
                 try { out.put("data", new JSONArray(text)); }
-                catch (Throwable t2) { out.put("data", text); }
+                catch (Throwable t2) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t2); out.put("data", text); }
             }
             return out.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return err("GitHub 请求失败：" + t.getMessage());
         }
     }
@@ -211,6 +214,7 @@ public final class GhBridge {
             }
             return new JSONObject().put("ok", true).put("repos", out).toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return err("解析仓库列表失败：" + t.getMessage());
         }
     }
@@ -267,6 +271,7 @@ public final class GhBridge {
             o.put("note", "令牌未离开设备；本自检只发 GET，没有改动任何仓库");
             return o.toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return err("自检失败：" + t.getMessage());
         }
     }
@@ -307,6 +312,7 @@ public final class GhBridge {
                     .put("readonly", false)
                     .put("scope", "跟随登录令牌的全部权限").toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return err(String.valueOf(t.getMessage()));
         }
     }
@@ -408,6 +414,7 @@ public final class GhBridge {
                     .put("entries", count)
                     .put("msg", "已把 " + fullName + " 展开为 AI 只读工作区（" + count + " 项）").toString();
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return err("展开工作区失败：" + t.getMessage());
         } finally {
             if (conn != null) try { conn.disconnect(); } catch (Throwable ignored) {}
@@ -452,6 +459,7 @@ public final class GhBridge {
 
     private static String err(String msg) {
         try { return new JSONObject().put("ok", false).put("error", msg).toString(); }
-        catch (Throwable t) { return "{\"ok\":false,\"error\":\"" + msg + "\"}"; }
+        catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return "{\"ok\":false,\"error\":\"" + msg + "\"}"; }
     }
 }

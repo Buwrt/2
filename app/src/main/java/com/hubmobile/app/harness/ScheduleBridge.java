@@ -51,7 +51,8 @@ final class ScheduleBridge {
                     List<String> ids = wakeIds.remove(id);
                     row.put("wakeTaskIds", new JSONArray(ids == null ? Collections.<String>emptyList() : ids)); items.put(row);
                 }
-            } catch (Exception e) { out.put("lifeError", e.toString()); }
+            } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); out.put("lifeError", e.toString()); }
             finally { if (cursor != null) cursor.close(); if (db != null) db.close(); }
         }
         // An unreadable/deleted life DB must not hide its still-registered native wake alarms.
@@ -62,7 +63,8 @@ final class ScheduleBridge {
         }
         JSONArray history = new JSONArray();
         try { for (String line : ScheduleExecutor.history(ctx, 50)) history.put(line); }
-        catch (IOException e) { out.put("historyError", e.toString()); }
+        catch (IOException e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); out.put("historyError", e.toString()); }
         out.put("ok", true); out.put("items", items); out.put("history", history); return out;
     }
     static JSONObject cancel(Context ctx, String source, String id) throws Exception {
@@ -86,7 +88,8 @@ final class ScheduleBridge {
                     int removed = 0; String warning = null;
                     for (ScheduledTaskStore.Task t : new ScheduledTaskStore(ctx.getFilesDir()).list()) if (id.equals(t.lifeTaskId)) {
                         try { warning = ScheduleAlarms.cancel(ctx, t.id); removed++; }
-                        catch (Exception e) { warning = "生活助理已禁用，唤醒闹钟清理延后: " + e.toString(); }
+                        catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); warning = "生活助理已禁用，唤醒闹钟清理延后: " + e.toString(); }
                     }
                     out.put("wakeCancelled", removed); if (warning != null) out.put("warning", warning);
                     ScheduleExecutor.log(ctx, "生活助理任务已禁用 lifeTaskId=" + id);

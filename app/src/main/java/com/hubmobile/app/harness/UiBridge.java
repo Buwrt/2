@@ -63,7 +63,8 @@ public final class UiBridge {
                                 latch.countDown();
                             }
                         });
-                    } catch (Throwable t) { latch.countDown(); }
+                    } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); latch.countDown(); }
                 }
             });
             if (!latch.await(2500, TimeUnit.MILLISECONDS)) return null;
@@ -102,7 +103,8 @@ public final class UiBridge {
             }
             android.view.View root = a.findViewById(android.R.id.content);
             return findWebRec(root, 0);
-        } catch (Throwable t) { return null; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return null; }
     }
 
     private static WebView findWebRec(android.view.View v, int depth) {

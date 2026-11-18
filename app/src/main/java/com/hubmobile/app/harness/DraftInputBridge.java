@@ -41,22 +41,26 @@ public final class DraftInputBridge {
             }
             return failure("untrusted document");
         }
-        try { return new ShareInbox(activity).snapshot().toString(); } catch (Exception e) { return failure(e.getMessage()); }
+        try { return new ShareInbox(activity).snapshot().toString(); } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); return failure(e.getMessage()); }
     }
     @JavascriptInterface public String shareChunk(String credential, String id, int index, long offset) {
         if (!admitted(credential)) return failure("untrusted document");
-        try { return new ShareInbox(activity).chunk(id, index, offset).toString(); } catch (Exception e) { return failure(e.getMessage()); }
+        try { return new ShareInbox(activity).chunk(id, index, offset).toString(); } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); return failure(e.getMessage()); }
     }
     @JavascriptInterface public String shareAck(String credential, String id) {
         if (!admitted(credential)) return failure("untrusted document");
-        try { new ShareInbox(activity).acknowledge(id); return "{\"ok\":true}"; } catch (Exception e) { return failure(e.getMessage()); }
+        try { new ShareInbox(activity).acknowledge(id); return "{\"ok\":true}"; } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); return failure(e.getMessage()); }
     }
     @JavascriptInterface public String voiceState(String credential) {
         if (!admitted(credential)) return failure("untrusted document");
         synchronized (lock) { try {
             return new JSONObject().put("ok", true).put("id", voiceId).put("state", state)
                     .put("text", text).put("error", error).toString();
-        } catch (Exception e) { return failure(e.getMessage()); } }
+        } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); return failure(e.getMessage()); } }
     }
     @JavascriptInterface public String voiceAct(final String credential, final String action, final String id) {
         if (!admitted(credential)) return failure("untrusted document");
@@ -141,6 +145,7 @@ public final class DraftInputBridge {
                 // 成功时**不弹 toast**：前端会把附件直接挂成输入栏里的卡片（用户要的就是这一种），
                 // 底部 toast 既挡键盘又和卡片重复。失败仍由下面的 catch 报出来，不静默。
             } catch (final Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
                 ui.post(new Runnable() { public void run() { Toast.makeText(activity, "分享接收失败: " + e.getMessage(), Toast.LENGTH_LONG).show(); }});
             }
         }}, "share-inbox").start();

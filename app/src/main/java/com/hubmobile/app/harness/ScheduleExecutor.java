@@ -65,6 +65,7 @@ public final class ScheduleExecutor {
             return perm instanceof Integer
                     && ((Integer) perm) == android.content.pm.PackageManager.PERMISSION_GRANTED;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         }
     }
@@ -92,6 +93,7 @@ public final class ScheduleExecutor {
             }
             return t;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return "";
         }
     }
@@ -129,6 +131,7 @@ public final class ScheduleExecutor {
             log(ctx, summary);
             notifyResult(ctx, ok, summary);
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             String msg = "执行异常: " + t.getMessage();
             log(ctx, msg);
             notifyResult(ctx, false, msg);
@@ -185,7 +188,8 @@ public final class ScheduleExecutor {
             if (code == 303 || code == 302) return true;
             if (code == 401) {
                 InputStream e = null;
-                try { e = c.getInputStream(); } catch (Throwable t) { e = c.getErrorStream(); }
+                try { e = c.getInputStream(); } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); e = c.getErrorStream(); }
                 if (e == null) return false;
                 ByteArrayOutputStream eb = new ByteArrayOutputStream();
                 byte[] ebuf = new byte[2048];
@@ -209,6 +213,7 @@ public final class ScheduleExecutor {
             try { in.close(); } catch (Throwable ignored) {}
             return body.toString("UTF-8").contains("<title>DeepSeek Harness</title>");
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         } finally {
             try { if (c != null) c.disconnect(); } catch (Throwable ignored) {}
@@ -238,6 +243,7 @@ public final class ScheduleExecutor {
             return EngineRpc.call(new File(ctx.getFilesDir(), "dsh-web.log"), enginePort(ctx),
                     "session/create", new org.json.JSONObject()).getString("sessionId");
         } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
             Log.w(TAG, "scheduled session creation failed", e);
             return null;
         }
@@ -261,7 +267,8 @@ public final class ScheduleExecutor {
             try { while (output.read(bytes) != -1) { /* Drain output to avoid blocking child pipes. */ } }
             finally { output.close(); }
             int code = p.waitFor(); log(ctx, "生活助理本地调度完成 exit=" + code);
-        } catch (Exception e) { log(ctx, "生活助理本地调度失败: " + e.toString()); }
+        } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); log(ctx, "生活助理本地调度失败: " + e.toString()); }
         finally { if (!reported) onStarted.run(); }
     }
 
@@ -277,7 +284,8 @@ public final class ScheduleExecutor {
                             + msg.replace('\r', ' ').replace('\n', ' ') + "\n";
                     fos.write(line.getBytes("UTF-8"));
                 } finally { fos.close(); }
-            } catch (Exception e) { Log.w(TAG, "Cannot append schedule history", e); }
+            } catch (Exception e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e); Log.w(TAG, "Cannot append schedule history", e); }
         }
     }
     static java.util.List<String> history(Context ctx, int limit) throws java.io.IOException {

@@ -74,6 +74,7 @@ public final class EnginePorts {
             s.bind(new java.net.InetSocketAddress("127.0.0.1", port), 1);
             return true;
         } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t);
             return false;
         } finally {
             try { if (s != null) s.close(); } catch (Throwable ignored) {}
@@ -136,7 +137,8 @@ public final class EnginePorts {
             while (off < b.length && (n = in.read(b, off, b.length - off)) > 0) off += n;
             in.close();
             return new String(b, 0, off, StandardCharsets.UTF_8);
-        } catch (Throwable t) { return ""; }
+        } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return ""; }
     }
 
     private static String strip(String s) {

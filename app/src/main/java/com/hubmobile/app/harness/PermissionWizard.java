@@ -181,6 +181,7 @@ public final class PermissionWizard {
                     i.setData(Uri.parse("package:" + act.getPackageName()));
                     act.startActivity(i);
                 } catch (Throwable e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
                     openSystemSetting(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
                 }
             } else {
@@ -224,7 +225,8 @@ public final class PermissionWizard {
                 int mode = ops.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS,
                         android.os.Process.myUid(), act.getPackageName());
                 return mode == AppOpsManager.MODE_ALLOWED;
-            } catch (Throwable t) { return false; }
+            } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
         }};
         p5.action = new Runnable() { @Override public void run() {
             openSystemSetting(Settings.ACTION_USAGE_ACCESS_SETTINGS);
@@ -237,7 +239,8 @@ public final class PermissionWizard {
         p6.provider = new Provider() { @Override public boolean granted() {
             if (Build.VERSION.SDK_INT < 26) return true;
             try { return act.getPackageManager().canRequestPackageInstalls(); }
-            catch (Throwable t) { return false; }
+            catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
         }};
         p6.action = new Runnable() { @Override public void run() {
             openSystemSetting(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES);
@@ -251,7 +254,8 @@ public final class PermissionWizard {
             try {
                 PowerManager pm = (PowerManager) act.getSystemService(Context.POWER_SERVICE);
                 return pm != null && pm.isIgnoringBatteryOptimizations(act.getPackageName());
-            } catch (Throwable t) { return false; }
+            } catch (Throwable t) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, t); return false; }
         }};
         p7.action = new Runnable() { @Override public void run() {
             try {
@@ -259,6 +263,7 @@ public final class PermissionWizard {
                 i.setData(Uri.parse("package:" + act.getPackageName()));
                 act.startActivity(i);
             } catch (Throwable e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
                 openSystemSetting(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
             }
         }};
@@ -498,11 +503,13 @@ public final class PermissionWizard {
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             act.startActivity(i);
         } catch (Throwable e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
             try {
                 Intent i = new Intent(action);
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 act.startActivity(i);
             } catch (Throwable e2) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e2);
                 UpstreamParity.diagLog(act.getApplicationContext(), "WIZARD",
                         "打开设置失败 " + action + ": " + e2);
             }
@@ -516,6 +523,7 @@ public final class PermissionWizard {
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             act.startActivity(i);
         } catch (Throwable e) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, e);
             openSystemSetting(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
         }
     }

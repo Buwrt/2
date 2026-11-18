@@ -53,7 +53,8 @@ public final class LocalHttpFence {
                 URI source = new URI(origin);
                 if ((source.getRawPath() != null && !source.getRawPath().isEmpty())
                         || source.getRawQuery() != null || source.getRawFragment() != null) return 403;
-            } catch (Exception invalid) { return 403; }
+            } catch (Exception invalid) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, invalid); return 403; }
         }
         String referer = headers.get("referer");
         if (referer != null && !isLoopbackUrl(referer, enginePort)) return 403;
@@ -74,7 +75,8 @@ public final class LocalHttpFence {
             if (!"127.0.0.1".equals(host) && !"localhost".equals(host) && !"[::1]".equals(host) && !"::1".equals(host)) return false;
             int port = uri.getPort() == -1 ? 80 : uri.getPort();
             return port == expectedPort;
-        } catch (Exception invalid) { return false; }
+        } catch (Exception invalid) {
+            com.hubmobile.app.Diag.caught(com.hubmobile.app.Diag.NATIVE, invalid); return false; }
     }
 
     /** Sub-resource policy: exact engine origin, or a scheme that cannot reach local files.
