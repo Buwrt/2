@@ -1468,6 +1468,12 @@ public class JsBridge {
      * 写完回前端一个结果（ok / 失败），由前端决定提示什么。
      */
     /** 错误日志：自动保存到公共目录开关（默认关，不污染下载目录） */
+    /** 当前是否处于下载窗口（弹层据此显示「下载中，自动开启」） */
+    @JavascriptInterface
+    public boolean dlAutoSaveActive() {
+        try { return LogBook.downloadActive(); } catch (Throwable ignored) { return false; }
+    }
+
     @JavascriptInterface
     public boolean autoLogSaveOn() {
         try { return LogBook.autoSaveOn(activity); } catch (Throwable ignored) { return false; }
@@ -1937,6 +1943,7 @@ public class JsBridge {
 
     @JavascriptInterface
     public void download(String url, String filename) {
+        try { LogBook.markDownload(); } catch (Throwable ignored) { }
         downloadWithHeaders(url, filename, null);
     }
 
@@ -2431,6 +2438,7 @@ public class JsBridge {
      */
     @JavascriptInterface
     public void installApkChecked(String url, String filename, String headersJson, String expectedSha) {
+        try { LogBook.markDownload(); } catch (Throwable ignored) { }
         enqueueDownload(url, filename, headersJson, true, expectedSha);
     }
 
@@ -2438,11 +2446,13 @@ public class JsBridge {
     @JavascriptInterface
     public void installApkChecked(String url, String filename, String headersJson,
                                   String expectedSha, String category) {
+        try { LogBook.markDownload(); } catch (Throwable ignored) { }
         enqueueDownload(url, filename, headersJson, true, expectedSha, category);
     }
 
     @JavascriptInterface
     public void downloadWithHeaders(String url, String filename, String headersJson) {
+        try { LogBook.markDownload(); } catch (Throwable ignored) { }
         enqueueDownload(url, filename, headersJson, false, null);
     }
 
@@ -2450,6 +2460,7 @@ public class JsBridge {
     @JavascriptInterface
     public void downloadWithHeaders(String url, String filename, String headersJson,
                                     String category) {
+        try { LogBook.markDownload(); } catch (Throwable ignored) { }
         enqueueDownload(url, filename, headersJson, false, null, category);
     }
 
