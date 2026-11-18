@@ -1,6 +1,5 @@
 00b1b65afd6830efebe5ee0c3c83d37933ee9be0b50886a51efc8051f8c5947f  web/js/issue-extras.js
 03a449bfe26d9f803ae1702147c123d5de3274207cb9789006b290ebde8a4cd0  web/img/tips.png
-0aa8fc716b1ed28c06af6cd7cf8757aca77b74a27c2c2e53778d363084bec9f8  web/js/api.js
 1bb4b001e00b918efceeaa1ba05049aa9d15d8f623b30a787f35b37263626556  web/css/downloads-page.css
 24becfcfd19ceeec3abdc6517c856f9f84090095b476d011bc8f0815232541eb  web/js/page-downloads.js
 2b21706f9b3d9c1180c8186f0acf6aae3d5a4d21159c4d4436b6db764177f4ee  web/js/upload-attach.js
@@ -21,6 +20,7 @@
 7488abbd70e8f4f47996aba9928dbb7e001bec1a689f0de395ae5e36c44d5f69  web/css/totp-page.css
 7d9a251524df0b5ed05a9469fbb935b7cf7e382987c984f463e3be6dfcd4ef59  web/js/page-repo.js
 8ce88880f434d60ea67f6bb54a271ff859b23b0d017fdaea2dc8e139ca5d6cfd  web/js/embedded-token.js
+93b198270a360ade5ebc6e10137a2d4ae5306f7fcadf6bef6654daa4af0a8f93  web/js/api.js
 9aaf2107bda9e9036f6681b9a7631fde9dc4789ceb29cfb543efde35541ffd24  web/js/qr-live.js
 9faf82c9fefbeba40dc3a875d3ea7f50e9161148f4be6aab77f2a0885cbec2e3  web/js/app.js
 a0d9f015931a59048aa5bf0d6e7d714afb03bba606978fe3557e912d0467e5ff  web/css/translate.css
