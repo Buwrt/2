@@ -6,6 +6,6 @@
   "size": 161972653,
   "sha256": "09c20947fd023801357c6ce62ebc089169d3baf6bac40f92c5f34f4478d25c96",
   "src_sha256": "c1a7a01ad46818b7f497231dd446c3a6fc6f243723012ee69003efcf1f441271",
-  "notes": "底座 githup + DeepSeek Harness 内核；单图标同屏；官方签名；versionCode 1002020。",
+  "notes": "githup v1.2.20 合并版；全层错误日志：原生/前端/网络/下载/系统/算法/引擎/安全异常全部落盘，启动自检含手机侧问题，导出带设备环境快照；官方签名；versionCode 1002020。",
   "_说明": "更新检测的数据来源。App 会先查仓库的 Release，没有 Release 或取不到 APK 附件时读这个文件。apk 字段写 Release 附件直链（安装包不提交进仓库）。发新版本时改 version / apk / notes / size / sha256 / src_sha256 即可 —— 每次都必须是新包自己的值。历史上这里漏改过（版本号没变、值却是上一个包的），用户点「检查更新」会看到「你已是最新版本」，所以 size / sha256 一经改动就必须跟着重新对一遍。"
 }
