@@ -5,7 +5,7 @@
 正式安装包在 Release：
 https://github.com/Buwrt/2/releases/download/v1.2.20-merged/githup-v1.2.20.apk
 
-SHA-256 `e78bfb28ac3647b72a4d6191b29baa53b7a16e8534109e3378231139290eb4cb`
+SHA-256 `010ebca383fb72b9f2205b07432475893f03c0b1c784775995603605297b1018`
 
 桌面只有一个 `githup` 图标：GitHub 客户端与 AI 面板同屏共存。
 首次进入 githup AI 需展开 41426 个引擎文件，请耐心等进度走完；随后在 AI 界面里配置 DeepSeek API Key 即可对话。
