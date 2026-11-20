@@ -12,13 +12,15 @@ import android.widget.FrameLayout;
 import com.hubmobile.app.AiPanel;
 
 /**
- * 阶段 AG：折叠屏展开 / 大屏横持 —— 右半 githup 本体，左半 AI 全屏。
+ * 阶段 AJ17：只有两种形态，不按「设备是不是折叠屏 / 平板」分类。
+ *   · 合上（或普通直板手机）→ 普通形态，与直板机逐像素一致
+ *   · 物理展开，窗口够宽   → 另一种形态：右半 githup 本体、左半 AI 全高
  *
- * 判定口径沿用底座 1.2.20 已建立的「最小宽度」权威判据
- * （app.js applyDeviceClass：smallestScreenWidthDp >= 600 视为平板/折叠展开）：
- *   · smallestScreenWidthDp >= 600  → 大屏（折叠内屏 / 平板），手机横屏不算
+ * 判定只看**当前窗口**，不读设备型号、不给设备贴标签、不需要用户开关：
+ *   · smallestScreenWidthDp >= 600  → 屏幕确实变大了（手机横屏不算）
  *   · screenWidthDp >= 720          → 当前宽度足够左右各放一栏
- * 合上折叠屏时 smallestScreenWidthDp 回落 320–400，自动退出分栏。
+ * 合上时 smallestScreenWidthDp 回落 320–400，自动退出分栏回普通形态。
+ * 前端 applyDeviceClass() 同步收敛成 data-form=normal|split，不再有 tablet 档。
  *
  * 为什么不用 Jetpack WindowManager：本工程 dependencies 为空，
  * 且 Manifest 已声明 configChanges 包含 orientation|screenSize|screenLayout|
