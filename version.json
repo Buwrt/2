@@ -4,8 +4,8 @@
   "name": "githup v1.2.20（合并版 · 含 AI 引擎）",
   "published": "2026-11-10",
   "size": 161980912,
-  "sha256": "b1dd4c6cebd5d399182782c7700e604691dda59d3793e5dc07d4fe0c346850b2",
-  "src_sha256": "4c7bf1018429d1f1cce1a3eca18585f140cc6840e2a1d001d9fa84968b2bf067",
-  "notes": "githup v1.2.20；#16 挂后台重进图标错位修复（恢复快照后重画 SVG 与底栏指示器）；形态收敛为普通/展开两种，去掉平板大屏分类与 UI 缩放；官方签名；versionCode 1002020。",
+  "sha256": "27005f00515dd31ddf61974cd805a8b58401cc0323abab37b52ff271e96f5f3f",
+  "src_sha256": "51020fbb2fa005191ef86c9d013e2d65a9f52b2f5bdebc0c7264f9f8d1237794",
+  "notes": "底座 githup + DeepSeek Harness 内核；单图标同屏；官方签名；versionCode 1002020。",
   "_说明": "更新检测的数据来源。App 会先查仓库的 Release，没有 Release 或取不到 APK 附件时读这个文件。apk 字段写 Release 附件直链（安装包不提交进仓库）。发新版本时改 version / apk / notes / size / sha256 / src_sha256 即可 —— 每次都必须是新包自己的值。历史上这里漏改过（版本号没变、值却是上一个包的），用户点「检查更新」会看到「你已是最新版本」，所以 size / sha256 一经改动就必须跟着重新对一遍。"
 }
