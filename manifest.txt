@@ -1,0 +1,14 @@
+total 158200
+drwxr-xr-x  2 runner runner     4096 Nov 21 17:01 .
+drwxr-xr-x 13 runner runner     4096 Nov 21 17:01 ..
+-rw-r--r--  1 runner runner 33554432 Nov 21 17:01 apk.part.00
+-rw-r--r--  1 runner runner 33554432 Nov 21 17:01 apk.part.01
+-rw-r--r--  1 runner runner 33554432 Nov 21 17:01 apk.part.02
+-rw-r--r--  1 runner runner 33554432 Nov 21 17:01 apk.part.03
+-rw-r--r--  1 runner runner 27767280 Nov 21 17:01 apk.part.04
+-rw-r--r--  1 runner runner        0 Nov 21 17:01 manifest.txt
+44dd1dd2f60ab1425deded9c738fd83dbc4c3c4dffa9483f982785f041674b94  parts/apk.part.00
+ba2c9dd3b400385b042cbcc799beaf925a70a1881805d207dd4d2e9a5e578d47  parts/apk.part.01
+551e29c259b628ee765c7d0586e59fff4a35ccea2de2ecd5464a1f4e4426bf39  parts/apk.part.02
+7ec0b31c5b7b81d3ccbd095aeff8d71d869d6b33e4ef795f70adda3931d8e546  parts/apk.part.03
+eb562e6fb0dae970e2a3df72d3269518e0e61cbbc2bd6a6c710b9181b860a844  parts/apk.part.04
