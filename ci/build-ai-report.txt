@@ -4,7 +4,7 @@
 {"entries": 41426, "changed_files": 29, "replaced_hits": 39, "size": 159794879}
 
 --- work/verify.json ---
-{"size": 161985008, "sha256": "5c3bbfafad7961f252b144ab4b07f5851310e30933f4baacf1723cc9ce525af8", "payload_size": 159794879, "harness_assets": 122, "guard_ok": true}
+{"size": 161985008, "sha256": "65ca5193a25bf920049bf105d9abdf264007dc81fad5e7a0c33798c881b9e934", "payload_size": 159794879, "harness_assets": 122, "guard_ok": true}
 
 --- work/badging.txt ---
 package: name='com.hubmobile.app' versionCode='1002020' versionName='1.2.20' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34' compileSdkVersionCodename='14'
@@ -28,7 +28,7 @@ upload via curl below
 del old apk/ 404
 put sha 200
 put readme 200
-B5 src_sha256 = 9a5ec1a54c0674eb4999009c0989270546bbf746dcc05f4494263f0546dc0007
+B5 src_sha256 = e999188234a2e26e4d597697f88e9481064ec5a2b5b0ceab9c0412c41bc82b56
 put version.json 200
 
 
@@ -84,9 +84,9 @@ Warning: SDK processing. This version only understands SDK XML versions up to 3 
 > Task :app:processReleaseManifestForPackage
 > Task :app:processApplicationManifestReleaseForBundle
 > Task :app:collectReleaseDependencies
-> Task :app:processReleaseResources
-> Task :app:bundleReleaseResources
 > Task :app:compressReleaseAssets
+> Task :app:bundleReleaseResources
+> Task :app:processReleaseResources
 > Task :app:sdkReleaseDependencyData
 
 > Task :app:compileReleaseJavaWithJavac
@@ -105,7 +105,7 @@ Note: Recompile with -Xlint:deprecation for details.
 > Task :app:createReleaseApkListingFileRedirect
 > Task :app:assembleRelease
 
-BUILD SUCCESSFUL in 1m 1s
+BUILD SUCCESSFUL in 49s
 37 actionable tasks: 36 executed, 1 from cache
 
 
