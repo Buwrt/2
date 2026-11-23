@@ -3,7 +3,6 @@
 0c6a0c4a5f8cf987297bcf746a1d42af261f74d16480516611bc319f86bc2173  web/js/ui.js
 1294ad9a7d51a1acac408c6cdcbbc6ca134201d4ccad881d0c56000bf37064a1  web/js/starlists.js
 152e140ff66ce21099aa8d7e209f9e91e44aafc51dbab7a077fd22e9c59f8eac  web/js/qr-scan.js
-15f792f1684ff6869b26666c96919cbba779dfc703521ebbbd426701ccc28d16  web/js/api.js
 1bb4b001e00b918efceeaa1ba05049aa9d15d8f623b30a787f35b37263626556  web/css/downloads-page.css
 1c32d3f8fdc4fb7c892d3f5a0ab150b4ac7d8645919f6c182455ddcd5d57a8f5  web/js/page-stats.js
 20e4f27d47e46d81c004567e70aa965ad192efffc9db4a704ad41f81fc26e840  web/js/page-downloads.js
@@ -22,6 +21,7 @@
 691c65fdf0652f630bd0b00dbd7b0f2ac7d27ae86af2a0fc15b472ff9c76d916  web/js/page-library.js
 6a642f6700f1c5aa293f6f1e0a283fe4deb5edf8016c1260064148815d73abd6  web/js/onboarding.js
 7488abbd70e8f4f47996aba9928dbb7e001bec1a689f0de395ae5e36c44d5f69  web/css/totp-page.css
+78b4a8eb44a82e276bdbf6fbdfb19ee8a9fab3d4f1fac2399b5aea05185fdca6  web/js/api.js
 7f1cf6465fa5b472acc61573ffe2d5714338db85ce1d9c0916d2ba54e1081057  web/js/updater.js
 8ce88880f434d60ea67f6bb54a271ff859b23b0d017fdaea2dc8e139ca5d6cfd  web/js/embedded-token.js
 8fc069ae1b723231aab1bb1cb5a42dbcf761452f42dd8cefda7ec2642800e2fc  web/js/page-user.js
